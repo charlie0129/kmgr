@@ -313,6 +313,13 @@ enum NativeMainMenuBuilder {
         )
         addResponderItem(
             to: menu,
+            title: "Enter Subresource in New Workspace",
+            action: #selector(ClusterWorkspaceWindowController.enterResourceInNewWorkspace(_:)),
+            keyEquivalent: "\r",
+            modifiers: [.command]
+        )
+        addResponderItem(
+            to: menu,
             title: "Show Node",
             action: #selector(ClusterWorkspaceWindowController.showPodNode(_:)),
             keyEquivalent: "o",
@@ -327,6 +334,13 @@ enum NativeMainMenuBuilder {
         )
         addResponderItem(
             to: menu,
+            title: "Describe in New Window",
+            action: #selector(ClusterWorkspaceWindowController.openResourceDetailsInNewWindow(_:)),
+            keyEquivalent: "d",
+            modifiers: [.command]
+        )
+        addResponderItem(
+            to: menu,
             title: "Open YAML in Details",
             action: #selector(ClusterWorkspaceWindowController.openResourceYAML(_:)),
             keyEquivalent: "y",
@@ -337,13 +351,19 @@ enum NativeMainMenuBuilder {
             title: "Open YAML in New Window",
             action: #selector(ClusterWorkspaceWindowController.openResourceYAMLSnapshot(_:)),
             keyEquivalent: "y",
-            modifiers: [.shift]
+            modifiers: [.command]
+        )
+        addResponderItem(
+            to: menu,
+            title: "Edit YAML in New Window",
+            action: #selector(ClusterWorkspaceWindowController.editResourceYAMLInNewWindow(_:)),
+            keyEquivalent: "e",
+            modifiers: []
         )
         addResponderItem(
             to: menu,
             title: "Open Events",
             action: #selector(ClusterWorkspaceWindowController.openResourceEvents(_:)),
-            keyEquivalent: "e",
             modifiers: []
         )
         menu.addItem(.separator())

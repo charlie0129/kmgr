@@ -2,6 +2,32 @@ import AppKit
 import KmgrCore
 import OSLog
 
+/// A request for a sibling full workspace. The request contains only
+/// navigation intent; the application opens a fresh session for the same
+/// opaque kubeconfig context, allowing the engine to attach it to shared
+/// discovery/LIST/WATCH caches.
+struct ClusterWorkspaceOpenRequest: Sendable {
+    var contextReference: String
+    var namespaceScope: NamespaceSelection
+    var resource: GVR?
+    var filter: String
+    var subresource: ResourceIdentity?
+
+    init(
+        contextReference: String,
+        namespaceScope: NamespaceSelection,
+        resource: GVR? = nil,
+        filter: String = "",
+        subresource: ResourceIdentity? = nil
+    ) {
+        self.contextReference = contextReference
+        self.namespaceScope = namespaceScope
+        self.resource = resource
+        self.filter = filter
+        self.subresource = subresource
+    }
+}
+
 typealias NamespacePickerPresenter = (NSPopUpButton, Any?) -> Void
 typealias NamespacePickerKeyWindowCheck = (NSWindow) -> Bool
 
@@ -98,6 +124,10 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     var onShowColumns: ((ResourceColumnsRequest) -> Void)?
     var onOpenLogWindow: ((LogWindowController) -> Void)?
     var onOpenTerminalWindow: ((TerminalWindowController) -> Void)?
+    /// Requests a sibling full workspace. The application owns session
+    /// creation so every sibling receives a distinct session while the engine
+    /// can reuse its authority/cache state.
+    var onOpenNewWorkspace: ((ClusterWorkspaceOpenRequest) -> Void)?
     var onRestorationCheckpoint: ((ClusterWindowRestorationRecord) -> Void)?
     var onWindowSizeCheckpoint: ((ClusterWorkspaceWindowSize) -> Void)?
     var contextualShortcutsDidChange: (() -> Void)?
@@ -108,6 +138,10 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
 
     var openYAMLSnapshotWindows: [YAMLSnapshotWindowController] {
         Array(yamlSnapshotWindowControllers.values)
+    }
+
+    var openObjectDetailWindows: [ObjectDetailWindowController] {
+        Array(detailWindowControllers.values)
     }
 
     private let provider: any WorkspaceResourceProviding
@@ -137,6 +171,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     private var deleteResourcesController: DeleteResourcesWindowController?
     private var resourceMutationController: ResourceMutationWindowController?
     private var metadataEditorController: ResourceMetadataEditorWindowController?
+    private var detailWindowControllers: [ResourceUID: ObjectDetailWindowController] = [:]
     private var yamlSnapshotWindowControllers: [ResourceUID: YAMLSnapshotWindowController] = [:]
     private var didStartWorkspace = false
     private var isClosing = false
@@ -289,6 +324,15 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         workspaceController.onOpenYAMLSnapshot = { [weak self] identity in
             self?.showYAMLSnapshot(identity)
         }
+        workspaceController.onOpenYAMLSnapshotForEditing = { [weak self] identity in
+            self?.showYAMLSnapshot(identity, initiallyEditing: true)
+        }
+        workspaceController.onOpenDetailsInNewWindow = { [weak self] identity in
+            self?.showObjectDetailsInNewWindow(identity)
+        }
+        workspaceController.onOpenNewWorkspace = { [weak self] request in
+            self?.onOpenNewWorkspace?(request)
+        }
         workspaceController.onOpenExec = { [weak self] target in
             self?.openAutomaticExec(target)
         }
@@ -345,7 +389,15 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     /// No operation is replayed from this transition.
     func engineDidDisconnect(message: String) {
         yamlSnapshotWindowControllers.values.forEach { $0.engineDidDisconnect() }
+        detailWindowControllers.values.forEach { $0.engineDidDisconnect() }
         workspaceController.engineDidDisconnect(message: message)
+    }
+
+    /// Queues a navigation request originating in another workspace. The
+    /// request is consumed after authenticated discovery so a subresource can
+    /// use the receiving workspace's resource catalog and session identity.
+    func open(_ request: ClusterWorkspaceOpenRequest) {
+        workspaceController.openNewWorkspaceRequest(request)
     }
 
     func engineDidRestart() {
@@ -372,6 +424,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         window?.title = "\(clusterPresentation.titlePrefix) — \(Product.applicationName)"
         window?.subtitle = recoveredSession.serverHostname
         yamlSnapshotWindowControllers.values.forEach { $0.recover(with: recoveredSession) }
+        detailWindowControllers.values.forEach { $0.recover(with: recoveredSession) }
         workspaceController.recover(with: recoveredSession)
         restoration.state = workspaceController.restorationState()
         onRestorationCheckpoint?(restoration)
@@ -500,6 +553,9 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         for controller in yamlSnapshotWindowControllers.values {
             controller.stop()
         }
+        for controller in detailWindowControllers.values {
+            controller.stop()
+        }
         workspaceController.stop()
     }
 
@@ -511,6 +567,9 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         let yamlWindows = Array(yamlSnapshotWindowControllers.values)
         yamlSnapshotWindowControllers.removeAll()
         yamlWindows.forEach { $0.close() }
+        let detailWindows = Array(detailWindowControllers.values)
+        detailWindowControllers.removeAll()
+        detailWindows.forEach { $0.close() }
         if isAuthenticated {
             Task { [provider, session] in
                 await provider.closeSession(sessionID: session.sessionID)
@@ -519,12 +578,16 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         onClose?()
     }
 
-    private func showYAMLSnapshot(_ identity: ResourceIdentity) {
+    private func showYAMLSnapshot(
+        _ identity: ResourceIdentity,
+        initiallyEditing: Bool = false
+    ) {
         guard isAuthenticated, identity.clusterSessionID == session.sessionID else {
             NSSound.beep()
             return
         }
         if let current = yamlSnapshotWindowControllers[identity.uid] {
+            if initiallyEditing { current.beginEditingWhenReady() }
             current.showWindow(nil)
             current.window?.makeKeyAndOrderFront(nil)
             return
@@ -533,7 +596,8 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
             session: session,
             identity: identity,
             provider: objectDetailProvider,
-            tableLayoutStore: tableLayoutStore
+            tableLayoutStore: tableLayoutStore,
+            initiallyEditing: initiallyEditing
         )
         controller.onClose = { [weak self, weak controller] in
             guard self?.yamlSnapshotWindowControllers[identity.uid] === controller else { return }
@@ -542,6 +606,62 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         yamlSnapshotWindowControllers[identity.uid] = controller
         controller.showWindow(nil)
         controller.window?.makeKeyAndOrderFront(nil)
+    }
+
+    private func showObjectDetailsInNewWindow(_ identity: ResourceIdentity) {
+        guard isAuthenticated, identity.clusterSessionID == session.sessionID else {
+            NSSound.beep()
+            return
+        }
+        Task { [recentObjectStore] in await recentObjectStore.record(identity) }
+        if let current = detailWindowControllers[identity.uid] {
+            current.showWindow(nil)
+            current.window?.makeKeyAndOrderFront(nil)
+            return
+        }
+        let eventsController = workspaceController.makeObjectEventsController(for: identity)
+        let controller = ObjectDetailWindowController(
+            session: session,
+            identity: identity,
+            provider: objectDetailProvider,
+            tableLayoutStore: tableLayoutStore,
+            eventsController: eventsController
+        )
+        controller.onOpenEvents = { [weak self] identity in
+            self?.openEventsInNewWorkspace(for: identity)
+        }
+        controller.onEditMetadata = { [weak self, weak controller] identity, kind, key in
+            guard let self, let parent = controller?.window else { return }
+            self.showMetadataEditor(
+                identity,
+                kind: kind,
+                initialKey: key,
+                parentWindow: parent,
+                onSaved: { [weak controller] in
+                    controller?.refreshAfterMetadataMutation(identity)
+                }
+            )
+        }
+        controller.onClose = { [weak self, weak controller] in
+            guard let self, let controller,
+                self.detailWindowControllers[identity.uid] === controller
+            else { return }
+            self.detailWindowControllers.removeValue(forKey: identity.uid)
+        }
+        controller.contextualShortcutsDidChange = { [weak self] in
+            self?.contextualShortcutsDidChange?()
+        }
+        detailWindowControllers[identity.uid] = controller
+        controller.showWindow(nil)
+        controller.window?.makeKeyAndOrderFront(nil)
+    }
+
+    private func openEventsInNewWorkspace(for identity: ResourceIdentity) {
+        guard let request = workspaceController.objectEventsWorkspaceRequest(for: identity) else {
+            NSSound.beep()
+            return
+        }
+        onOpenNewWorkspace?(request)
     }
 
     func showPortForwardConfiguration(_ identity: ResourceIdentity) {
@@ -826,9 +946,11 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     private func showMetadataEditor(
         _ identity: ResourceIdentity,
         kind: ResourceMetadataKind,
-        initialKey: String?
+        initialKey: String?,
+        parentWindow: NSWindow? = nil,
+        onSaved: (() -> Void)? = nil
     ) {
-        guard let window, isAuthenticated,
+        guard let sheetParent = parentWindow ?? window, isAuthenticated,
             identity.clusterSessionID == session.sessionID,
             metadataEditorController == nil,
             resourceMutationController == nil
@@ -844,13 +966,14 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         )
         controller.onSaved = { [weak workspaceController] in
             workspaceController?.refreshDetailAfterMetadataMutation(identity)
+            onSaved?()
         }
         controller.onDismiss = { [weak self, weak controller] in
             guard self?.metadataEditorController === controller else { return }
             self?.metadataEditorController = nil
         }
         metadataEditorController = controller
-        controller.beginSheet(for: window)
+        controller.beginSheet(for: sheetParent)
     }
 
     @objc func showCommandPalette(_ sender: Any?) {
@@ -882,11 +1005,20 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         workspaceController.extendResourceSelectionDown(sender)
     }
     @objc func enterResource(_ sender: Any?) { workspaceController.enterResource(sender) }
+    @objc func enterResourceInNewWorkspace(_ sender: Any?) {
+        workspaceController.enterResourceInNewWorkspace(sender)
+    }
     @objc func showPodNode(_ sender: Any?) { workspaceController.showPodNode(sender) }
     @objc func openResourceDetails(_ sender: Any?) { workspaceController.openResourceDetails(sender) }
+    @objc func openResourceDetailsInNewWindow(_ sender: Any?) {
+        workspaceController.openResourceDetailsInNewWindow(sender)
+    }
     @objc func openResourceYAML(_ sender: Any?) { workspaceController.openResourceYAML(sender) }
     @objc func openResourceYAMLSnapshot(_ sender: Any?) {
         workspaceController.openResourceYAMLSnapshot(sender)
+    }
+    @objc func editResourceYAMLInNewWindow(_ sender: Any?) {
+        workspaceController.editResourceYAMLInNewWindow(sender)
     }
     @objc func openResourceEvents(_ sender: Any?) { workspaceController.openResourceEvents(sender) }
     @objc func openResourceLogs(_ sender: Any?) { workspaceController.openResourceLogs(sender) }
@@ -927,10 +1059,13 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         case #selector(extendResourceSelectionUp(_:)): command = .extendUp
         case #selector(extendResourceSelectionDown(_:)): command = .extendDown
         case #selector(enterResource(_:)): command = .enter
+        case #selector(enterResourceInNewWorkspace(_:)): command = .enterInNewWorkspace
         case #selector(showPodNode(_:)): command = .showNode
         case #selector(openResourceDetails(_:)): command = .open
+        case #selector(openResourceDetailsInNewWindow(_:)): command = .openInNewWindow
         case #selector(openResourceYAML(_:)): command = .openYAML
         case #selector(openResourceYAMLSnapshot(_:)): command = .openYAMLSnapshot
+        case #selector(editResourceYAMLInNewWindow(_:)): command = .editYAMLInNewWindow
         case #selector(openResourceEvents(_:)): command = .openEvents
         case #selector(openResourceLogs(_:)): command = .openLogs
         case #selector(openResourceExec(_:)): command = .openExec
@@ -1013,6 +1148,8 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     /// until the toolbar's menu is populated so its default item cannot
     /// overwrite the restored namespace.
     private var pendingNamespaceScope: NamespaceSelection?
+    private var pendingNewWorkspaceRequest: ClusterWorkspaceOpenRequest?
+    private var hasCompletedInitialDiscovery = false
     private struct ObjectEventsTarget {
         var resource: DiscoveredResource
         var scope: NamespaceSelection
@@ -1020,7 +1157,10 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     }
     var onStartPortForward: ((ResourceIdentity) -> Void)?
     var onShowColumns: ((ResourceColumnsRequest) -> Void)?
+    var onOpenDetailsInNewWindow: ((ResourceIdentity) -> Void)?
     var onOpenYAMLSnapshot: ((ResourceIdentity) -> Void)?
+    var onOpenYAMLSnapshotForEditing: ((ResourceIdentity) -> Void)?
+    var onOpenNewWorkspace: ((ClusterWorkspaceOpenRequest) -> Void)?
     var onOpenLogs: ((LogOpenRequest) -> Void)?
     var onOpenExec: ((PodExecTarget) -> Void)?
     var onConfigureExec: ((PodExecTarget) -> Void)?
@@ -1138,6 +1278,19 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         sidebarController.onResourceMouseSelectionFinished = { [weak self] in
             self?.focusResourceTableAfterSidebarInteraction()
         }
+        sidebarController.onOpenResourceInNewWorkspace = { [weak self] resource in
+            guard let self else { return }
+            onOpenNewWorkspace?(ClusterWorkspaceOpenRequest(
+                contextReference: session.contextReference,
+                namespaceScope: resource.namespaced
+                    ? selectedNamespaceScope() : NamespaceSelection(),
+                resource: GVR(
+                    group: resource.group,
+                    version: resource.version,
+                    resource: resource.resource
+                )
+            ))
+        }
         sidebarController.onResourcesChanged = { [weak self] resources in
             self?.resources = resources
         }
@@ -1147,6 +1300,9 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         contentController.onOpenObject = { [weak self] identity, tab in
             self?.showObject(identity, initialTab: tab)
         }
+        contentController.onOpenDetailsInNewWindow = { [weak self] identity in
+            self?.onOpenDetailsInNewWindow?(identity)
+        }
         contentController.onOpenEvents = { [weak self] identity in
             self?.openEvents(for: identity)
         }
@@ -1155,6 +1311,18 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             invalidateObjectOpenTask()
             Task { [recentObjectStore] in await recentObjectStore.record(identity) }
             onOpenYAMLSnapshot?(identity)
+        }
+        contentController.onOpenYAMLSnapshotForEditing = { [weak self] identity in
+            guard let self else { return }
+            invalidateObjectOpenTask()
+            Task { [recentObjectStore] in await recentObjectStore.record(identity) }
+            onOpenYAMLSnapshotForEditing?(identity)
+        }
+        contentController.onOpenNewWorkspace = { [weak self] request in
+            self?.onOpenNewWorkspace?(request)
+        }
+        contentController.onOpenEventsInNewWorkspace = { [weak self] identity in
+            self?.openEventsInNewWorkspace(for: identity)
         }
         contentController.onEnterObject = { [weak self] identity in
             self?.enterObject(identity)
@@ -1239,6 +1407,8 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             } else {
                 sidebarController.selectDefaultResource()
             }
+            hasCompletedInitialDiscovery = true
+            consumePendingNewWorkspaceRequestIfReady()
         }
         loadNamespaces()
         startPortForwardObservation()
@@ -1260,6 +1430,94 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         )
     }
 
+    /// Receives a request from the application after a sibling session has
+    /// been opened. Subresource requests wait for discovery, because the
+    /// receiving session must use its own catalog and UID namespace.
+    func openNewWorkspaceRequest(_ request: ClusterWorkspaceOpenRequest) {
+        pendingNewWorkspaceRequest = request
+        consumePendingNewWorkspaceRequestIfReady()
+    }
+
+    private func consumePendingNewWorkspaceRequestIfReady() {
+        guard hasCompletedInitialDiscovery,
+            let request = pendingNewWorkspaceRequest
+        else { return }
+        pendingNewWorkspaceRequest = nil
+        guard let targetGVR = request.resource,
+            let target = resources.first(where: {
+                $0.group == targetGVR.group
+                    && $0.version == targetGVR.version
+                    && $0.resource == targetGVR.resource
+                    && $0.verbs.contains("list")
+            })
+        else {
+            NSSound.beep()
+            return
+        }
+
+        if let identity = request.subresource {
+            openSubresourceInNewWorkspace(
+                identity,
+                parent: target,
+                scope: request.namespaceScope,
+                filter: request.filter
+            )
+        } else {
+            showResourceList(resume: false)
+            let scope = target.namespaced ? request.namespaceScope : NamespaceSelection()
+            applyNamespaceScopeSelection(scope)
+            contentController.open(
+                resource: target,
+                scope: scope,
+                initialFilter: request.filter,
+                reason: .commandPaletteSelection
+            )
+            sidebarController.selectResource(matchingCurrent: target.id)
+            // The shell was persisted before discovery so it could be shown
+            // immediately. Replace that temporary record with the requested
+            // destination once the real catalog has accepted it.
+            checkpointRestoration()
+            view.window?.makeFirstResponder(contentController.tableResponder)
+        }
+    }
+
+    private func openSubresourceInNewWorkspace(
+        _ identity: ResourceIdentity,
+        parent: DiscoveredResource,
+        scope: NamespaceSelection,
+        filter: String
+    ) {
+        var rebound = identity
+        rebound.clusterSessionID = session.sessionID
+        let effectiveScope = parent.namespaced ? scope : NamespaceSelection()
+        let returnState = ResourceNavigationState(
+            group: parent.group,
+            version: parent.version,
+            resource: parent.resource,
+            kind: parent.kind,
+            namespaced: parent.namespaced,
+            namespaceSelection: effectiveScope,
+            filter: filter
+        )
+        showResourceList(resume: false)
+        applyNamespaceScopeSelection(effectiveScope)
+        contentController.open(
+            resource: parent,
+            scope: effectiveScope,
+            initialFilter: filter,
+            reason: .resourceDrillDown
+        )
+        if ObjectDataViewController.supports(rebound) {
+            showDataSubresource(rebound, returnState: returnState)
+            return
+        }
+        guard ResourceDrillDownPlanner.hasPotentialTarget(rebound) else {
+            NSSound.beep()
+            return
+        }
+        openDrillDown(rebound, returnState: returnState)
+    }
+
     @discardableResult
     func applySavedColumns(
         _ definitions: [ColumnDefinition],
@@ -1278,6 +1536,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         // Discovery is session-bound. In particular, a restored shell must not
         // accept an exact-GVR result from the helper generation that just died.
         sidebarController.stop()
+        hasCompletedInitialDiscovery = false
         detailController?.engineDidDisconnect()
         dataController?.engineDidDisconnect()
         podContainerController?.setNetworkActionsEnabled(false)
@@ -1314,6 +1573,11 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
 
     func engineRecoveryFailed(_ error: Error) {
         let presentation = UserFacingErrorPresentation(error)
+        if !isAuthenticated {
+            // A failed shell may be retried later, but the original gesture
+            // must not be replayed against a different catalog/session.
+            pendingNewWorkspaceRequest = nil
+        }
         connectionActivityView.setState(.failed, detail: presentation.detailedText)
         publishWorkspaceOperation(WorkspaceStatus(
             presentation.inlineText,
@@ -1398,8 +1662,15 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
                 // resource behavior when rediscovery fails. Only an initial
                 // shell still needs its synthetic target revoked.
                 guard restoredShellState != nil else { return }
+                // Do not leave a sibling destination queued for a later
+                // recovery after this shell's discovery failed.
+                pendingNewWorkspaceRequest = nil
                 sidebarController.discardRestoredResource()
                 contentController.rejectRestoredResourceValidation(error)
+            }
+            if case .success = result {
+                hasCompletedInitialDiscovery = true
+                consumePendingNewWorkspaceRequestIfReady()
             }
         }
         loadNamespaces()
@@ -1897,11 +2168,20 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     @objc func extendResourceSelectionUp(_ sender: Any?) { contentController.performCommand(.extendUp) }
     @objc func extendResourceSelectionDown(_ sender: Any?) { contentController.performCommand(.extendDown) }
     @objc func enterResource(_ sender: Any?) { contentController.performCommand(.enter) }
+    @objc func enterResourceInNewWorkspace(_ sender: Any?) {
+        contentController.performCommand(.enterInNewWorkspace)
+    }
     @objc func showPodNode(_ sender: Any?) { contentController.performCommand(.showNode) }
     @objc func openResourceDetails(_ sender: Any?) { contentController.performCommand(.open) }
+    @objc func openResourceDetailsInNewWindow(_ sender: Any?) {
+        contentController.performCommand(.openInNewWindow)
+    }
     @objc func openResourceYAML(_ sender: Any?) { contentController.performCommand(.openYAML) }
     @objc func openResourceYAMLSnapshot(_ sender: Any?) {
         contentController.performCommand(.openYAMLSnapshot)
+    }
+    @objc func editResourceYAMLInNewWindow(_ sender: Any?) {
+        contentController.performCommand(.editYAMLInNewWindow)
     }
     @objc func openResourceEvents(_ sender: Any?) { contentController.performCommand(.openEvents) }
     @objc func openResourceLogs(_ sender: Any?) { performNetworkCommand(.openLogs) }
@@ -2067,14 +2347,62 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             checkpointRestoration()
             view.window?.makeFirstResponder(contentController.tableResponder)
         }
+        controller.onOpenResourceWithDestination = { [weak self] resource, destination in
+            guard let self else { return }
+            switch destination {
+            case .currentWorkspace:
+                invalidateObjectOpenTask()
+                showResourceList(resume: false)
+                contentController.open(
+                    resource: resource,
+                    scope: selectedNamespaceScope(),
+                    reason: .commandPaletteSelection
+                )
+                checkpointRestoration()
+                view.window?.makeFirstResponder(contentController.tableResponder)
+            case .alternateWindow:
+                onOpenNewWorkspace?(ClusterWorkspaceOpenRequest(
+                    contextReference: session.contextReference,
+                    namespaceScope: resource.namespaced
+                        ? selectedNamespaceScope() : NamespaceSelection(),
+                    resource: GVR(
+                        group: resource.group,
+                        version: resource.version,
+                        resource: resource.resource
+                    )
+                ))
+            }
+        }
         controller.onChangeNamespace = { [weak self] namespace in
             self?.selectNamespace(namespace)
         }
         controller.onOpenObject = { [weak self] identity in
             self?.freshOpen(identity)
         }
+        controller.onOpenObjectWithDestination = { [weak self] identity, destination in
+            guard let self else { return }
+            switch destination {
+            case .currentWorkspace:
+                freshOpen(identity)
+            case .alternateWindow:
+                onOpenDetailsInNewWindow?(identity)
+            }
+        }
         controller.onOperation = { [weak self] operation, capturedContext in
             self?.performPaletteOperation(operation, capturedContext: capturedContext)
+        }
+        controller.onOperationWithDestination = {
+            [weak self] operation, capturedContext, destination in
+            guard let self else { return }
+            switch destination {
+            case .currentWorkspace:
+                performPaletteOperation(operation, capturedContext: capturedContext)
+            case .alternateWindow:
+                performPaletteAlternateOperation(
+                    operation,
+                    capturedContext: capturedContext
+                )
+            }
         }
         controller.onClose = { [weak self, weak controller] in
             guard self?.paletteController === controller else { return }
@@ -2110,6 +2438,60 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         )
     }
 
+    private func performPaletteAlternateOperation(
+        _ operation: PaletteOperation,
+        capturedContext: CommandContext
+    ) {
+        guard CommandValidator.isEnabled(operation.commandID, in: capturedContext) else {
+            NSSound.beep()
+            return
+        }
+        if let reference = capturedContext.selectionReference {
+            guard reference.sessionID == session.sessionID else {
+                NSSound.beep()
+                return
+            }
+        } else {
+            guard let identity = capturedContext.selectedIdentities.only,
+                identity.clusterSessionID == session.sessionID
+            else {
+                NSSound.beep()
+                return
+            }
+        }
+        // Route through the resource-table command authority even for an
+        // alternate destination. In particular, a Command-K selection can be
+        // backed by an immutable engine token with no materialized identity;
+        // `performCapturedCommand` pages that token safely before invoking the
+        // destination callback instead of making ⌘Return fail for that case.
+        switch operation {
+        case .openDetails:
+            contentController.performCapturedCommand(
+                .openInNewWindow,
+                context: capturedContext
+            )
+        case .openYAML:
+            contentController.performCapturedCommand(
+                .openYAMLSnapshot,
+                context: capturedContext
+            )
+        case .editYAML:
+            contentController.performCapturedCommand(
+                .editYAMLInNewWindow,
+                context: capturedContext
+            )
+        case .openEvents:
+            contentController.performCapturedCommand(
+                .openEventsInNewWorkspace,
+                context: capturedContext
+            )
+        default:
+            // Operations without a meaningful alternate destination retain
+            // their normal current-workspace behavior.
+            performPaletteOperation(operation, capturedContext: capturedContext)
+        }
+    }
+
     private func freshOpen(_ identity: ResourceIdentity) {
         // The Details controller performs the one UID-pinned authoritative GET
         // it needs. A palette preflight used to fetch the same object first,
@@ -2135,6 +2517,21 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             .captureSelectionOperationTicket(for: identity)
         else { return }
 
+        openDrillDown(
+            identity,
+            returnState: returnState,
+            sourceSelectionTicket: sourceSelectionTicket
+        )
+    }
+
+    /// Opens one planned drill-down from either the current resource list or a
+    /// newly authenticated sibling. A current-list launch carries an immutable
+    /// selection ticket; a sibling has no source selection to revalidate.
+    private func openDrillDown(
+        _ identity: ResourceIdentity,
+        returnState: ResourceNavigationState,
+        sourceSelectionTicket: ResourceSelectionOperationTicket? = nil
+    ) {
         let revision = beginObjectOpenTask()
         publishWorkspaceOperation(WorkspaceStatus(
             "Loading \(identity.name) subresource…",
@@ -2152,13 +2549,16 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
                 )
                 guard !Task.isCancelled, objectOpenRevision == revision else { return }
                 publishWorkspaceOperation(nil)
-                guard detail.identity == identity,
-                    drillDownSourceIsCurrent(
+                guard detail.identity == identity else { return }
+                if let sourceSelectionTicket,
+                    !drillDownSourceIsCurrent(
                         returnState: returnState,
                         selectionTicket: sourceSelectionTicket
-                    ),
-                    let plan = ResourceDrillDownPlanner.plan(for: detail)
-                else { return }
+                    )
+                {
+                    return
+                }
+                guard let plan = ResourceDrillDownPlanner.plan(for: detail) else { return }
 
                 switch plan {
                 case .resource(let query):
@@ -2312,6 +2712,17 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         return true
     }
 
+    private func openEventsInNewWorkspace(for identity: ResourceIdentity) {
+        guard let request = objectEventsWorkspaceRequest(for: identity) else {
+            NSSound.beep()
+            return
+        }
+        onOpenNewWorkspace?(request)
+    }
+
+    /// Navigate to the complete UID-filtered Events list in this workspace.
+    /// Alternate destinations (Details Summary, auxiliary Details, and
+    /// Command-Palette ⌘Return) use `openEventsInNewWorkspace` instead.
     private func openEvents(for identity: ResourceIdentity) {
         guard let target = objectEventsTarget(for: identity) else {
             NSSound.beep()
@@ -2329,6 +2740,39 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         sidebarController.selectResource(matchingCurrent: target.resource.id)
         checkpointRestoration()
         view.window?.makeFirstResponder(contentController.tableResponder)
+    }
+
+    /// Builds the same recent-events controller used by embedded Details for
+    /// an auxiliary Details window. Keeping the planner here guarantees both
+    /// presentations use the identical UID field selector and namespace.
+    func makeObjectEventsController(
+        for identity: ResourceIdentity
+    ) -> (any ObjectDetailEventsControlling)? {
+        objectEventsTarget(for: identity).map { target in
+            ObjectDetailRecentEventsController(
+                session: session,
+                provider: provider,
+                resource: target.resource,
+                scope: target.scope,
+                filter: target.filter
+            )
+        }
+    }
+
+    func objectEventsWorkspaceRequest(
+        for identity: ResourceIdentity
+    ) -> ClusterWorkspaceOpenRequest? {
+        guard let target = objectEventsTarget(for: identity) else { return nil }
+        return ClusterWorkspaceOpenRequest(
+            contextReference: session.contextReference,
+            namespaceScope: target.scope,
+            resource: GVR(
+                group: target.resource.group,
+                version: target.resource.version,
+                resource: target.resource.resource
+            ),
+            filter: target.filter
+        )
     }
 
     private func objectEventsTarget(
@@ -2463,7 +2907,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             self?.onEditMetadata?(identity, kind, key)
         }
         controller.onOpenEvents = { [weak self] identity in
-            self?.openEvents(for: identity)
+            self?.openEventsInNewWorkspace(for: identity)
         }
         controller.onContextualShortcutsChanged = { [weak self] in
             self?.onContextualShortcutsChanged?()
@@ -2736,12 +3180,24 @@ private final class ResourceSidebarOutlineView: NSOutlineView {
     /// selection delegate is not called when the clicked row is already
     /// selected, so this seam also covers that otherwise-silent interaction.
     var onResourceMouseSelectionFinished: (() -> Void)?
+    /// Command-click is a destination gesture, not a selection gesture. The
+    /// callback fires before AppKit mutates the current workspace selection so
+    /// the source list stays exactly where it was.
+    var onCommandResourceClick: ((DiscoveredResource) -> Void)?
 
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
         let clickedRow = row(at: point)
         let clickedResource = clickedRow >= 0
             && item(atRow: clickedRow) is DiscoveredResource
+
+        if event.modifierFlags.contains(.command),
+            event.modifierFlags.intersection([.shift, .control, .option]).isEmpty,
+            let resource = clickedRow >= 0 ? item(atRow: clickedRow) as? DiscoveredResource : nil
+        {
+            onCommandResourceClick?(resource)
+            return
+        }
 
         super.mouseDown(with: event)
 
@@ -2844,6 +3300,7 @@ private final class ResourceSidebarViewController: NSViewController,
     private var suppressSelectionCallbacks = false
     var onSelectResource: ((DiscoveredResource) -> Void)?
     var onResourceMouseSelectionFinished: (() -> Void)?
+    var onOpenResourceInNewWorkspace: ((DiscoveredResource) -> Void)?
     var onResourcesChanged: (([DiscoveredResource]) -> Void)?
     private(set) var workspaceStatus = WorkspaceStatus(
         "Discovering resource kinds…",
@@ -2891,6 +3348,9 @@ private final class ResourceSidebarViewController: NSViewController,
         outlineView.autoresizesOutlineColumn = true
         outlineView.onResourceMouseSelectionFinished = { [weak self] in
             self?.onResourceMouseSelectionFinished?()
+        }
+        outlineView.onCommandResourceClick = { [weak self] resource in
+            self?.onOpenResourceInNewWorkspace?(resource)
         }
         outlineView.setAccessibilityLabel("Kubernetes resource kinds")
         outlineView.registerForDraggedTypes([Self.pinPasteboardType])
@@ -3695,8 +4155,12 @@ private final class ResourceListViewController: NSViewController,
     var onEnterObject: ((ResourceIdentity) -> Void)?
     var onShowPodNode: ((ResourceIdentity) -> Void)?
     var onOpenObject: ((ResourceIdentity, ObjectDetailInitialTab) -> Void)?
+    var onOpenDetailsInNewWindow: ((ResourceIdentity) -> Void)?
     var onOpenEvents: ((ResourceIdentity) -> Void)?
     var onOpenYAMLSnapshot: ((ResourceIdentity) -> Void)?
+    var onOpenYAMLSnapshotForEditing: ((ResourceIdentity) -> Void)?
+    var onOpenNewWorkspace: ((ClusterWorkspaceOpenRequest) -> Void)?
+    var onOpenEventsInNewWorkspace: ((ResourceIdentity) -> Void)?
     var onStartPortForward: ((ResourceIdentity) -> Void)?
     var onShowColumns: ((ResourceColumnsRequest) -> Void)?
     var onOpenLogs: ((LogOpenRequest) -> Void)?
@@ -3837,11 +4301,10 @@ private final class ResourceListViewController: NSViewController,
         return ContextualShortcutCatalog.resourceList(
             title: title,
             availability: ResourceListShortcutAvailability(
-                canEnterSubresource: canUse(.enter),
+                canEnterSubresource: canUse(.enter) || canUse(.enterInNewWorkspace),
                 canShowNode: canUse(.showNode),
-                canOpenDetails: canUse(.open),
+                canOpenDetails: canUse(.open) || canUse(.openInNewWindow),
                 canOpenYAML: canUse(.openYAML),
-                canOpenEvents: canUse(.openEvents),
                 canOpenLogs: canUse(.openLogs),
                 canOpenTerminal: canUse(.openExec),
                 canStartPortForward: canUse(.startPortForward),
@@ -4420,10 +4883,13 @@ private final class ResourceListViewController: NSViewController,
         }
         addGroup([
             ("Enter Subresource", .enter),
+            ("Enter Subresource in New Workspace", .enterInNewWorkspace),
             ("Show Node", .showNode),
             ("Open Details", .open),
+            ("Open Details in New Window", .openInNewWindow),
             ("Open YAML in Details", .openYAML),
             ("Open YAML in New Window", .openYAMLSnapshot),
+            ("Edit YAML in New Window", .editYAMLInNewWindow),
             ("Open Events", .openEvents),
         ])
         addGroup([
@@ -8443,6 +8909,19 @@ private final class ResourceListViewController: NSViewController,
         case .enter:
             guard let identity = selected.only else { return }
             onEnterObject?(identity)
+        case .enterInNewWorkspace:
+            guard let identity = selected.only else { return }
+            onOpenNewWorkspace?(ClusterWorkspaceOpenRequest(
+                contextReference: session.contextReference,
+                namespaceScope: scope,
+                resource: GVR(
+                    group: identity.group,
+                    version: identity.version,
+                    resource: identity.resource
+                ),
+                filter: "",
+                subresource: identity
+            ))
         case .showNode:
             guard let identity = selected.only,
                 PodNodeNavigationPlanner.hasPotentialTarget(identity)
@@ -8454,14 +8933,23 @@ private final class ResourceListViewController: NSViewController,
             } else {
                 openSelectedObject(initialTab: .automatic, identities: selected)
             }
+        case .openInNewWindow:
+            guard let identity = selected.only else { return }
+            onOpenDetailsInNewWindow?(identity)
         case .openYAML:
             openSelectedObject(initialTab: .yaml, identities: selected)
         case .openYAMLSnapshot:
             guard let identity = selected.only else { return }
             onOpenYAMLSnapshot?(identity)
+        case .editYAMLInNewWindow:
+            guard let identity = selected.only else { return }
+            onOpenYAMLSnapshotForEditing?(identity)
         case .openEvents:
             guard let identity = selected.only else { return }
             onOpenEvents?(identity)
+        case .openEventsInNewWorkspace:
+            guard let identity = selected.only else { return }
+            onOpenEventsInNewWorkspace?(identity)
         case .startPortForward:
             guard let identity = selected.only,
                 identity.group.isEmpty,
@@ -8986,7 +9474,7 @@ private final class ResourceListViewController: NSViewController,
         let version = resource?.version ?? ""
         let name = resource?.resource ?? ""
         switch command {
-        case .enter:
+        case .enter, .enterInNewWorkspace:
             guard exactlyOne, let resource else { return false }
             let identity = ResourceIdentity(
                 clusterSessionID: session.sessionID,
@@ -9001,7 +9489,8 @@ private final class ResourceListViewController: NSViewController,
         case .showNode:
             return exactlyOne && group.isEmpty && version == "v1"
                 && name == "pods"
-        case .open, .openYAML, .openYAMLSnapshot, .openEvents:
+        case .open, .openInNewWindow, .openYAML, .openYAMLSnapshot,
+            .editYAMLInNewWindow, .openEvents, .openEventsInNewWorkspace:
             return exactlyOne
         case .openLogs, .openPreviousLogs:
             guard nonempty, selectedCount <= 128 else { return false }
@@ -9041,13 +9530,14 @@ private final class ResourceListViewController: NSViewController,
         with selected: [ResourceIdentity]
     ) -> Bool {
         switch command {
-        case .enter:
+        case .enter, .enterInNewWorkspace:
             return selected.count == 1
                 && ResourceDrillDownPlanner.hasPotentialTarget(selected[0])
         case .showNode:
             return selected.count == 1
                 && PodNodeNavigationPlanner.hasPotentialTarget(selected[0])
-        case .open, .openYAML, .openYAMLSnapshot, .openEvents:
+        case .open, .openInNewWindow, .openYAML, .openYAMLSnapshot,
+            .editYAMLInNewWindow, .openEvents, .openEventsInNewWorkspace:
             return selected.count == 1
         case .openLogs, .openPreviousLogs:
             return LogResourceCompatibility.supportsSelection(selected)
@@ -9410,7 +9900,9 @@ private final class ObjectDetailRecentEventsController: ObjectDetailEventsContro
 }
 
 private enum ResourceTableCommand: Equatable {
-    case focusFilter, enter, showNode, open, openYAML, openYAMLSnapshot, openEvents
+    case focusFilter, enter, enterInNewWorkspace, showNode
+    case open, openInNewWindow, openYAML, openYAMLSnapshot, editYAMLInNewWindow
+    case openEvents, openEventsInNewWorkspace
     case openLogs, openPreviousLogs
     case openExec, configureExec
     case startPortForward, selectAll, delete, scale, restart, editLabels, editAnnotations
@@ -9456,6 +9948,7 @@ private extension PaletteOperation {
         case .copyName: .copyName
         case .copyNamespacedName: .copyNamespacedName
         case .copyReference: .copyReference
+        case .editYAML: .editYAMLInNewWindow
         }
     }
 }
@@ -9504,52 +9997,67 @@ private final class ResourceTableView: CapturedCellTableView {
 
     override func keyDown(with event: NSEvent) {
         guard currentEditor() == nil else { super.keyDown(with: event); return }
-        let command = event.modifierFlags.contains(.command)
+        let modifiers = event.modifierFlags.intersection([
+            .shift, .command, .control, .option,
+        ])
+        let commandOnly = modifiers == .command
         let unmodified = event.modifierFlags.intersection([
             .shift, .command, .control, .option,
         ]).isEmpty
-        switch (event.charactersIgnoringModifiers?.lowercased(), event.keyCode, command) {
-        case ("/", _, false): onCommand?(.focusFilter)
-        case ("j", _, false): onCommand?(.moveDown)
-        case ("k", _, false): onCommand?(.moveUp)
-        case ("d", _, false) where unmodified: onCommand?(.open)
-        case ("o", _, false) where unmodified: onCommand?(.showNode)
-        case (_, 36, false): onCommand?(.enter)
-        case ("y", _, false):
+        let characters = event.charactersIgnoringModifiers?.lowercased()
+        switch (characters, event.keyCode) {
+        case ("/", _) where unmodified: onCommand?(.focusFilter)
+        case ("j", _) where unmodified: onCommand?(.moveDown)
+        case ("k", _) where unmodified: onCommand?(.moveUp)
+        case ("d", _) where commandOnly: onCommand?(.openInNewWindow)
+        case ("d", _) where unmodified: onCommand?(.open)
+        case ("o", _) where unmodified: onCommand?(.showNode)
+        case (_, 36) where commandOnly: onCommand?(.enterInNewWorkspace)
+        case (_, 36) where unmodified: onCommand?(.enter)
+        case ("y", _) where commandOnly:
             guard event.modifierFlags.intersection([.control, .option]).isEmpty else {
                 super.keyDown(with: event)
                 return
             }
-            onCommand?(event.modifierFlags.contains(.shift)
-                ? .openYAMLSnapshot : .openYAML)
-        case ("e", _, false): onCommand?(.openEvents)
-        case ("l", _, false):
+            onCommand?(.openYAMLSnapshot)
+        case ("y", _) where unmodified:
+            guard event.modifierFlags.intersection([.control, .option]).isEmpty else {
+                super.keyDown(with: event)
+                return
+            }
+            onCommand?(.openYAML)
+        case ("e", _) where unmodified: onCommand?(.editYAMLInNewWindow)
+        case ("l", _)
+            where event.modifierFlags.intersection([.command, .control, .option]).isEmpty:
             guard event.modifierFlags.intersection([.control, .option]).isEmpty else {
                 super.keyDown(with: event)
                 return
             }
             onCommand?(event.modifierFlags.contains(.shift) ? .openPreviousLogs : .openLogs)
-        case ("s", _, false):
+        case ("s", _)
+            where event.modifierFlags.intersection([.command, .control, .option]).isEmpty:
             guard event.modifierFlags.intersection([.control, .option]).isEmpty else {
                 super.keyDown(with: event)
                 return
             }
             onCommand?(event.modifierFlags.contains(.shift) ? .configureExec : .openExec)
-        case ("p", _, false): onCommand?(.startPortForward)
-        case ("r", _, false) where unmodified: onCommand?(.restart)
-        case ("a", _, true): onCommand?(.selectAll)
-        case (_, 51, true): onCommand?(.delete)
-        case ("[", _, true):
+        case ("p", _)
+            where event.modifierFlags.intersection([.command, .control, .option]).isEmpty:
+            onCommand?(.startPortForward)
+        case ("r", _) where unmodified: onCommand?(.restart)
+        case ("a", _) where commandOnly: onCommand?(.selectAll)
+        case (_, 51) where commandOnly: onCommand?(.delete)
+        case ("[", _) where commandOnly:
             _ = window?.windowController?.tryToPerform(
                 #selector(ClusterWorkspaceWindowController.navigateBack(_:)),
                 with: nil
             )
-        case ("]", _, true):
+        case ("]", _) where commandOnly:
             _ = window?.windowController?.tryToPerform(
                 #selector(ClusterWorkspaceWindowController.navigateForward(_:)),
                 with: nil
             )
-        case (_, 53, false):
+        case (_, 53) where unmodified:
             _ = tryToPerform(#selector(NSResponder.cancelOperation(_:)), with: nil)
         default:
             if event.keyCode == 125 || event.keyCode == 126 {

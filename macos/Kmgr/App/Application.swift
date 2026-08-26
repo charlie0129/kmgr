@@ -524,6 +524,9 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         controller.onStartPortForward = { [weak controller] identity in
             controller?.showPortForwardConfiguration(identity)
         }
+        controller.onOpenNewWorkspace = { [weak self, weak controller] request in
+            self?.openSiblingWorkspace(request, source: controller)
+        }
         controller.onOpenLogWindow = { [weak self] logController in
             self?.retainAndShow(logController)
         }
@@ -549,6 +552,92 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         controller.showWindow(nil)
         controller.window?.makeKeyAndOrderFront(nil)
         return controller
+    }
+
+    /// Opens a focused sibling workspace for a destination gesture. Session
+    /// creation stays at the application boundary, so the backend receives a
+    /// distinct session ID while its authority-scoped discovery, LIST/WATCH,
+    /// and warm raw-object caches remain reusable.
+    private func openSiblingWorkspace(
+        _ request: ClusterWorkspaceOpenRequest,
+        source: ClusterWorkspaceWindowController?
+    ) {
+        guard !request.contextReference.isEmpty else {
+            NSSound.beep()
+            return
+        }
+
+        // Present a shell synchronously so a Command-click or Command-Return
+        // changes focus immediately. The request is deliberately kept out of
+        // the shell's restoration target: validating that synthetic target
+        // would start its parent LIST/WATCH before the pending request is
+        // consumed, causing duplicate work. Discovery applies the request
+        // exactly once after the authenticated session is ready.
+        let state = ClusterWindowRestorationState(
+            // The request deliberately carries the opaque reference rather
+            // than a display name. Reuse the source window's presentation for
+            // the short-lived shell so a newly focused window does not flash
+            // an implementation-only reference while authentication runs.
+            contextName: source?.session.contextName ?? request.contextReference,
+            contextReference: request.contextReference,
+            namespaceScope: NamespaceScope(request.namespaceScope)
+        )
+        let record = ClusterWindowRestorationRecord(state: state)
+        let shell = RestoredWorkspaceShell(record: record)
+        let controller = openWorkspace(
+            for: shell.session,
+            restoration: record,
+            initialWindowFrameSize: workspaceWindowSizeStore.lastSize,
+            startsAuthenticated: false
+        )
+        let identifier = ObjectIdentifier(controller)
+        let attempt = RestoredWorkspaceConnectionAttempt(
+            provider: clusterContextProvider,
+            contextReference: request.contextReference,
+            addedKubeconfigPaths: kubeconfigSourceStore.paths
+        )
+        attempt.onOpened = { [weak self, weak controller] session in
+            guard let self, let controller,
+                self.workspaceControllers[identifier] === controller,
+                !self.isTerminating
+            else { return }
+            controller.recover(with: session)
+            self.portForwardCoordinator.register(session: session)
+        }
+        attempt.onFailure = { [weak self, weak controller] error in
+            guard let self, let controller,
+                self.workspaceControllers[identifier] === controller,
+                !self.isTerminating
+            else { return }
+            self.presentSiblingWorkspaceFailure(error, source: source)
+            controller.engineRecoveryFailed(error)
+        }
+        attempt.onFinish = { [weak self, weak attempt] in
+            guard let self, self.restoredWorkspaceAttempts[identifier] === attempt else {
+                return
+            }
+            self.restoredWorkspaceAttempts.removeValue(forKey: identifier)
+        }
+        restoredWorkspaceAttempts[identifier] = attempt
+        controller.open(request)
+        attempt.start()
+    }
+
+    private func presentSiblingWorkspaceFailure(
+        _ error: Error,
+        source: ClusterWorkspaceWindowController?
+    ) {
+        let presentation = UserFacingErrorPresentation(error)
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Unable to Open New Workspace"
+        alert.informativeText = presentation.detailedText
+        alert.addButton(withTitle: "OK")
+        if let parent = source?.window, parent.isVisible, parent.attachedSheet == nil {
+            alert.beginSheetModal(for: parent)
+        } else {
+            alert.runModal()
+        }
     }
 
     private func restoreWorkspacesOrShowChooser() {

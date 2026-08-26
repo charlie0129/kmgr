@@ -97,6 +97,31 @@ struct CommandPaletteWindowControllerTests {
         #expect(openedResource == resources[1])
     }
 
+    @Test("Command-Return activates the selected result with its alternate destination")
+    func commandReturnUsesAlternateDestination() throws {
+        let controller = makePaletteController(
+            provider: ControllablePaletteSearchProvider()
+        )
+        var activation: (DiscoveredResource, PaletteActivationDestination)?
+        controller.onOpenResourceWithDestination = { resource, destination in
+            activation = (resource, destination)
+        }
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let window = try #require(controller.window)
+        let table = try paletteControls(in: controller).table
+        table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+
+        let event = try paletteCommandKeyEvent(
+            "\r",
+            keyCode: 36,
+            windowNumber: window.windowNumber
+        )
+        #expect(window.performKeyEquivalent(with: event))
+        #expect(activation?.0.resource == "pods")
+        #expect(activation?.1 == .alternateWindow)
+    }
+
     @Test("search field stays clear of full-size-titlebar traffic lights")
     func searchFieldAvoidsTrafficLights() throws {
         let controller = makePaletteController(provider: ControllablePaletteSearchProvider())

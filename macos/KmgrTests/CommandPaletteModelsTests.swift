@@ -196,10 +196,12 @@ import Testing
 
     #expect(valid.contains(.openDetails))
     #expect(valid.contains(.openYAML))
+    #expect(valid.contains(.editYAML))
     #expect(valid.contains(.openEvents))
     #expect(valid.contains(.openLogs))
     #expect(valid.contains(.openExec))
     #expect(PaletteOperation.openExec.title == "Open Terminal")
+    #expect(PaletteOperation.editYAML.title == "Edit YAML in New Window")
     #expect(valid.contains(.startPortForward))
     #expect(valid.contains(.delete))
     #expect(valid.contains(.editLabels))

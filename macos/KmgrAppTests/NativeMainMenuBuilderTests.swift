@@ -215,12 +215,18 @@ struct NativeMainMenuBuilderTests {
         let built = makeMenu()
         let resource = try #require(submenu("Resource", in: built.main))
 
-        for (title, selector, key, modifiers) in [
+        let entries: [(title: String, selector: Selector, key: String, modifiers: NSEvent.ModifierFlags)] = [
             (
                 "Enter Subresource",
                 #selector(ClusterWorkspaceWindowController.enterResource(_:)),
                 "\r",
                 NSEvent.ModifierFlags()
+            ),
+            (
+                "Enter Subresource in New Workspace",
+                #selector(ClusterWorkspaceWindowController.enterResourceInNewWorkspace(_:)),
+                "\r",
+                NSEvent.ModifierFlags.command
             ),
             (
                 "Show Node",
@@ -233,6 +239,12 @@ struct NativeMainMenuBuilderTests {
                 #selector(ClusterWorkspaceWindowController.openResourceDetails(_:)),
                 "d",
                 NSEvent.ModifierFlags()
+            ),
+            (
+                "Describe in New Window",
+                #selector(ClusterWorkspaceWindowController.openResourceDetailsInNewWindow(_:)),
+                "d",
+                NSEvent.ModifierFlags.command
             ),
             (
                 "Focus Resource Filter",
@@ -286,7 +298,19 @@ struct NativeMainMenuBuilderTests {
                 "Open YAML in New Window",
                 #selector(ClusterWorkspaceWindowController.openResourceYAMLSnapshot(_:)),
                 "y",
-                NSEvent.ModifierFlags.shift
+                NSEvent.ModifierFlags.command
+            ),
+            (
+                "Edit YAML in New Window",
+                #selector(ClusterWorkspaceWindowController.editResourceYAMLInNewWindow(_:)),
+                "e",
+                NSEvent.ModifierFlags()
+            ),
+            (
+                "Open Events",
+                #selector(ClusterWorkspaceWindowController.openResourceEvents(_:)),
+                "",
+                NSEvent.ModifierFlags()
             ),
             (
                 "Rollout Restart…",
@@ -294,7 +318,8 @@ struct NativeMainMenuBuilderTests {
                 "r",
                 NSEvent.ModifierFlags()
             ),
-        ] {
+        ]
+        for (title, selector, key, modifiers) in entries {
             let item = try #require(resource.item(withTitle: title))
             expectResponderItem(
                 item,

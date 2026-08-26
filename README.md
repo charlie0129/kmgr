@@ -81,9 +81,12 @@ already checked into the repository.
 
 Each context workspace is a separate native window. Opening the same context
 twice creates independent UI/navigation state while allowing the engine to
-share compatible cluster authority. Details replace the table in that window;
-logs and terminals use independent windows, and all forwards live in one
-app-wide Port Forwards window.
+share compatible cluster authority and warm cache state. Details replace the
+table in the current workspace, while `⌘D` also provides a focused auxiliary
+Details window. YAML uses the same split: `Y` opens the current Details YAML
+tab, `⌘Y` opens a focused read-only auxiliary YAML window, and `E` opens that
+window and starts editing. Logs and terminals use independent windows, and all
+forwards live in one app-wide Port Forwards window.
 
 ## Main workflows
 
@@ -102,17 +105,19 @@ app-wide Port Forwards window.
   same searchable, draggable key/value split view, keyboard
   behavior, structured-text highlighting, whitespace markers, staged row
   states, and save review while keeping their validation rules separate. Details also
-  provide YAML, Events, Relationships, Metrics where meaningful, and Data for
-  ConfigMaps and Secrets. Oversized Summary values, including metadata values,
-  stay available through cell copy while their inline presentation remains
-  bounded to one line.
+  provide YAML and Relationships, while ConfigMap/Secret Data is the complete
+  Return-driven key/value viewer and editor. Oversized Summary values,
+  including metadata values, stay available through cell copy while their
+  inline presentation remains bounded to one line.
 - When core/v1 Events are listable, Details appends up to the 10 most recent
   UID-filtered Events to Summary. They load after the object Summary is visible
-  and never block it. Press `E` to open the complete sortable, virtualized live
-  Events list as a separate navigation destination.
-- `Y` opens the selected object's editable YAML tab inside Details. Shift-Y
-  opens an independent, UID-pinned YAML window with an exact received-byte
-  count, explicit refresh, and the same validated edit/apply workflow.
+  and never block it. Press `E` in Details Summary to open the complete
+  sortable, virtualized live Events list in a new full workspace.
+- `Y` opens the selected object's YAML tab inside current Details. `⌘Y` opens
+  an independent, UID-pinned read-only YAML window; `E` opens or focuses that
+  same window and immediately enters editing. The auxiliary YAML window has
+  an exact received-byte count, explicit refresh, and the validated edit/apply
+  workflow.
 - YAML edits are parsed in Go, identity-checked, and dry-run as an exact
   material JSON Patch before the semantic diff is shown. UID/resourceVersion
   test operations prevent retargeting or stale writes, unchanged unknown fields
@@ -186,8 +191,10 @@ resource. The scan anchors the target's exact UID before doing bulk reads.
 
 ## Keyboard reference
 
-Single-letter commands apply only while the resource table is first responder,
-so they do not steal input from filters, YAML/data editors, logs, or terminals.
+Resource-table single-letter commands apply only while that table is first
+responder. Details, auxiliary YAML, and other leaf views expose their own
+contextual letters without stealing input from editable controls, filters,
+logs, or terminals.
 Kmgr also keeps one passive **Shortcuts** panel above its windows while the app
 is active. The panel follows the active leaf view (including resource filters,
 Pod containers, Data and metadata key/value editors, and the Cluster Manager),
@@ -216,14 +223,19 @@ globally across launches rather than per cluster.
 | Shift-click / Shift-Up / Shift-Down | Extend native selection |
 | Command-click | Toggle one selected row |
 | Command-A | Select all visible rows |
-| Return | Enter a useful subresource, such as Pod containers or workload Pods |
 | `O` | Show the selected Pod's assigned Node in the Node list |
-| Command-Return | Open details for exactly one object |
+| `D` | Open Details for exactly one object in the current workspace |
+| Command-D | Open or focus Details in an auxiliary window |
+| Return | Enter a useful subresource in the current workspace |
+| Command-Return | Enter the selected subresource in a new full workspace |
+| Command-click in the sidebar | Open the selected resource in a new full workspace |
 | Command-[ / Command-] | Back / Forward |
 | Escape | Clear selection or return focus to the table |
-| `Y` | Open the YAML tab in Details for one object |
-| Shift-Y | Open YAML for one object in an independent window |
-| `E` | Open Events for one object |
+| `Y` | Open the YAML tab in current Details for one object |
+| Command-Y | Open or focus read-only YAML in an auxiliary window |
+| `E` in a resource table | Open or focus auxiliary YAML and start editing |
+| `E` in auxiliary YAML | Start editing the YAML |
+| `E` in Details Summary | Open the complete object Events list in a new workspace |
 | `L` | Tail all containers for compatible selected Pods or workloads |
 | Shift-L | Show logs from the previous container instance for compatible selected Pods or workloads |
 | `S` | Open a terminal for one Pod using automatic container and shell defaults |
@@ -484,8 +496,8 @@ temporary `kmgr-smoke` namespace in a disposable cluster. Then:
     columns appear after the base snapshot, and opening Nodes starts no Pod
     LIST/WATCH.
 11. In Details, verify Summary appears before its bounded recent Events section,
-    then press `E` and confirm the complete list contains only the UID-pinned
-    object's Events. In Relationships, verify cached results are labeled
+    then press `E` and confirm a new full workspace contains only the
+    UID-pinned object's Events. In Relationships, verify cached results are labeled
     potentially incomplete; run **Scan All Resources…** only against a cluster
     where that read load is acceptable.
 12. While a safe resource or detail view is visible, terminate the helper and

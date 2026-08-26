@@ -247,6 +247,14 @@ public enum PaletteResult: Hashable, Sendable {
     }
 }
 
+/// Destination requested when activating a command-palette item. Command-
+/// Return deliberately means the alternate window destination while plain
+/// Return keeps the historical in-place behavior.
+public enum PaletteActivationDestination: Hashable, Sendable {
+    case currentWorkspace
+    case alternateWindow
+}
+
 /// A resource operation shown by the command palette. The operation carries
 /// no live UI reference; activation is paired with the immutable
 /// ``CommandContext`` captured before the palette opens.
@@ -265,6 +273,9 @@ public enum PaletteOperation: CaseIterable, Hashable, Sendable {
     case copyName
     case copyNamespacedName
     case copyReference
+    /// Kept after the existing operations so the established ⌘1…⌘9 order does
+    /// not change when this searchable command is added.
+    case editYAML
 
     public var commandID: CommandID {
         switch self {
@@ -282,6 +293,7 @@ public enum PaletteOperation: CaseIterable, Hashable, Sendable {
         case .copyName: .copyName
         case .copyNamespacedName: .copyNamespacedName
         case .copyReference: .copyReference
+        case .editYAML: .editYAMLInNewWindow
         }
     }
 
@@ -301,6 +313,7 @@ public enum PaletteOperation: CaseIterable, Hashable, Sendable {
         case .copyName: "Copy Name"
         case .copyNamespacedName: "Copy Namespace/Name"
         case .copyReference: "Copy kubectl Reference"
+        case .editYAML: "Edit YAML in New Window"
         }
     }
 
@@ -320,6 +333,7 @@ public enum PaletteOperation: CaseIterable, Hashable, Sendable {
         case .copyName: ["copy name", "name"]
         case .copyNamespacedName: ["copy namespace name", "namespace/name", "namespaced name"]
         case .copyReference: ["copy kubectl reference", "kubectl", "reference"]
+        case .editYAML: ["edit yaml", "edit manifest", "yaml edit"]
         }
     }
 }

@@ -445,17 +445,19 @@ import Testing
     )
     for keys in [
         "⌘N", "⌘K", "/", "↑ / ↓ or K / J", "⇧↑ / ⇧↓ or ⇧-click",
-        "⌘-click", "⌘A", "Return", "O", "D", "⌘[ / ⌘]", "Escape", "Y", "⇧Y", "E",
+        "⌘-click", "⌘A", "Return", "⌘Return", "O", "D", "⌘D", "⌘[ / ⌘]", "Escape", "Y", "⌘Y", "E",
         "L", "⇧L", "S", "P", "R", "⌘⌫", "⌘S",
     ] {
         #expect(shortcuts[keys] != nil, "Missing shortcut reference for \(keys)")
     }
     #expect(shortcuts["Return"]?.contains("subresource") == true)
+    #expect(shortcuts["⌘Return"]?.contains("new workspace") == true)
     #expect(shortcuts["O"] == "Show the selected Pod's Node")
     #expect(shortcuts["D"] == "Describe the selected object")
+    #expect(shortcuts["⌘D"] == "Describe the selected object in a new window")
     #expect(shortcuts["Y"] == "Open selected object YAML in Details")
-    #expect(shortcuts["⇧Y"] == "Open selected object YAML in a new window")
-    #expect(shortcuts["E"] == "Open Events for one object")
+    #expect(shortcuts["⌘Y"] == "Open selected object YAML in a new window")
+    #expect(shortcuts["E"] == "Open YAML in a new window and start editing")
     #expect(shortcuts["⇧L"] == "Open previous container logs")
     #expect(shortcuts["R"] == "Rollout restart the selected workload")
 }

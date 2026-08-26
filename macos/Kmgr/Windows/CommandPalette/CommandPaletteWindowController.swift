@@ -86,7 +86,7 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
             case .operation(let operation):
                 switch operation {
                 case .openDetails: "info.circle"
-                case .openYAML: "doc.plaintext"
+                case .openYAML, .editYAML: "doc.plaintext"
                 case .openEvents: "clock.arrow.circlepath"
                 case .openLogs: "text.alignleft"
                 case .openExec: "terminal"
@@ -153,9 +153,15 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
     private static let numberedShortcutCount = 9
 
     var onOpenResource: ((DiscoveredResource) -> Void)?
+    var onOpenResourceWithDestination:
+        ((DiscoveredResource, PaletteActivationDestination) -> Void)?
     var onChangeNamespace: ((String) -> Void)?
     var onOpenObject: ((ResourceIdentity) -> Void)?
+    var onOpenObjectWithDestination:
+        ((ResourceIdentity, PaletteActivationDestination) -> Void)?
     var onOperation: ((PaletteOperation, CommandContext) -> Void)?
+    var onOperationWithDestination:
+        ((PaletteOperation, CommandContext, PaletteActivationDestination) -> Void)?
     var onClose: (() -> Void)?
 
     init(
@@ -183,6 +189,9 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
         window.onToggle = { [weak self] in self?.dismissPalette() }
         window.onChooseNumberedItem = { [weak self] index in
             self?.chooseNumberedItem(at: index) ?? false
+        }
+        window.onChooseAlternateSelection = { [weak self] in
+            self?.activateSelection(in: .alternateWindow) ?? false
         }
         configureContent(in: window)
         updateRootItems()
@@ -263,7 +272,7 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
             moveSelection(by: 1)
             return true
         case #selector(NSResponder.insertNewline(_:)):
-            activateSelection()
+            activateSelection(in: .currentWorkspace)
             return true
         case #selector(NSResponder.cancelOperation(_:)):
             handleCancel()
@@ -273,25 +282,54 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
         }
     }
 
-    @objc private func activateSelection() {
-        guard activateItem(at: tableView.selectedRow) else {
+    @objc private func activateSelectionFromDoubleClick() {
+        guard activateSelection(in: .currentWorkspace) else {
             NSSound.beep()
             return
         }
     }
 
     @discardableResult
+    private func activateSelection(
+        in destination: PaletteActivationDestination
+    ) -> Bool {
+        activateItem(at: tableView.selectedRow, destination: destination)
+    }
+
+    @discardableResult
     private func activateItem(at row: Int) -> Bool {
+        activateItem(at: row, destination: .currentWorkspace)
+    }
+
+    @discardableResult
+    private func activateItem(
+        at row: Int,
+        destination: PaletteActivationDestination
+    ) -> Bool {
         guard items.indices.contains(row) else { return false }
         let item = items[row]
         switch item {
         case .operation(let operation):
             let callback = onOperation
+            let destinationCallback = onOperationWithDestination
             let commandContext = context.commandContext
-            closeAndRun { callback?(operation, commandContext) }
+            closeAndRun {
+                if let destinationCallback {
+                    destinationCallback(operation, commandContext, destination)
+                } else {
+                    callback?(operation, commandContext)
+                }
+            }
         case .result(.resource(let resource)):
             let callback = onOpenResource
-            closeAndRun { callback?(resource) }
+            let destinationCallback = onOpenResourceWithDestination
+            closeAndRun {
+                if let destinationCallback {
+                    destinationCallback(resource, destination)
+                } else {
+                    callback?(resource)
+                }
+            }
         case .result(.searchResource(let resource)):
             enterObjectSearch(resource)
         case .result(.namespace(let namespace)):
@@ -299,7 +337,14 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
             closeAndRun { callback?(namespace) }
         case .result(.object(let result)):
             let callback = onOpenObject
-            closeAndRun { callback?(result.identity) }
+            let destinationCallback = onOpenObjectWithDestination
+            closeAndRun {
+                if let destinationCallback {
+                    destinationCallback(result.identity, destination)
+                } else {
+                    callback?(result.identity)
+                }
+            }
         }
         return true
     }
@@ -310,7 +355,7 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
         else { return false }
         tableView.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
         tableView.scrollRowToVisible(index)
-        return activateItem(at: index)
+        return activateItem(at: index, destination: .currentWorkspace)
     }
 
     private func configureContent(in window: NSWindow) {
@@ -340,7 +385,7 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
         tableView.allowsEmptySelection = true
         tableView.allowsMultipleSelection = false
         tableView.target = self
-        tableView.doubleAction = #selector(activateSelection)
+        tableView.doubleAction = #selector(activateSelectionFromDoubleClick)
         tableView.setAccessibilityLabel("Command palette results")
 
         let scrollView = NSScrollView()
@@ -423,7 +468,7 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
         scopeLabel.stringValue = "\(context.session.contextName) · \(context.namespaceScope.presentation)"
         statusLabel.stringValue = items.isEmpty
             ? "No matching commands or resource kinds"
-            : "\(items.count.formatted()) results · ↑↓ navigate · Return open · Esc close"
+            : "\(items.count.formatted()) results · Return open · ⌘Return alternate · Esc close"
         reloadSelectingFirst()
         scheduleRootCacheSearch(
             query: query,
@@ -728,6 +773,7 @@ private final class PalettePanel: NSPanel {
     var onCancel: (() -> Void)?
     var onToggle: (() -> Void)?
     var onChooseNumberedItem: ((Int) -> Bool)?
+    var onChooseAlternateSelection: (() -> Bool)?
 
     override var canBecomeKey: Bool { true }
 
@@ -735,6 +781,14 @@ private final class PalettePanel: NSPanel {
         let characters = event.charactersIgnoringModifiers?.lowercased()
         if event.modifierFlags.contains(.command), characters == "k" {
             onToggle?()
+            return true
+        }
+        if event.modifierFlags.intersection([
+            .command, .shift, .control, .option,
+        ]) == .command,
+            (event.keyCode == 36 || characters == "\r" || characters == "\n"),
+            onChooseAlternateSelection?() == true
+        {
             return true
         }
         let modifiers = event.modifierFlags.intersection([

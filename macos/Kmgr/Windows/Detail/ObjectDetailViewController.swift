@@ -151,7 +151,7 @@ enum ObjectDetailSummaryPresentation {
                 let representedTotal = max(totalCount, UInt64(events.count))
                 if representedTotal > shown {
                     let omitted = representedTotal - shown
-                    let value = "\(omitted.formatted()) more · Press E to open the complete Events list"
+                    let value = "\(omitted.formatted()) more · Press E to open the complete Events list in a new workspace"
                     eventRows.append(ObjectDetailSummaryRow(
                         sectionID: "events",
                         fieldID: "additional",

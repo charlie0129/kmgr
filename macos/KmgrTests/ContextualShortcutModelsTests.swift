@@ -12,7 +12,6 @@ struct ContextualShortcutModelsTests {
                 canShowNode: true,
                 canOpenDetails: true,
                 canOpenYAML: true,
-                canOpenEvents: true,
                 canOpenLogs: true,
                 canOpenTerminal: true,
                 canStartPortForward: true,
@@ -23,11 +22,15 @@ struct ContextualShortcutModelsTests {
 
         #expect(snapshot.title == "Pods")
         #expect(snapshot.items.map(\.keys).contains("Return"))
+        #expect(snapshot.items.map(\.keys).contains("\u{2318}Return"))
         #expect(snapshot.items.map(\.keys).contains("O"))
         #expect(snapshot.items.map(\.keys).contains("D"))
-        #expect(!snapshot.items.map(\.keys).contains("\u{2318}Return"))
+        #expect(snapshot.items.map(\.keys).contains("\u{2318}D"))
         #expect(snapshot.items.map(\.keys).contains("Y"))
-        #expect(snapshot.items.map(\.keys).contains("\u{21E7}Y"))
+        #expect(snapshot.items.map(\.keys).contains("\u{2318}Y"))
+        #expect(snapshot.items.map(\.keys).contains("E"))
+        #expect(snapshot.items.first { $0.id == "resource.yaml.edit-window" }?.action
+            == "Open YAML in a new window and start editing")
         #expect(snapshot.items.map(\.keys).contains("L"))
         #expect(snapshot.items.map(\.keys).contains("\u{21E7}L"))
         #expect(snapshot.items.map(\.keys).contains("S"))
@@ -41,8 +44,7 @@ struct ContextualShortcutModelsTests {
             title: "ConfigMaps",
             availability: ResourceListShortcutAvailability(
                 canOpenDetails: true,
-                canOpenYAML: true,
-                canOpenEvents: true
+                canOpenYAML: true
             )
         )
         #expect(!incompatible.items.map(\.keys).contains("L"))
@@ -52,6 +54,7 @@ struct ContextualShortcutModelsTests {
         #expect(!incompatible.items.map(\.keys).contains("P"))
         #expect(!incompatible.items.map(\.keys).contains("R"))
         #expect(!incompatible.items.map(\.keys).contains("\u{2318}\u{232B}"))
+        #expect(incompatible.items.map(\.keys).contains("E"))
     }
 
     @Test("focused filter help replaces table letters")
@@ -125,7 +128,7 @@ struct ContextualShortcutModelsTests {
             canOpenEvents: true
         ).items.first { $0.id == "details.events" }
         #expect(events?.keys == "E")
-        #expect(events?.action == "Open complete Events list for this object")
+        #expect(events?.action == "Open complete Events list in a new workspace")
     }
 
     @Test("unknown dialogs never advertise resource table letters")

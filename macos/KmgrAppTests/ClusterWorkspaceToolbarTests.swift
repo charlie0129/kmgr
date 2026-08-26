@@ -614,6 +614,42 @@ struct ClusterWorkspaceToolbarTests {
         #expect(provider.streamRequestCount == 1)
     }
 
+    @Test("Command-clicking the sidebar opens a focused sibling without changing selection")
+    func commandClickSidebarOpensSiblingWorkspace() async throws {
+        let controller = makeWorkspace(provider: FilterValidationWorkspaceResourceProvider())
+        var request: ClusterWorkspaceOpenRequest?
+        controller.onOpenNewWorkspace = { request = $0 }
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let window = try #require(controller.window)
+        let outline = try #require(apiResourceOutline(in: window))
+
+        try await waitUntil { outline.selectedRow >= 0 }
+        let selectedRow = outline.selectedRow
+        let selectedResource = try #require(
+            outline.item(atRow: selectedRow) as? DiscoveredResource
+        )
+        let mouseDown = try sidebarRowClick(
+            outline: outline,
+            row: selectedRow,
+            windowNumber: window.windowNumber,
+            modifiers: [.command]
+        )
+        outline.mouseDown(with: mouseDown)
+
+        try await waitUntil { request != nil }
+        let captured = try #require(request)
+        #expect(captured.resource == GVR(
+            group: selectedResource.group,
+            version: selectedResource.version,
+            resource: selectedResource.resource
+        ))
+        #expect(captured.namespaceScope == NamespaceSelection())
+        #expect(outline.selectedRow == selectedRow)
+        #expect((outline.item(atRow: outline.selectedRow) as? DiscoveredResource)?.id
+            == selectedResource.id)
+    }
+
     @Test("Port Forwards button gives its title and arrows separate geometry")
     func portForwardsButtonGeometry() throws {
         let controller = makeWorkspace()
@@ -1891,7 +1927,7 @@ struct ClusterWorkspaceToolbarTests {
         #expect(savedPreferences == nil)
     }
 
-    @Test("Y opens the Details YAML tab and Shift-Y opens a dedicated window")
+    @Test("Y opens Details YAML, Command-Y opens read-only YAML, and E edits it")
     func yamlShortcutsHaveDistinctDestinations() async throws {
         let pod = toolbarPodIdentity()
         let controller = makeWorkspace(
@@ -1927,11 +1963,95 @@ struct ClusterWorkspaceToolbarTests {
         controller.navigateBack(nil)
         try await waitUntil { table.window === window }
         #expect(window.makeFirstResponder(table))
-        table.keyDown(with: try workspaceLetterKey("y", modifiers: [.shift]))
+        table.keyDown(with: try workspaceLetterKey("y", modifiers: [.command]))
         try await waitUntil { controller.openYAMLSnapshotWindows.count == 1 }
         #expect(controller.contextualShortcutSnapshot?.items.map(\.keys).contains("Y") == true)
         #expect(controller.contextualShortcutSnapshot?.items.map(\.keys)
-            .contains("\u{21E7}Y") == true)
+            .contains("\u{2318}Y") == true)
+        #expect(controller.contextualShortcutSnapshot?.items.map(\.keys).contains("E") == true)
+        #expect(controller.openYAMLSnapshotWindows.first?.contextualShortcutSnapshot?.items
+            .contains { $0.keys == "E" && $0.id == "yaml.edit" } == true)
+        table.keyDown(with: try workspaceLetterKey("e"))
+        try await waitUntil {
+            controller.openYAMLSnapshotWindows.first?.window?.contentView
+                .map { descendants(of: $0).compactMap { $0 as? NSTextView }
+                    .contains { $0.isEditable } } == true
+        }
+    }
+
+    @Test("Command-D opens and reuses one focused auxiliary Details window")
+    func commandDReusesAuxiliaryDetailsWindow() async throws {
+        let pod = toolbarPodIdentity()
+        let controller = makeWorkspace(
+            provider: FilterValidationWorkspaceResourceProvider(),
+            objectDetailProvider: NoopToolbarObjectDetailProvider(
+                detail: toolbarPodDetail(pod)
+            )
+        )
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
+        let table = try #require(descendants(of: root).compactMap { $0 as? NSTableView }
+            .first { $0.accessibilityLabel() == "Kubernetes resources" })
+
+        try await waitUntil { table.numberOfRows == 1 }
+        try await selectResourceRow(0, in: table)
+        #expect(window.makeFirstResponder(table))
+        table.keyDown(with: try workspaceLetterKey("d", modifiers: [.command]))
+        try await waitUntil { controller.openObjectDetailWindows.count == 1 }
+
+        let first = try #require(controller.openObjectDetailWindows.first)
+        #expect(first.identity.uid == pod.uid)
+
+        table.keyDown(with: try workspaceLetterKey("d", modifiers: [.command]))
+        try await Task.sleep(for: .milliseconds(40))
+        #expect(controller.openObjectDetailWindows.count == 1)
+        #expect(controller.openObjectDetailWindows.first === first)
+    }
+
+    @Test("Command-Return requests a subresource in a new full workspace")
+    func commandReturnRequestsNewSubresourceWorkspace() async throws {
+        let pod = toolbarPodIdentity()
+        var request: ClusterWorkspaceOpenRequest?
+        let controller = makeWorkspace(
+            provider: FilterValidationWorkspaceResourceProvider(),
+            objectDetailProvider: NoopToolbarObjectDetailProvider(
+                detail: toolbarPodDetail(pod)
+            )
+        )
+        controller.onOpenNewWorkspace = { request = $0 }
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
+        let table = try #require(descendants(of: root).compactMap { $0 as? NSTableView }
+            .first { $0.accessibilityLabel() == "Kubernetes resources" })
+
+        try await waitUntil { table.numberOfRows == 1 }
+        try await selectResourceRow(0, in: table)
+        #expect(window.makeFirstResponder(table))
+        let returnEvent = try #require(NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: [.command],
+            timestamp: 0,
+            windowNumber: window.windowNumber,
+            context: nil,
+            characters: "\r",
+            charactersIgnoringModifiers: "\r",
+            isARepeat: false,
+            keyCode: 36
+        ))
+        table.keyDown(with: returnEvent)
+
+        try await waitUntil { request != nil }
+        let captured = try #require(request)
+        #expect(captured.resource == GVR(group: "", version: "v1", resource: "pods"))
+        #expect(captured.namespaceScope == NamespaceSelection())
+        #expect(captured.filter.isEmpty)
+        #expect(captured.subresource?.uid == pod.uid)
+        #expect(captured.subresource?.name == pod.name)
     }
 
     @Test("D describes the selected object without changing Return drill-down")
@@ -2505,7 +2625,7 @@ struct ClusterWorkspaceToolbarTests {
         #expect(requests[2].filterExpression == requests[0].filterExpression)
     }
 
-    @Test("Details lazily lists recent Events in Summary and E opens all Events")
+    @Test("Details lazily lists recent Events and E requests a full Events workspace")
     func detailsLazilyListsEvents() async throws {
         let provider = EventsNavigationWorkspaceResourceProvider(
             holdEventRanges: true
@@ -2519,6 +2639,8 @@ struct ClusterWorkspaceToolbarTests {
                 gate: detailGate
             )
         )
+        var newWorkspaceRequest: ClusterWorkspaceOpenRequest?
+        controller.onOpenNewWorkspace = { newWorkspaceRequest = $0 }
         controller.showWindow(nil)
         defer {
             provider.releaseEventRanges()
@@ -2605,17 +2727,17 @@ struct ClusterWorkspaceToolbarTests {
         #expect(window.makeFirstResponder(summary))
         summary.keyDown(with: try workspaceLetterKey("e"))
         try await waitUntil {
-            provider.streamRequests.count == 3
-                && provider.cancelledViews.contains {
-                    $0.viewID == embedded.viewID
-                        && $0.generation == embedded.generation
-                }
+            newWorkspaceRequest != nil
         }
-        let complete = provider.streamRequests[2]
-        #expect(complete.resource.id == embedded.resource.id)
-        #expect(complete.allNamespaces == embedded.allNamespaces)
-        #expect(complete.namespaces == embedded.namespaces)
-        #expect(complete.filterExpression == embedded.filterExpression)
+        let request = try #require(newWorkspaceRequest)
+        #expect(request.resource == GVR(group: "", version: "v1", resource: "events"))
+        #expect(request.namespaceScope == .namespace("default"))
+        #expect(request.filter == embedded.filterExpression)
+        #expect(provider.streamRequests.count == 2)
+        #expect(provider.cancelledViews.contains {
+            $0.viewID == embedded.viewID
+                && $0.generation == embedded.generation
+        } == false)
     }
 
     @Test("incompatible resource actions are hidden while valid actions remain")
@@ -4662,7 +4784,8 @@ private func workspaceLetterKey(
 private func sidebarRowClick(
     outline: NSOutlineView,
     row: Int,
-    windowNumber: Int
+    windowNumber: Int,
+    modifiers: NSEvent.ModifierFlags = []
 ) throws -> NSEvent {
     let location = outline.convert(
         NSPoint(x: 8, y: outline.rect(ofRow: row).midY),
@@ -4671,7 +4794,7 @@ private func sidebarRowClick(
     return try #require(NSEvent.mouseEvent(
         with: .leftMouseDown,
         location: location,
-        modifierFlags: [],
+        modifierFlags: modifiers,
         timestamp: ProcessInfo.processInfo.systemUptime,
         windowNumber: windowNumber,
         context: nil,

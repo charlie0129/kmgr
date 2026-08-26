@@ -9,7 +9,7 @@ import KmgrCore
 /// custom ruler, or `TextDocumentGeometry` to this presentation path.
 @MainActor
 final class YAMLSnapshotWindowController: NSWindowController, NSWindowDelegate,
-    NSMenuItemValidation
+    NSMenuItemValidation, ContextualShortcutProviding
 {
     private(set) var identity: ResourceIdentity
     private var session: OpenedClusterSession
@@ -25,6 +25,7 @@ final class YAMLSnapshotWindowController: NSWindowController, NSWindowDelegate,
     private var isEditingYAML = false
     private var isConnected = true
     private var isClosing = false
+    private var editWhenReady = false
 
     private let scrollView: NSScrollView
     private let textView: YAMLTextView
@@ -39,17 +40,24 @@ final class YAMLSnapshotWindowController: NSWindowController, NSWindowDelegate,
     private let refreshButton = NSButton(title: "Refresh", target: nil, action: nil)
 
     var onClose: (() -> Void)?
+    var contextualShortcutsDidChange: (() -> Void)?
+
+    var contextualShortcutSnapshot: ContextualShortcutSnapshot? {
+        ContextualShortcutCatalog.yamlSnapshot(isEditing: isEditingYAML)
+    }
 
     init(
         session: OpenedClusterSession,
         identity: ResourceIdentity,
         provider: any ObjectDetailProviding,
-        tableLayoutStore: TableLayoutStore? = nil
+        tableLayoutStore: TableLayoutStore? = nil,
+        initiallyEditing: Bool = false
     ) {
         self.session = session
         self.identity = identity
         self.provider = provider
         self.tableLayoutStore = tableLayoutStore ?? TableLayoutStore()
+        self.editWhenReady = initiallyEditing
 
         // This factory supplies AppKit's complete plain-document TextKit stack,
         // including the clip view, scrollers, and document sizing behavior.
@@ -99,6 +107,7 @@ final class YAMLSnapshotWindowController: NSWindowController, NSWindowDelegate,
     func windowWillClose(_ notification: Notification) {
         guard !isClosing else { return }
         isClosing = true
+        editWhenReady = false
         stop()
         onClose?()
     }
@@ -110,6 +119,23 @@ final class YAMLSnapshotWindowController: NSWindowController, NSWindowDelegate,
         operationTask?.cancel()
         operationTask = nil
         updateEditingControls()
+    }
+
+    /// Requests editing for the next usable snapshot. This is intentionally
+    /// idempotent so the resource-list `E` shortcut can focus an existing YAML
+    /// window without creating a duplicate controller or losing a pending
+    /// load.
+    func beginEditingWhenReady() {
+        guard !isClosing else { return }
+        if isEditingYAML {
+            // The request has already been fulfilled. Do not leave a stale
+            // deferred intent that could unexpectedly re-enter edit mode after
+            // a later refresh or recovery.
+            editWhenReady = false
+            return
+        }
+        editWhenReady = true
+        beginInitialEditIfReady()
     }
 
     /// Invalidates every request made with the old helper session while
@@ -182,6 +208,11 @@ final class YAMLSnapshotWindowController: NSWindowController, NSWindowDelegate,
                 if refreshRevision == revision {
                     refreshTask = nil
                     updateEditingControls()
+                    if editWhenReady {
+                        DispatchQueue.main.async { [weak self] in
+                            self?.beginInitialEditIfReady()
+                        }
+                    }
                 }
             }
             do {
@@ -215,6 +246,7 @@ final class YAMLSnapshotWindowController: NSWindowController, NSWindowDelegate,
         byteCountLabel.toolTip = nil
 
         guard !yamlUTF8.isEmpty else {
+            editWhenReady = false
             if let displayedYAMLUTF8, !displayedYAMLUTF8.isEmpty {
                 byteCountLabel.stringValue += " · showing previous \(Self.byteText(displayedYAMLUTF8.count))"
                 statusLabel.stringValue = "Empty YAML response · previous snapshot preserved"
@@ -253,6 +285,7 @@ final class YAMLSnapshotWindowController: NSWindowController, NSWindowDelegate,
     }
 
     private func installFailure(_ error: Error) {
+        editWhenReady = false
         let presentation = UserFacingErrorPresentation(error)
         statusLabel.stringValue = presentation.inlineText
         statusLabel.toolTip = presentation.detailedText
@@ -371,6 +404,13 @@ final class YAMLSnapshotWindowController: NSWindowController, NSWindowDelegate,
         ])
         window?.contentView = root
         syntaxHighlighter = SyntaxHighlighter(textView: textView, scrollView: scrollView)
+        textView.onPlainEditShortcut = { [weak self] in
+            guard let self, !self.isEditingYAML, self.editButton.isEnabled else {
+                return false
+            }
+            self.beginYAMLEdit()
+            return true
+        }
         updateEditingControls()
     }
 
@@ -390,6 +430,7 @@ final class YAMLSnapshotWindowController: NSWindowController, NSWindowDelegate,
         guard let displayedDetail, !displayedDetail.yamlUTF8.isEmpty,
             isConnected, refreshTask == nil, operationTask == nil, !isClosing
         else { return }
+        editWhenReady = false
         editingBasis = displayedDetail
         isEditingYAML = true
         statusLabel.stringValue = displayedDetail.resourceVersion.isEmpty
@@ -399,6 +440,16 @@ final class YAMLSnapshotWindowController: NSWindowController, NSWindowDelegate,
         statusLabel.toolTip = "Save validates this edit against the exact resource version shown."
         updateEditingControls()
         window?.makeFirstResponder(textView)
+    }
+
+    private func beginInitialEditIfReady() {
+        guard editWhenReady else { return }
+        guard !isEditingYAML, refreshTask == nil,
+            displayedDetail?.yamlUTF8.isEmpty == false,
+            isConnected, operationTask == nil, !isClosing
+        else { return }
+        editWhenReady = false
+        beginYAMLEdit()
     }
 
     @objc private func cancelYAMLEdit() {
@@ -523,6 +574,7 @@ final class YAMLSnapshotWindowController: NSWindowController, NSWindowDelegate,
         cancelButton.isEnabled = isEditingYAML && idle && !isClosing
         refreshButton.isEnabled = !isEditingYAML && idle && isConnected && !isClosing
         textView.isEditable = isEditingYAML && idle && isConnected && !isClosing
+        contextualShortcutsDidChange?()
     }
 
     private func installSnapshotStatus() {

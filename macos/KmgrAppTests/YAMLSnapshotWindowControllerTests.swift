@@ -214,8 +214,8 @@ struct YAMLSnapshotWindowControllerTests {
         #expect(status.toolTip?.contains("UID-pinned") == true)
     }
 
-    @Test("read-only slash opens native find while editable slash remains YAML input")
-    func slashFindShortcutRespectsEditing() async throws {
+    @Test("read-only E starts editing and slash remains contextual")
+    func readOnlyEditAndSlashShortcuts() async throws {
         let identity = yamlSnapshotIdentity()
         let source = "apiVersion: v1\nkind: ConfigMap\n"
         let controller = YAMLSnapshotWindowController(
@@ -248,7 +248,9 @@ struct YAMLSnapshotWindowControllerTests {
         #expect(textView.string == source)
 
         scroll.isFindBarVisible = false
-        edit.performClick(nil)
+        textView.keyDown(with: try yamlSnapshotKeyEvent("e"))
+        #expect(textView.isEditable)
+        #expect(edit.isHidden)
         textView.setSelectedRange(NSRange(location: (source as NSString).length, length: 0))
         textView.keyDown(with: try yamlSnapshotKeyEvent("/"))
         #expect(!scroll.isFindBarVisible)

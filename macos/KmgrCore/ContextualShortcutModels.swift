@@ -41,7 +41,6 @@ public struct ResourceListShortcutAvailability: Hashable, Sendable {
     public var canShowNode: Bool
     public var canOpenDetails: Bool
     public var canOpenYAML: Bool
-    public var canOpenEvents: Bool
     public var canOpenLogs: Bool
     public var canOpenTerminal: Bool
     public var canStartPortForward: Bool
@@ -53,7 +52,6 @@ public struct ResourceListShortcutAvailability: Hashable, Sendable {
         canShowNode: Bool = false,
         canOpenDetails: Bool = false,
         canOpenYAML: Bool = false,
-        canOpenEvents: Bool = false,
         canOpenLogs: Bool = false,
         canOpenTerminal: Bool = false,
         canStartPortForward: Bool = false,
@@ -64,7 +62,6 @@ public struct ResourceListShortcutAvailability: Hashable, Sendable {
         self.canShowNode = canShowNode
         self.canOpenDetails = canOpenDetails
         self.canOpenYAML = canOpenYAML
-        self.canOpenEvents = canOpenEvents
         self.canOpenLogs = canOpenLogs
         self.canOpenTerminal = canOpenTerminal
         self.canStartPortForward = canStartPortForward
@@ -104,12 +101,22 @@ public enum ContextualShortcutCatalog {
         ]
         if availability.canEnterSubresource {
             items.append(item("resource.enter", "Return", "Enter selected subresource"))
+            items.append(item(
+                "resource.enter.window",
+                "\u{2318}Return",
+                "Enter selected subresource in a new workspace"
+            ))
         }
         if availability.canShowNode {
             items.append(item("resource.node", "O", "Show selected Pod's Node"))
         }
         if availability.canOpenDetails {
             items.append(item("resource.details", "D", "Describe selected object"))
+            items.append(item(
+                "resource.details.window",
+                "\u{2318}D",
+                "Describe selected object in a new window"
+            ))
         }
         if availability.canOpenYAML {
             items.append(item(
@@ -119,12 +126,14 @@ public enum ContextualShortcutCatalog {
             ))
             items.append(item(
                 "resource.yaml.window",
-                "\u{21E7}Y",
+                "\u{2318}Y",
                 "Open selected object YAML in a new window"
             ))
-        }
-        if availability.canOpenEvents {
-            items.append(item("resource.events", "E", "Open selected object events"))
+            items.append(item(
+                "resource.yaml.edit-window",
+                "E",
+                "Open YAML in a new window and start editing"
+            ))
         }
         if availability.canOpenLogs {
             items.append(item("resource.logs", "L", "Open logs"))
@@ -276,7 +285,7 @@ public enum ContextualShortcutCatalog {
             items.append(item(
                 "details.events",
                 "E",
-                "Open complete Events list for this object"
+                "Open complete Events list in a new workspace"
             ))
         }
         items.append(namespaceItem)
@@ -288,6 +297,29 @@ public enum ContextualShortcutCatalog {
         return ContextualShortcutSnapshot(
             contextID: "object-details",
             title: "Object Details",
+            items: items
+        )
+    }
+
+    public static func yamlSnapshot(
+        isEditing: Bool
+    ) -> ContextualShortcutSnapshot {
+        var items: [ContextualShortcutItem] = []
+        if isEditing {
+            items.append(item("yaml.save", "\u{2318}S", "Review and save YAML changes"))
+            items.append(item("yaml.cancel", "Escape", "Cancel YAML editing"))
+        } else {
+            items.append(item(
+                "yaml.edit",
+                "E",
+                "Start editing this YAML"
+            ))
+            items.append(item("yaml.find", "/", "Find in YAML"))
+        }
+        items.append(item("window.close", "\u{2318}W", "Close window"))
+        return ContextualShortcutSnapshot(
+            contextID: "yaml-snapshot",
+            title: "YAML",
             items: items
         )
     }
