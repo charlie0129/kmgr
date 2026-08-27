@@ -127,6 +127,7 @@ struct ResourceViewportVirtualizationTests {
                 && provider.fetchRequests.contains { $0.startIndex == 0 }
                 && self.cellText(in: table, row: 0) == "pod-0"
         }
+        #expect(table.verticalMotionCanBeginDrag == false)
 
         let initialFetch = try #require(provider.fetchRequests.first)
         #expect(initialFetch.length <= 512)

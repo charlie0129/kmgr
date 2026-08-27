@@ -7,6 +7,23 @@ import KmgrCore
 /// selection, and scroll-restoration work used by the product.
 @MainActor
 enum ResourceTableAppKitProjection {
+    /// Returns the one contiguous range AppKit produces for a native
+    /// drag-selection gesture. A plain drag must be anchored at one end of the
+    /// range; a discontiguous or otherwise malformed selection is left to the
+    /// caller's ordinary single-row fallback.
+    static func contiguousNativeSelectionRange(
+        anchoredAt row: Int,
+        selectedRows: IndexSet
+    ) -> Range<Int>? {
+        guard row >= 0,
+            selectedRows.contains(row),
+            selectedRows.rangeView.count == 1,
+            let range = selectedRows.rangeView.first,
+            row == range.lowerBound || row == range.upperBound - 1
+        else { return nil }
+        return range
+    }
+
     static func capture(
         model: ResourceTableModel,
         from tableView: NSTableView,

@@ -98,9 +98,10 @@ forwards live in one app-wide Port Forwards window.
 ## Main workflows
 
 - Resource tables use UID-stable native multi-selection. Sorting, filtering,
-  and watch updates do not retarget a selection by row index. Clicking a cell
-  captures its full value for Command-C or Copy Cell without adding a second
-  visible selection or changing the selected rows.
+  and watch updates do not retarget a selection by row index. Drag across rows
+  or use Shift-click to select a contiguous range; Command-click toggles one
+  row. Clicking a cell captures its full value for Command-C or Copy Cell
+  without adding a second visible selection or changing the selected rows.
 - Restarting a resource stream affects that compatible shared raw stream, not
   the entire cluster connection. Other resource kinds, mutations, terminals,
   logs, and port-forwards continue independently.
@@ -231,7 +232,7 @@ globally across launches rather than per cluster.
 | Return in a key/value editor | Edit the selected value |
 | Return in Details Summary | Edit the selected label or annotation |
 | Up / Down, `K` / `J` | Move table selection |
-| Shift-click / Shift-Up / Shift-Down | Extend native selection |
+| Drag across rows / Shift-click / Shift-Up / Shift-Down | Extend native selection |
 | Command-click | Toggle one selected row |
 | Command-A | Select all visible rows |
 | `O` | Show the selected Pod's assigned Node in the Node list |

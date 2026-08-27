@@ -3914,6 +3914,15 @@ private struct DeferredUIDSelectionGesture: Sendable {
     var gesture: ResourceSelectionGesture
 }
 
+private struct PendingNativeRangeSelection: Sendable, Equatable {
+    var anchorUID: ResourceUID
+    var targetIndex: UInt64
+    var selectedRange: Range<Int>
+    var revision: ResourceSelectionRevision
+    var expectedViewRevision: ResourceViewRevision
+    var expectedGVR: GVR
+}
+
 @MainActor
 private final class ResourceSelectionGestureFence {
     private var result: Result<ResourceSelectionState, Error>?
@@ -3935,6 +3944,14 @@ private final class ResourceSelectionGestureFence {
             continuation.resume(with: result)
         }
     }
+}
+
+@MainActor
+private struct PendingDeferredSelectionFence {
+    var fence: ResourceSelectionGestureFence
+    /// The deferred gesture that existed when the command context was
+    /// captured. Later drags must not retarget that context.
+    var gestureOffset: Int
 }
 
 private struct ResourceSelectionProjectionTicket: Hashable, Sendable {
@@ -4109,6 +4126,14 @@ private final class ResourceListViewController: NSViewController,
     private var selectionGestureFences: [UInt64: [ResourceSelectionGestureFence]] = [:]
     private var deferredUIDSelectionGestures: [DeferredUIDSelectionGesture] = []
     private var pendingUIDSelectionGestureSequences: Set<UInt64> = []
+    /// A native drag can finish on a row that AppKit knows about numerically
+    /// but the bounded UID cache has not materialized yet. Keep the compact
+    /// range and fetch only that endpoint before publishing the gesture.
+    private var pendingNativeRangeSelection: PendingNativeRangeSelection?
+    private var nativeRangeSelectionFetchTask: Task<Void, Never>?
+    private var nativeRangeSelectionFetchTicket: UInt64 = 0
+    private var pendingNativeRangeSelectionFences: [ResourceSelectionGestureFence] = []
+    private var pendingDeferredSelectionFences: [PendingDeferredSelectionFence] = []
     /// Last selection explicitly installed by this controller. AppKit changes
     /// its indexes before the delegate fallback observes accessibility-driven
     /// selection, so a rejected overflow gesture needs this bounded snapshot
@@ -4454,6 +4479,10 @@ private final class ResourceListViewController: NSViewController,
         tableView.usesAlternatingRowBackgroundColors = true
         tableView.allowsMultipleSelection = true
         tableView.allowsEmptySelection = true
+        // AppKit's table tracking already implements Finder-style drag
+        // selection. Disabling vertical row drags lets a plain pointer drag
+        // extend the selection instead of starting a drag session.
+        tableView.verticalMotionCanBeginDrag = false
         // Preferred widths are global per exact GVR. Adaptive AppKit widths
         // depend on one window's viewport and must never feed back into that
         // shared layout, so resource tables scroll horizontally instead.
@@ -4467,6 +4496,9 @@ private final class ResourceListViewController: NSViewController,
         }
         tableView.onSelectionGesture = { [weak self] gesture in
             self?.performSelectionGesture(gesture) ?? false
+        }
+        tableView.onNativeSelectionAnchor = { [weak self] row in
+            self?.selectionUID(atTableRow: row)
         }
         tableView.menu = makeResourceMenu()
 
@@ -4776,7 +4808,9 @@ private final class ResourceListViewController: NSViewController,
             tableHasActiveEditor: tableView.currentEditor() != nil
         )
         let selectionFence: ResourceSelectionGestureFence?
-        if selectionGestureTask != nil || hasPendingSelectionGestures,
+        if let pendingFence = makePendingSelectionFence() {
+            selectionFence = pendingFence
+        } else if selectionGestureTask != nil || hasPendingSelectionGestures,
             let sequence = lastEnqueuedSelectionGestureSequence
         {
             let fence = ResourceSelectionGestureFence()
@@ -4798,7 +4832,7 @@ private final class ResourceListViewController: NSViewController,
             resourceIsNamespaced: resource?.namespaced ?? false,
             currentRevision: currentSelectionRevision,
             networkActionsAllowed: (displayedSelectionState != nil
-                || selectionGestureTask != nil)
+                || hasPendingSelectionWork)
                 ? (isAuthenticated && resourceCatalogValidated)
                 : recoveredResourceTrust.permitsNetworkActions(
                     for: fallbackIdentities
@@ -5098,7 +5132,7 @@ private final class ResourceListViewController: NSViewController,
     @objc private func showColumns() {
         guard isAuthenticated, resourceCatalogValidated else { NSSound.beep(); return }
         guard let resource else { return }
-        if selectionGestureTask != nil || hasPendingSelectionGestures {
+        if hasPendingSelectionWork {
             showColumnsAfterPendingSelection()
             return
         }
@@ -5122,8 +5156,16 @@ private final class ResourceListViewController: NSViewController,
     private func showColumnsAfterPendingSelection() {
         guard columnsSelectionTask == nil else { NSSound.beep(); return }
         let gestureTask = selectionGestureTask
+        let selectionFence = makePendingSelectionFence()
         columnsSelectionTask = Task { @MainActor [weak self] in
             await gestureTask?.value
+            do {
+                _ = try await selectionFence?.value()
+            } catch {
+                guard !Task.isCancelled, let self else { return }
+                columnsSelectionTask = nil
+                return
+            }
             guard !Task.isCancelled, let self else { return }
             columnsSelectionTask = nil
             showColumns()
@@ -5400,6 +5442,7 @@ private final class ResourceListViewController: NSViewController,
         viewportUpdateTask?.cancel()
         viewportUpdateTask = nil
         cancelRangeFetches()
+        cancelPendingNativeRangeSelection(restoringSelection: true)
         stopMetricInterestWork()
         selectionProjectionTask?.cancel()
         selectionProjectionTask = nil
@@ -5470,6 +5513,7 @@ private final class ResourceListViewController: NSViewController,
         tableRowsVisible = 0
         presentedTableRange = nil
         pendingSelectionTableIndexes = nil
+        pendingUIDSelectionTableIndexes = nil
         pendingCommandForLoadingSelection = nil
         selectedUIDsKnownInPresentedIndex.removeAll(keepingCapacity: true)
     }
@@ -5974,6 +6018,19 @@ private final class ResourceListViewController: NSViewController,
         return model.rowByUID[uid]
     }
 
+    /// Resolves a row identity from the presented model first, then from the
+    /// exact bounded cache. The former preserves a warm row's identity across
+    /// a revision race; the latter covers a freshly autoscrolled endpoint that
+    /// has arrived in cache but has not yet become the rendered range.
+    private func selectionUID(atTableRow tableRow: Int) -> ResourceUID? {
+        guard tableRow >= 0 else { return nil }
+        if let row = resourceRow(atTableRow: tableRow) {
+            return row.identity.uid
+        }
+        guard let index = UInt64(exactly: tableRow) else { return nil }
+        return rangeCache?.row(at: index)?.identity.uid
+    }
+
     private func selectedTableRowIndexes() -> IndexSet {
         IndexSet(model.orderedVisibleUIDs.enumerated().compactMap {
             guard model.selectedUIDs.contains($0.element) else { return nil }
@@ -6007,6 +6064,7 @@ private final class ResourceListViewController: NSViewController,
     /// extend or toggle its old numeric intervals.
     private func sealSelectionContinuation() {
         failSelectionGestureFences(error: selectionScopeChangedIssue())
+        cancelPendingNativeRangeSelection()
         selectionContinuationToken = nil
         selectionContinuationRevision = nil
         committedSelectionEndpoint = nil
@@ -6026,6 +6084,7 @@ private final class ResourceListViewController: NSViewController,
     private func resetSelectionAuthority() {
         clearInlineIssue(scope: .selection)
         failSelectionGestureFences(error: selectionScopeChangedIssue())
+        cancelPendingNativeRangeSelection()
         selectionGestureTask?.cancel()
         selectionGestureTask = nil
         selectionProjectionTask?.cancel()
@@ -6074,6 +6133,7 @@ private final class ResourceListViewController: NSViewController,
     private func clearDisplayedSelection(token: String) {
         guard displayedSelectionState?.token == token else { return }
         clearInlineIssue(scope: .selection)
+        cancelPendingNativeRangeSelection()
         selectionExpiryTask?.cancel()
         selectionExpiryTask = nil
         displayedSelectionState = nil
@@ -6096,10 +6156,16 @@ private final class ResourceListViewController: NSViewController,
         publishContextualShortcutsIfChanged()
     }
 
-    private func clearDeferredUIDSelection() {
+    private func clearDeferredUIDSelection(
+        failingWith error: Error? = nil
+    ) {
+        let fences = pendingDeferredSelectionFences
+        pendingDeferredSelectionFences.removeAll(keepingCapacity: true)
         deferredUIDSelectionGestures.removeAll(keepingCapacity: true)
         pendingUIDSelectionGestureSequences.removeAll(keepingCapacity: true)
         pendingUIDSelectionTableIndexes = nil
+        let failure = error ?? selectionScopeChangedIssue()
+        for pending in fences { pending.fence.resolve(.failure(failure)) }
     }
 
     private func scheduleSelectionExpiry(for state: ResourceSelectionState) {
@@ -6254,7 +6320,8 @@ private final class ResourceListViewController: NSViewController,
         selectedUIDsKnownInPresentedIndex = selectedUIDs
 
         if pendingUIDSelectionGestureSequences.isEmpty,
-            deferredUIDSelectionGestures.isEmpty
+            deferredUIDSelectionGestures.isEmpty,
+            pendingDeferredSelectionFences.isEmpty
         {
             pendingUIDSelectionTableIndexes = nil
         }
@@ -6642,8 +6709,19 @@ private final class ResourceListViewController: NSViewController,
         // backend but cannot be painted at a guessed numeric position.
         pendingUIDSelectionTableIndexes = selectedTableRowIndexes()
         let deferred = deferredUIDSelectionGestures
+        let deferredFences = pendingDeferredSelectionFences
+        let preservesPendingCommand = pendingCommandForLoadingSelection != nil
         deferredUIDSelectionGestures.removeAll(keepingCapacity: true)
-        for item in deferred {
+        pendingDeferredSelectionFences.removeAll(keepingCapacity: true)
+        var fencesByGestureOffset: [Int: [ResourceSelectionGestureFence]] = [:]
+        for pending in deferredFences {
+            let offset = min(
+                max(0, pending.gestureOffset),
+                max(0, deferred.count - 1)
+            )
+            fencesByGestureOffset[offset, default: []].append(pending.fence)
+        }
+        for (offset, item) in deferred.enumerated() {
             let targetTableRow = item.gesture.targetUID.flatMap {
                 tableRowByUID[$0]
             }
@@ -6655,9 +6733,16 @@ private final class ResourceListViewController: NSViewController,
                 item.gesture,
                 revision: revision,
                 activeEndpoint: targetTableRow.map(UInt64.init),
-                preservesUIDPlaceholder: true
+                preservesUIDPlaceholder: true,
+                selectionFences: fencesByGestureOffset[offset] ?? [],
+                preservesPendingCommand: preservesPendingCommand
             )
             if !accepted {
+                let error = selectionQueueCapacityIssue()
+                for pending in deferredFences {
+                    pending.fence.resolve(.failure(error))
+                }
+                pendingCommandForLoadingSelection = nil
                 clearDeferredUIDSelection()
                 restoreAppKitSelectionFromLoadedModel()
                 break
@@ -6666,8 +6751,7 @@ private final class ResourceListViewController: NSViewController,
     }
 
     private func runPendingSelectionCommandIfReady() {
-        guard selectionGestureTask == nil,
-            !hasPendingSelectionGestures,
+        guard !hasPendingSelectionWork,
             let command = pendingCommandForLoadingSelection
         else { return }
         pendingCommandForLoadingSelection = nil
@@ -8352,7 +8436,9 @@ private final class ResourceListViewController: NSViewController,
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
-        guard !suppressSelectionCallbacks else { return }
+        guard !suppressSelectionCallbacks,
+            !tableView.isTrackingNativeSelection
+        else { return }
         // Mouse and keyboard gestures normally arrive through
         // ResourceTableView before AppKit mutates its local indexes. Keep this
         // delegate as an accessibility/programmatic fallback, translating the
@@ -8367,6 +8453,33 @@ private final class ResourceListViewController: NSViewController,
     }
 
     private func performSelectionGesture(_ gesture: ResourceTableSelectionGesture) -> Bool {
+        // An endpoint fetch belongs to the drag that started it. Any later
+        // click or keyboard gesture supersedes that drag; cancel it before
+        // translating the newer gesture so a late response cannot retarget
+        // the selection.
+        if hasPendingNativeRangeSelection {
+            pendingCommandForLoadingSelection = nil
+            cancelPendingNativeRangeSelection(restoringSelection: true)
+        }
+        if let nativeRange = gesture.nativeSelectionRange,
+            let anchorRow = gesture.nativeSelectionAnchorRow,
+            nativeRange.count > 1
+        {
+            return performNativeRangeSelection(
+                anchorRow: anchorRow,
+                selectedRange: nativeRange,
+                anchorUID: gesture.nativeSelectionAnchorUID
+            )
+        }
+
+        // A malformed/non-contiguous result from AppKit's tracking still had
+        // its delegate callback suppressed. Treat it as a normal replacement
+        // so the backend and the table cannot diverge.
+        let gesture = ResourceTableSelectionGesture(
+            row: gesture.row,
+            modifiers: gesture.modifiers,
+            keyboardDirection: gesture.keyboardDirection
+        )
         let targetIndex: UInt64?
         if let direction = gesture.keyboardDirection {
             let endpoint = interactiveSelectionRevision.flatMap { revision in
@@ -8432,6 +8545,349 @@ private final class ResourceListViewController: NSViewController,
             activeEndpoint: targetIndex
         )
         return true
+    }
+
+    /// Converts AppKit's compact contiguous drag result into one stable
+    /// backend range gesture. AppKit remains responsible for painting the
+    /// provisional range while the request is in flight; the token projection
+    /// reconciles it with the bounded UID model afterward.
+    private func performNativeRangeSelection(
+        anchorRow: Int,
+        selectedRange: Range<Int>,
+        anchorUID capturedAnchorUID: ResourceUID?
+    ) -> Bool {
+        guard anchorRow >= 0,
+            selectedRange.lowerBound >= 0,
+            selectedRange.upperBound <= tableRowCount,
+            selectedRange.count > 1,
+            selectedRange.contains(anchorRow),
+            anchorRow == selectedRange.lowerBound
+                || anchorRow == selectedRange.upperBound - 1
+        else {
+            return performSelectionGesture(ResourceTableSelectionGesture(
+                row: anchorRow >= 0 ? anchorRow : nil,
+                modifiers: [],
+                keyboardDirection: nil
+            ))
+        }
+
+        let targetRow = anchorRow == selectedRange.lowerBound
+            ? selectedRange.upperBound - 1
+            : selectedRange.lowerBound
+        guard targetRow >= 0, targetRow < tableRowCount else {
+            restoreAppKitSelectionFromLoadedModel()
+            return true
+        }
+
+        let anchorUID = capturedAnchorUID ?? selectionUID(atTableRow: anchorRow)
+        guard let anchorUID else {
+            // A row that was never authenticated by a bounded range cannot be
+            // used as a stable range anchor. Restore the UID-backed selection
+            // rather than allowing a stale numeric interval to escape.
+            NSSound.beep()
+            restoreAppKitSelectionFromLoadedModel()
+            return true
+        }
+
+        let selectedIndexes = IndexSet(integersIn: selectedRange)
+        let targetUID = selectionUID(atTableRow: targetRow)
+        if let targetUID, let revision = currentSelectionRevision {
+            // A newer drag supersedes any endpoint fetch still in flight.
+            // Its command-context fences must fail rather than follow this
+            // unrelated gesture.
+            cancelPendingNativeRangeSelection()
+            return enqueueNativeRangeSelection(
+                anchorUID: anchorUID,
+                targetUID: targetUID,
+                targetRow: targetRow,
+                selectedIndexes: selectedIndexes,
+                revision: revision,
+                selectionFences: []
+            )
+        }
+
+        if let targetUID {
+            // The table is showing a warm/stale presentation. Replaying by
+            // UID is safe once the next exact revision is available.
+            return deferNativeRangeSelection(
+                anchorUID: anchorUID,
+                targetUID: targetUID,
+                targetRow: targetRow,
+                selectedIndexes: selectedIndexes
+            )
+        }
+
+        guard let revision = currentSelectionRevision else {
+            NSSound.beep()
+            restoreAppKitSelectionFromLoadedModel()
+            return true
+        }
+
+        // The endpoint may have been reached by AppKit's autoscroll before
+        // the bounded viewport fetch completed. Fetch one authenticated row;
+        // never send a numeric endpoint against an unknown/stale ordering.
+        return fetchNativeRangeTarget(
+            anchorUID: anchorUID,
+            targetIndex: UInt64(targetRow),
+            selectedRange: selectedRange,
+            revision: revision
+        )
+    }
+
+    private func enqueueNativeRangeSelection(
+        anchorUID: ResourceUID,
+        targetUID: ResourceUID,
+        targetRow: Int,
+        selectedIndexes: IndexSet,
+        revision: ResourceSelectionRevision,
+        selectionFences: [ResourceSelectionGestureFence] = [],
+        preservesPendingCommand: Bool = false
+    ) -> Bool {
+        cancelPendingNativeRangeSelection(
+            preservingPendingCommand: preservesPendingCommand
+        )
+        let backendGesture = ResourceSelectionGesture(
+            kind: .shiftExtend,
+            additive: false,
+            targetUID: targetUID,
+            anchorUID: anchorUID
+        )
+
+        // Keep exactly what AppKit painted during tracking until the token's
+        // bounded projection arrives. `lastAcceptedAppKitSelection` remains
+        // the previous committed snapshot if the queue is at capacity.
+        pendingUIDSelectionTableIndexes = selectedIndexes
+        let accepted = enqueueSelectionGesture(
+            backendGesture,
+            revision: revision,
+            activeEndpoint: UInt64(targetRow),
+            preservesUIDPlaceholder: true,
+            selectionFences: selectionFences,
+            preservesPendingCommand: preservesPendingCommand
+        )
+        guard accepted else {
+            pendingUIDSelectionTableIndexes = nil
+            pendingCommandForLoadingSelection = nil
+            restoreAppKitSelectionFromLoadedModel()
+            return true
+        }
+        lastAcceptedAppKitSelection = selectedIndexes
+        return true
+    }
+
+    private func deferNativeRangeSelection(
+        anchorUID: ResourceUID,
+        targetUID: ResourceUID,
+        targetRow: Int,
+        selectedIndexes: IndexSet
+    ) -> Bool {
+        guard deferredUIDSelectionGestures.count < Self.maxPendingSelectionGestures else {
+            NSSound.beep()
+            restoreAppKitSelectionFromLoadedModel()
+            return true
+        }
+        cancelPendingNativeRangeSelection()
+        let backendGesture = ResourceSelectionGesture(
+            kind: .shiftExtend,
+            additive: false,
+            targetUID: targetUID,
+            anchorUID: anchorUID
+        )
+        deferredUIDSelectionGestures.append(DeferredUIDSelectionGesture(
+            gesture: backendGesture
+        ))
+        pendingUIDSelectionTableIndexes = selectedIndexes
+        let wasSuppressing = suppressSelectionCallbacks
+        suppressSelectionCallbacks = true
+        tableView.selectRowIndexes(selectedIndexes, byExtendingSelection: false)
+        lastAcceptedAppKitSelection = selectedIndexes
+        suppressSelectionCallbacks = wasSuppressing
+        tableView.scrollRowToVisible(targetRow)
+        pendingCommandForLoadingSelection = nil
+        updateStatusLine()
+        return true
+    }
+
+    private func fetchNativeRangeTarget(
+        anchorUID: ResourceUID,
+        targetIndex: UInt64,
+        selectedRange: Range<Int>,
+        revision: ResourceSelectionRevision
+    ) -> Bool {
+        guard let viewRevision = rangeCache?.revision,
+            viewRevision.generation == revision.generation,
+            viewRevision.index == revision.indexRevision,
+            targetIndex < tableRowsVisible
+        else {
+            NSSound.beep()
+            restoreAppKitSelectionFromLoadedModel()
+            return true
+        }
+        guard let resource else {
+            NSSound.beep()
+            restoreAppKitSelectionFromLoadedModel()
+            return true
+        }
+
+        cancelPendingNativeRangeSelection()
+        let pending = PendingNativeRangeSelection(
+            anchorUID: anchorUID,
+            targetIndex: targetIndex,
+            selectedRange: selectedRange,
+            revision: revision,
+            expectedViewRevision: viewRevision,
+            expectedGVR: GVR(
+                group: resource.group,
+                version: resource.version,
+                resource: resource.resource
+            )
+        )
+        pendingNativeRangeSelection = pending
+        pendingUIDSelectionTableIndexes = IndexSet(integersIn: selectedRange)
+        nativeRangeSelectionFetchTicket &+= 1
+        let ticket = nativeRangeSelectionFetchTicket
+        let request = ResourceViewRangeRequest(
+            sessionID: session.sessionID,
+            viewID: viewID,
+            revision: viewRevision,
+            startIndex: targetIndex,
+            length: 1
+        )
+        let provider = self.provider
+        nativeRangeSelectionFetchTask = Task { @MainActor [weak self, provider] in
+            do {
+                let range = try await provider.fetchViewRange(request: request)
+                guard !Task.isCancelled else { return }
+                self?.receiveNativeRangeTarget(
+                    range,
+                    pending: pending,
+                    ticket: ticket
+                )
+            } catch {
+                guard !Task.isCancelled else { return }
+                self?.receiveNativeRangeTargetFailure(
+                    error,
+                    pending: pending,
+                    ticket: ticket
+                )
+            }
+        }
+        return true
+    }
+
+    private func receiveNativeRangeTarget(
+        _ range: ResourceViewRange,
+        pending: PendingNativeRangeSelection,
+        ticket: UInt64
+    ) {
+        guard ticket == nativeRangeSelectionFetchTicket,
+            pendingNativeRangeSelection == pending
+        else { return }
+        guard currentSelectionRevision == pending.revision else {
+            let selectionFences = pendingNativeRangeSelectionFences
+            pendingNativeRangeSelectionFences.removeAll(keepingCapacity: true)
+            cancelPendingNativeRangeSelection()
+            pendingUIDSelectionTableIndexes = nil
+            restoreAppKitSelectionFromLoadedModel()
+            let error = selectionScopeChangedIssue()
+            for fence in selectionFences { fence.resolve(.failure(error)) }
+            return
+        }
+        guard range.viewID == viewID,
+            range.revision == pending.expectedViewRevision,
+            range.rowsVisible == rangeCache?.rowsVisible,
+            range.startIndex == pending.targetIndex,
+            range.rows.count == 1,
+            range.rows[0].identity.clusterSessionID == session.sessionID,
+            range.rows[0].identity.group == pending.expectedGVR.group,
+            range.rows[0].identity.version == pending.expectedGVR.version,
+            range.rows[0].identity.resource == pending.expectedGVR.resource,
+            !range.rows[0].identity.uid.rawValue.isEmpty,
+            range.rows[0].identity.uid.rawValue.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            ) == range.rows[0].identity.uid.rawValue
+        else {
+            receiveNativeRangeTargetFailure(
+                ClusterManagerIssue(
+                    category: .internalFailure,
+                    reason: "InvalidNativeSelectionTargetRange",
+                    message: "The engine returned an invalid row for the drag-selection endpoint.",
+                    operation: "fetch native selection endpoint"
+                ),
+                pending: pending,
+                ticket: ticket
+            )
+            return
+        }
+        let targetUID = range.rows[0].identity.uid
+        let selectionFences = pendingNativeRangeSelectionFences
+        let preservesPendingCommand = pendingCommandForLoadingSelection != nil
+        pendingNativeRangeSelectionFences.removeAll(keepingCapacity: true)
+        cancelPendingNativeRangeSelection(
+            preservingPendingCommand: preservesPendingCommand
+        )
+        _ = enqueueNativeRangeSelection(
+            anchorUID: pending.anchorUID,
+            targetUID: targetUID,
+            targetRow: Int(pending.targetIndex),
+            selectedIndexes: IndexSet(integersIn: pending.selectedRange),
+            revision: pending.revision,
+            selectionFences: selectionFences,
+            preservesPendingCommand: preservesPendingCommand
+        )
+        // The endpoint may have been reached by AppKit autoscroll before the
+        // bounded viewport cache caught up. Re-plan the retained window now
+        // that the UID-backed gesture is queued.
+        scheduleViewportUpdate(immediate: true)
+    }
+
+    private func receiveNativeRangeTargetFailure(
+        _ error: Error,
+        pending: PendingNativeRangeSelection,
+        ticket: UInt64
+    ) {
+        guard ticket == nativeRangeSelectionFetchTicket,
+            pendingNativeRangeSelection == pending
+        else { return }
+        let selectionFences = pendingNativeRangeSelectionFences
+        pendingNativeRangeSelectionFences.removeAll(keepingCapacity: true)
+        cancelPendingNativeRangeSelection()
+        pendingUIDSelectionTableIndexes = nil
+        restoreAppKitSelectionFromLoadedModel()
+        for fence in selectionFences { fence.resolve(.failure(error)) }
+        if let issue = error as? ClusterManagerIssue,
+            issue.isStaleResourceViewRequest || issue.category == .notFound
+        {
+            scheduleViewportUpdate(immediate: true)
+            return
+        }
+        traceResourceCache(
+            "event=native_selection_endpoint_failed error=\(String(describing: type(of: error)))"
+        )
+        show(error: error, scope: .selection)
+    }
+
+    private func cancelPendingNativeRangeSelection(
+        restoringSelection: Bool = false,
+        preservingPendingCommand: Bool = false
+    ) {
+        let hadPendingSelection = pendingNativeRangeSelection != nil
+        let selectionFences = pendingNativeRangeSelectionFences
+        pendingNativeRangeSelectionFences.removeAll(keepingCapacity: true)
+        nativeRangeSelectionFetchTicket &+= 1
+        nativeRangeSelectionFetchTask?.cancel()
+        nativeRangeSelectionFetchTask = nil
+        pendingNativeRangeSelection = nil
+        if !preservingPendingCommand {
+            pendingCommandForLoadingSelection = nil
+        }
+        if !selectionFences.isEmpty {
+            let error = selectionScopeChangedIssue()
+            for fence in selectionFences { fence.resolve(.failure(error)) }
+        }
+        guard restoringSelection, hadPendingSelection else { return }
+        pendingUIDSelectionTableIndexes = nil
+        restoreAppKitSelectionFromLoadedModel()
     }
 
     private func deferUIDSelectionGesture(
@@ -8544,7 +9000,9 @@ private final class ResourceListViewController: NSViewController,
         _ gesture: ResourceSelectionGesture,
         revision: ResourceSelectionRevision,
         activeEndpoint: UInt64?,
-        preservesUIDPlaceholder: Bool = false
+        preservesUIDPlaceholder: Bool = false,
+        selectionFences: [ResourceSelectionGestureFence] = [],
+        preservesPendingCommand: Bool = false
     ) -> Bool {
         guard pendingSelectionGestureCount < Self.maxPendingSelectionGestures else {
             // Consume overflow without allowing AppKit's delegate-first
@@ -8558,9 +9016,13 @@ private final class ResourceListViewController: NSViewController,
                 byExtendingSelection: false
             )
             suppressSelectionCallbacks = wasSuppressing
+            let error = selectionQueueCapacityIssue()
+            for fence in selectionFences { fence.resolve(.failure(error)) }
             return false
         }
-        pendingCommandForLoadingSelection = nil
+        if !preservesPendingCommand {
+            pendingCommandForLoadingSelection = nil
+        }
         nextSelectionGestureSequence &+= 1
         if nextSelectionGestureSequence == 0 { nextSelectionGestureSequence = 1 }
         let sequence = nextSelectionGestureSequence
@@ -8574,6 +9036,9 @@ private final class ResourceListViewController: NSViewController,
         ))
         if preservesUIDPlaceholder {
             pendingUIDSelectionGestureSequences.insert(sequence)
+        }
+        if !selectionFences.isEmpty {
+            selectionGestureFences[sequence, default: []].append(contentsOf: selectionFences)
         }
         if let activeEndpoint {
             activeSelectionEndpoint = activeEndpoint
@@ -8738,7 +9203,7 @@ private final class ResourceListViewController: NSViewController,
         discardSelectionPlaceholder(for: pending)
         clearPendingSelectionGestures()
         pendingSelectionTableIndexes = nil
-        clearDeferredUIDSelection()
+        clearDeferredUIDSelection(failingWith: error)
         pendingCommandForLoadingSelection = nil
         if committedSelectionEndpointRevision == pending.revision {
             activeSelectionEndpoint = committedSelectionEndpoint
@@ -8783,8 +9248,41 @@ private final class ResourceListViewController: NSViewController,
         pendingSelectionTableIndexes = placeholders.isEmpty ? nil : placeholders
     }
 
+    private var hasPendingNativeRangeSelection: Bool {
+        pendingNativeRangeSelection != nil
+            || nativeRangeSelectionFetchTask != nil
+            || !pendingNativeRangeSelectionFences.isEmpty
+    }
+
+    private var hasPendingSelectionWork: Bool {
+        selectionGestureTask != nil
+            || hasPendingSelectionGestures
+            || hasPendingNativeRangeSelection
+            || !deferredUIDSelectionGestures.isEmpty
+            || !pendingDeferredSelectionFences.isEmpty
+    }
+
     private var hasPendingSelectionGestures: Bool {
         pendingSelectionGestureHead < pendingSelectionGestures.count
+    }
+
+    private func makePendingSelectionFence() -> ResourceSelectionGestureFence? {
+        if pendingNativeRangeSelection != nil || nativeRangeSelectionFetchTask != nil {
+            let fence = ResourceSelectionGestureFence()
+            pendingNativeRangeSelectionFences.append(fence)
+            return fence
+        }
+        if !deferredUIDSelectionGestures.isEmpty
+            || !pendingDeferredSelectionFences.isEmpty
+        {
+            let fence = ResourceSelectionGestureFence()
+            pendingDeferredSelectionFences.append(PendingDeferredSelectionFence(
+                fence: fence,
+                gestureOffset: max(0, deferredUIDSelectionGestures.count - 1)
+            ))
+            return fence
+        }
+        return nil
     }
 
     private var pendingSelectionGestureCount: Int {
@@ -8841,6 +9339,16 @@ private final class ResourceListViewController: NSViewController,
             reason: "SelectionScopeChanged",
             message: "The resource view changed before the selection was captured. Reselect the resources and try again.",
             retryable: false,
+            operation: "capture resource selection"
+        )
+    }
+
+    private func selectionQueueCapacityIssue() -> ClusterManagerIssue {
+        ClusterManagerIssue(
+            category: .unavailable,
+            reason: "SelectionQueueCapacityExceeded",
+            message: "The resource list is still applying a previous selection. Try again.",
+            retryable: true,
             operation: "capture resource selection"
         )
     }
@@ -9134,7 +9642,7 @@ private final class ResourceListViewController: NSViewController,
         requiringTableFocus: Bool
     ) {
         if command.requiresMaterializedSelection,
-            (selectionGestureTask != nil || hasPendingSelectionGestures)
+            hasPendingSelectionWork
         {
             pendingCommandForLoadingSelection = command
             return
@@ -9493,6 +10001,9 @@ private final class ResourceListViewController: NSViewController,
         requiringTableFocus: Bool
     ) -> Bool {
         if requiringTableFocus, view.window?.firstResponder !== tableView { return false }
+        if command.requiresMaterializedSelection, hasPendingSelectionWork {
+            return false
+        }
         if let state = displayedSelectionState {
             let compatible = isCommandCompatible(
                 command,
@@ -10027,6 +10538,11 @@ private final class ResourceTableCommandBox {
 private final class ResourceTableView: CapturedCellTableView {
     var onCommand: ((ResourceTableCommand) -> Void)?
     var onSelectionGesture: ((ResourceTableSelectionGesture) -> Bool)?
+    var onNativeSelectionAnchor: ((Int) -> ResourceUID?)?
+    /// True only while NSTableView is tracking a plain mouse gesture. The
+    /// controller uses this to ignore provisional delegate callbacks; the
+    /// completed range is handed back after `super.mouseDown` returns.
+    var isTrackingNativeSelection = false
 
     /// A nil-targeted Edit > Select All command resolves to NSTableView before
     /// `keyDown(with:)` gets a chance to translate Command-A. Route that
@@ -10045,6 +10561,43 @@ private final class ResourceTableView: CapturedCellTableView {
         let point = convert(event.locationInWindow, from: nil)
         captureCellValue(at: point)
         let row = self.row(at: point)
+        let isPlainLeftRowClick = event.type == .leftMouseDown
+            && row >= 0
+            && event.modifierFlags.intersection([
+                .shift, .command, .control, .option,
+            ]).isEmpty
+        if isPlainLeftRowClick {
+            let anchorUID = onNativeSelectionAnchor?(row)
+            isTrackingNativeSelection = true
+            let savedDoubleAction = doubleAction
+            // NSTableView sends its doubleAction from inside mouseDown. The
+            // controller must first publish the UID-backed selection, then
+            // perform Enter against that new selection.
+            if event.clickCount > 1 { doubleAction = nil }
+            super.mouseDown(with: event)
+            doubleAction = savedDoubleAction
+            isTrackingNativeSelection = false
+
+            let selectedRows = selectedRowIndexes
+            let nativeRange = ResourceTableAppKitProjection
+                .contiguousNativeSelectionRange(
+                    anchoredAt: row,
+                    selectedRows: selectedRows
+                )
+            let gesture = ResourceTableSelectionGesture(
+                row: row,
+                modifiers: [],
+                keyboardDirection: nil,
+                nativeSelectionAnchorRow: row,
+                nativeSelectionRange: nativeRange,
+                nativeSelectionAnchorUID: anchorUID
+            )
+            let selectionHandled = onSelectionGesture?(gesture) == true
+            window?.makeFirstResponder(self)
+            if selectionHandled, event.clickCount > 1 { onCommand?(.enter) }
+            return
+        }
+
         let gesture = ResourceTableSelectionGesture(
             row: row >= 0 ? row : nil,
             modifiers: Self.selectionModifiers(from: event.modifierFlags),
@@ -10155,6 +10708,28 @@ private struct ResourceTableSelectionGesture {
     let row: Int?
     let modifiers: ResourceTableSelectionModifiers
     let keyboardDirection: KeyboardSelectionDirection?
+    /// Non-nil only for the range AppKit tracked between mouse-down and
+    /// mouse-up. The controller turns its endpoints into UID-stable backend
+    /// selection gestures instead of publishing every mouse movement.
+    let nativeSelectionAnchorRow: Int?
+    let nativeSelectionRange: Range<Int>?
+    let nativeSelectionAnchorUID: ResourceUID?
+
+    init(
+        row: Int?,
+        modifiers: ResourceTableSelectionModifiers,
+        keyboardDirection: KeyboardSelectionDirection?,
+        nativeSelectionAnchorRow: Int? = nil,
+        nativeSelectionRange: Range<Int>? = nil,
+        nativeSelectionAnchorUID: ResourceUID? = nil
+    ) {
+        self.row = row
+        self.modifiers = modifiers
+        self.keyboardDirection = keyboardDirection
+        self.nativeSelectionAnchorRow = nativeSelectionAnchorRow
+        self.nativeSelectionRange = nativeSelectionRange
+        self.nativeSelectionAnchorUID = nativeSelectionAnchorUID
+    }
 }
 
 private enum KeyboardSelectionDirection {

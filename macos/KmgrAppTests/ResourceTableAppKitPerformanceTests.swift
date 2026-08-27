@@ -8,6 +8,34 @@ extension AppKitTestHarness {
 @MainActor
 @Suite("Resource table AppKit harness")
 struct ResourceTableAppKitPerformanceTests {
+    @Test("native drag projection accepts only an endpoint-anchored range")
+    func nativeDragSelectionRange() {
+        #expect(
+            ResourceTableAppKitProjection.contiguousNativeSelectionRange(
+                anchoredAt: 2,
+                selectedRows: IndexSet(integersIn: 2..<8)
+            ) == 2..<8
+        )
+        #expect(
+            ResourceTableAppKitProjection.contiguousNativeSelectionRange(
+                anchoredAt: 7,
+                selectedRows: IndexSet(integersIn: 2..<8)
+            ) == 2..<8
+        )
+        #expect(
+            ResourceTableAppKitProjection.contiguousNativeSelectionRange(
+                anchoredAt: 4,
+                selectedRows: IndexSet(integersIn: 2..<8)
+            ) == nil
+        )
+        #expect(
+            ResourceTableAppKitProjection.contiguousNativeSelectionRange(
+                anchoredAt: 2,
+                selectedRows: IndexSet([2, 3, 5])
+            ) == nil
+        )
+    }
+
     @Test("targeted updates preserve changed and sibling cell identities")
     func targetedUpdatesStayInPlace() throws {
         let uid: ResourceUID = "node-a"
