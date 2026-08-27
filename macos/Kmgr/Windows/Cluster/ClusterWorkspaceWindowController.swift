@@ -138,6 +138,12 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     /// can reuse its authority/cache state.
     var onOpenNewWorkspace: ((ClusterWorkspaceOpenRequest) -> Void)?
     var onRestorationCheckpoint: ((ClusterWindowRestorationRecord) -> Void)?
+    /// Called when this workspace becomes the active source for its exact
+    /// kubeconfig context. Passive restoration checkpoints never invoke it.
+    var onActivationCheckpoint: ((ClusterWindowRestorationRecord) -> Void)?
+    /// Called after a move or resize (and during lifecycle checkpoints) so the
+    /// application can copy the source frame to its context bookmark.
+    var onFrameCheckpoint: ((ClusterWindowRestorationRecord) -> Void)?
     var onWindowSizeCheckpoint: ((ClusterWorkspaceWindowSize) -> Void)?
     var contextualShortcutsDidChange: (() -> Void)?
 
@@ -185,6 +191,9 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     private var yamlSnapshotWindowControllers: [ResourceUID: YAMLSnapshotWindowController] = [:]
     private var didStartWorkspace = false
     private var isClosing = false
+    private var suppressInitialActivation = true
+    private let holdInitialActivationDuringRestore: Bool
+    private var frameCheckpointTask: Task<Void, Never>?
     private var windowSizeCheckpointTask: Task<Void, Never>?
     private let resourceFilterFieldEditor = ResourceFilterFieldEditor(frame: .zero)
 
@@ -236,6 +245,9 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         },
         restoration: ClusterWindowRestorationRecord,
         initialWindowFrameSize: ClusterWorkspaceWindowSize? = nil,
+        placement: WorkspaceWindowPlacementMode = .fresh,
+        suppressInitialActivation: Bool = false,
+        occupiedWindowFrames: [NSRect]? = nil,
         startsAuthenticated: Bool = true,
         onShowPortForwards: @escaping @MainActor () -> Void
     ) {
@@ -258,6 +270,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         self.terminalPreferences = terminalPreferences
         self.saveNodeShellPreferences = saveNodeShellPreferences
         self.onShowPortForwards = onShowPortForwards
+        self.holdInitialActivationDuringRestore = suppressInitialActivation
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1_180, height: 760),
@@ -304,22 +317,53 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         window.delegate = self
         window.contentViewController = workspaceController
         window.toolbar = workspaceController.makeToolbar()
-        if let initialWindowFrameSize, initialWindowFrameSize.isValid {
-            var frame = window.frame
-            let visibleSize = NSScreen.main?.visibleFrame.size
-            let requestedWidth = CGFloat(initialWindowFrameSize.width)
-            let requestedHeight = CGFloat(initialWindowFrameSize.height)
-            frame.size.width = max(
-                window.minSize.width,
-                min(requestedWidth, visibleSize?.width ?? requestedWidth)
-            )
-            frame.size.height = max(
-                window.minSize.height,
-                min(requestedHeight, visibleSize?.height ?? requestedHeight)
-            )
-            window.setFrame(frame, display: false)
+
+        let savedFrame: NSRect?
+        switch placement {
+        case .fresh:
+            savedFrame = nil
+        case .restored:
+            savedFrame = window.setFrameUsingName(restoration.frameAutosaveName)
+                ? window.frame
+                : nil
+        case .contextBookmark(let seedFrameAutosaveName):
+            savedFrame = window.setFrameUsingName(seedFrameAutosaveName)
+                ? window.frame
+                : nil
         }
-        window.center()
+        let fallbackSize: NSSize?
+        if let initialWindowFrameSize, initialWindowFrameSize.isValid {
+            fallbackSize = NSSize(
+                width: initialWindowFrameSize.width,
+                height: initialWindowFrameSize.height
+            )
+        } else {
+            fallbackSize = nil
+        }
+        let occupiedFrames = occupiedWindowFrames ?? NSApp.windows.compactMap { candidate in
+            guard candidate !== window, candidate.isVisible,
+                candidate.level == .normal
+            else { return nil }
+            return candidate.frame
+        }
+        let resolvedFrame = WorkspaceWindowPlacement.resolve(
+            defaultFrame: window.frame,
+            savedFrame: savedFrame,
+            minimumSize: window.minSize,
+            fallbackSize: fallbackSize,
+            visibleFrames: WorkspaceWindowPlacement.visibleFrames(),
+            occupiedFrames: occupiedFrames,
+            // A context bookmark is a starting point for a new window. A
+            // restored record is an independent historical presentation and
+            // should retain its exact reachable rectangle.
+            avoidOccupiedSavedFrame: placement != .restored
+        )
+        window.setFrame(resolvedFrame, display: false)
+        window.setFrameAutosaveName(restoration.frameAutosaveName)
+        // Explicitly seed the per-window key. This is important for a newly
+        // created record and also makes a fallback durable before its first
+        // move/resize notification.
+        window.saveFrame(usingName: restoration.frameAutosaveName)
     }
 
     private func installWorkspaceCallbacks() {
@@ -372,6 +416,14 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
             guard let self, !isClosing else { return }
             self.restoration.state = state
             self.onRestorationCheckpoint?(self.restoration)
+            // Navigation changes can happen while the workspace remains key
+            // without another key-window transition. Keep the active
+            // exact-context state and frame bookmark current, while the
+            // opening guard prevents a relaunch shell from becoming the
+            // source before all restored windows have been presented.
+            if self.window?.isKeyWindow == true, !self.suppressInitialActivation {
+                self.onActivationCheckpoint?(self.restoration)
+            }
         }
         workspaceController.onContextualShortcutsChanged = { [weak self] in
             self?.contextualShortcutsDidChange?()
@@ -384,6 +436,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     }
 
     override func showWindow(_ sender: Any?) {
+        let isFirstPresentation = !didStartWorkspace
         if !didStartWorkspace {
             // Install the restoration handoff before AppKit can make the
             // window key. `showWindow` may synchronously emit
@@ -397,6 +450,20 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
             )
         }
         super.showWindow(sender)
+        // AppKit may synchronously deliver didBecomeKey from inside
+        // super.showWindow. Suppress that opening notification, then allow
+        // later user activations to update the context bookmark. Automatic
+        // relaunch restoration keeps suppression until the application has
+        // presented the complete restored set.
+        if isFirstPresentation && !holdInitialActivationDuringRestore {
+            suppressInitialActivation = false
+        }
+    }
+
+    /// Releases the opening-event guard used while several saved windows are
+    /// being presented during application launch.
+    func completeInitialPresentation() {
+        suppressInitialActivation = false
     }
 
     /// Keep the last rendered view visible while the shared helper is down.
@@ -442,6 +509,9 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         workspaceController.recover(with: recoveredSession)
         restoration.state = workspaceController.restorationState()
         onRestorationCheckpoint?(restoration)
+        if window?.isKeyWindow == true, !suppressInitialActivation {
+            onActivationCheckpoint?(restoration)
+        }
     }
 
     /// Applies a persisted definition change only when this window is
@@ -484,35 +554,59 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
 
     func windowDidBecomeKey(_ notification: Notification) {
         guard didStartWorkspace, !isClosing else { return }
-        _ = checkpointActiveWorkspace()
+        _ = checkpointWorkspace(
+            activatesContext: !suppressInitialActivation,
+            checkpointsSize: true
+        )
     }
 
     func windowDidResignKey(_ notification: Notification) {
         guard didStartWorkspace, !isClosing else { return }
-        _ = checkpointActiveWorkspace()
+        _ = checkpointWorkspace(activatesContext: false, checkpointsSize: false)
     }
 
     /// Snapshots editor text before its normal debounce has fired and publishes
     /// the complete active presentation for Command-N or application shutdown.
     @discardableResult
     func checkpointActiveWorkspace() -> ClusterWindowRestorationState {
+        checkpointWorkspace(activatesContext: true, checkpointsSize: true)
+    }
+
+    private func checkpointWorkspace(
+        activatesContext: Bool,
+        checkpointsSize: Bool
+    ) -> ClusterWindowRestorationState {
         restoration.state = workspaceController.restorationState()
         let state = restoration.state
-        checkpointWindowSize()
         onRestorationCheckpoint?(restoration)
+        if activatesContext {
+            onActivationCheckpoint?(restoration)
+        }
+        checkpointWindowFrame()
+        if checkpointsSize {
+            checkpointWindowSize()
+        }
         return state
     }
 
     func checkpointRestoration() {
-        restoration.state = workspaceController.restorationState()
-        onRestorationCheckpoint?(restoration)
+        _ = checkpointWorkspace(activatesContext: false, checkpointsSize: false)
+    }
+
+    func windowDidMove(_ notification: Notification) {
+        guard didStartWorkspace, !isClosing else { return }
+        scheduleFrameCheckpoint()
     }
 
     func windowDidResize(_ notification: Notification) {
+        guard didStartWorkspace, !isClosing else { return }
+        scheduleFrameCheckpoint()
         scheduleWindowSizeCheckpoint()
     }
 
     func windowDidEndLiveResize(_ notification: Notification) {
+        guard didStartWorkspace, !isClosing else { return }
+        scheduleFrameCheckpoint()
         scheduleWindowSizeCheckpoint()
     }
 
@@ -539,6 +633,36 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         }
     }
 
+    private func scheduleFrameCheckpoint() {
+        frameCheckpointTask?.cancel()
+        frameCheckpointTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: .milliseconds(250))
+            } catch {
+                return
+            }
+            guard let self, !Task.isCancelled, !isClosing else { return }
+            frameCheckpointTask = nil
+            restoration.state = workspaceController.restorationState()
+            checkpointWindowFrame()
+        }
+    }
+
+    private func checkpointWindowFrame() {
+        guard let window else { return }
+        // Keep the individual record durable even if the application callback
+        // is temporarily unavailable (for example in a focused controller
+        // test). The application callback mirrors this frame to the active
+        // exact-context bookmark when appropriate.
+        window.saveFrame(usingName: restoration.frameAutosaveName)
+        // During automatic relaunch, each restored window is presented before
+        // the complete set exists. Do not let those opening checkpoints copy
+        // a fallback frame over the previously active context bookmark.
+        if !suppressInitialActivation {
+            onFrameCheckpoint?(restoration)
+        }
+    }
+
     private func checkpointWindowSize() {
         guard let size = window?.frame.size else { return }
         onWindowSizeCheckpoint?(ClusterWorkspaceWindowSize(
@@ -556,6 +680,11 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         // asynchronous termination handshake is in flight; none of those
         // callbacks may write a new restore record after the snapshot prune.
         onRestorationCheckpoint = nil
+        onActivationCheckpoint = nil
+        onFrameCheckpoint = nil
+        onWindowSizeCheckpoint = nil
+        frameCheckpointTask?.cancel()
+        frameCheckpointTask = nil
         windowSizeCheckpointTask?.cancel()
         windowSizeCheckpointTask = nil
         logOpenRevision &+= 1
@@ -575,8 +704,12 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
 
     func windowWillClose(_ notification: Notification) {
         guard !isClosing else { return }
+        let wasKeyWindow = window?.isKeyWindow == true
         isClosing = true
-        _ = checkpointActiveWorkspace()
+        _ = checkpointWorkspace(
+            activatesContext: wasKeyWindow,
+            checkpointsSize: wasKeyWindow
+        )
         prepareForTermination()
         let yamlWindows = Array(yamlSnapshotWindowControllers.values)
         yamlSnapshotWindowControllers.removeAll()

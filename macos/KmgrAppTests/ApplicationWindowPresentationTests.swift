@@ -375,6 +375,158 @@ struct ApplicationWindowPresentationTests {
         #expect(abs(firstWindow.frame.height - expectedHeight) < 0.5)
     }
 
+    @Test("restored workspaces keep each record's independent frame")
+    func restoredWorkspacesKeepIndependentFrames() throws {
+        let columnsDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("kmgr-independent-frames-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: columnsDirectory) }
+        let visible = NSScreen.screens.last?.visibleFrame
+            ?? NSRect(x: 0, y: 0, width: 1_600, height: 1_000)
+        let frameA = NSRect(
+            x: visible.minX + 20,
+            y: visible.minY + 70,
+            width: 860,
+            height: 560
+        )
+        let frameB = NSRect(
+            x: visible.minX + 210,
+            y: visible.minY + 150,
+            width: 980,
+            height: 660
+        )
+        let recordA = ClusterWindowRestorationRecord(
+            id: "restored-frame-a-\(UUID().uuidString)",
+            state: bookmarkState(filter: "frame-a")
+        )
+        let recordB = ClusterWindowRestorationRecord(
+            id: "restored-frame-b-\(UUID().uuidString)",
+            state: bookmarkState(filter: "frame-b")
+        )
+        for (record, frame) in [(recordA, frameA), (recordB, frameB)] {
+            NSWindow.removeFrame(usingName: record.frameAutosaveName)
+            let seed = makeColumnPropagationWorkspace(
+                session: bookmarkSession(sessionID: "seed-" + record.id),
+                provider: BookmarkWorkspaceProvider(),
+                optionalResourceCatalogProvider: BookmarkOptionalResourceProvider(),
+                columnsConfigurationPath: columnsDirectory.appendingPathComponent(
+                    "seed-" + record.id + ".yaml"
+                ).path,
+                restoration: record,
+                occupiedWindowFrames: []
+            )
+            seed.window?.setFrame(frame, display: false)
+            seed.window?.saveFrame(usingName: record.frameAutosaveName)
+            seed.window?.setFrameAutosaveName("")
+            seed.window?.delegate = nil
+            seed.close()
+        }
+        defer {
+            NSWindow.removeFrame(usingName: recordA.frameAutosaveName)
+            NSWindow.removeFrame(usingName: recordB.frameAutosaveName)
+        }
+
+        let first = makeColumnPropagationWorkspace(
+            session: bookmarkSession(sessionID: "restored-frame-session-a"),
+            provider: BookmarkWorkspaceProvider(),
+            optionalResourceCatalogProvider: BookmarkOptionalResourceProvider(),
+            columnsConfigurationPath: columnsDirectory.appendingPathComponent("a.yaml").path,
+            restoration: recordA,
+            initialWindowFrameSize: ClusterWorkspaceWindowSize(width: 1_200, height: 800),
+            placement: .restored,
+            occupiedWindowFrames: []
+        )
+        let second = makeColumnPropagationWorkspace(
+            session: bookmarkSession(sessionID: "restored-frame-session-b"),
+            provider: BookmarkWorkspaceProvider(),
+            optionalResourceCatalogProvider: BookmarkOptionalResourceProvider(),
+            columnsConfigurationPath: columnsDirectory.appendingPathComponent("b.yaml").path,
+            restoration: recordB,
+            initialWindowFrameSize: ClusterWorkspaceWindowSize(width: 1_200, height: 800),
+            placement: .restored,
+            occupiedWindowFrames: []
+        )
+        defer {
+            first.window?.delegate = nil
+            second.window?.delegate = nil
+            first.close()
+            second.close()
+        }
+
+        #expect(first.window?.frame.size == frameA.size)
+        #expect(second.window?.frame.size == frameB.size)
+        #expect(first.window?.frame.origin != second.window?.frame.origin)
+        #expect(first.window?.frame != second.window?.frame)
+    }
+
+    @Test("a same-context fresh workspace seeds its context frame bookmark")
+    func freshSameContextWorkspaceUsesFrameBookmark() throws {
+        let columnsDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("kmgr-context-frame-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: columnsDirectory) }
+        let suite = "kmgr-context-frame-store-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = WorkspaceFrameBookmarkStore(defaults: defaults)
+        let contextReference = bookmarkSession().contextReference
+        let bookmark = try store.activate(
+            contextReference: contextReference,
+            sourceWindowID: "source-window"
+        )
+        let visible = NSScreen.main?.visibleFrame
+            ?? NSRect(x: 0, y: 0, width: 1_600, height: 1_000)
+        let rememberedFrame = NSRect(
+            x: visible.minX + 90,
+            y: visible.minY + 90,
+            width: 900,
+            height: 600
+        )
+        NSWindow.removeFrame(usingName: bookmark.frameAutosaveName)
+        let seed = makeColumnPropagationWorkspace(
+            session: bookmarkSession(sessionID: "seed-context-frame"),
+            provider: BookmarkWorkspaceProvider(),
+            optionalResourceCatalogProvider: BookmarkOptionalResourceProvider(),
+            columnsConfigurationPath: columnsDirectory.appendingPathComponent(
+                "seed.yaml"
+            ).path,
+            restoration: ClusterWindowRestorationRecord(
+                id: "seed-context-frame-" + UUID().uuidString,
+                state: bookmarkState(filter: "seed")
+            ),
+            occupiedWindowFrames: []
+        )
+        seed.window?.setFrame(rememberedFrame, display: false)
+        seed.window?.saveFrame(usingName: bookmark.frameAutosaveName)
+        seed.window?.setFrameAutosaveName("")
+        seed.window?.delegate = nil
+        seed.close()
+        defer { NSWindow.removeFrame(usingName: bookmark.frameAutosaveName) }
+
+        let record = ClusterWindowRestorationRecord(
+            id: "fresh-context-frame-\(UUID().uuidString)",
+            state: bookmarkState(filter: "fresh")
+        )
+        let controller = makeColumnPropagationWorkspace(
+            session: bookmarkSession(sessionID: "fresh-context-frame-session"),
+            provider: BookmarkWorkspaceProvider(),
+            optionalResourceCatalogProvider: BookmarkOptionalResourceProvider(),
+            columnsConfigurationPath: columnsDirectory.appendingPathComponent("columns.yaml").path,
+            restoration: record,
+            placement: .contextBookmark(
+                seedFrameAutosaveName: bookmark.frameAutosaveName
+            ),
+            occupiedWindowFrames: []
+        )
+        defer {
+            controller.window?.delegate = nil
+            controller.window?.setFrameAutosaveName("")
+            controller.close()
+        }
+
+        #expect(controller.window?.frame == rememberedFrame)
+        #expect(controller.window?.frameAutosaveName == record.frameAutosaveName)
+        #expect(store.bookmark(for: contextReference) == bookmark)
+    }
+
     @Test("saved navigation survives reload and seeds a same-context window")
     func savedNavigationSurvivesReloadAndSeedsNewWindow() async throws {
         let suite = "kmgr-app-navigation-restoration-\(UUID().uuidString)"

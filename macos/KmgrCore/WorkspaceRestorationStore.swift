@@ -17,6 +17,7 @@ private func isValidRestorationIdentifier(_ value: String) -> Bool {
 /// independent navigation state.
 public struct ClusterWindowRestorationRecord: Hashable, Codable, Sendable, Identifiable {
     public static let maximumIdentifierBytes = 128
+    public static let frameAutosaveNamePrefix = "Kmgr-ClusterWorkspace-"
 
     public var id: String
     public var state: ClusterWindowRestorationState
@@ -38,6 +39,13 @@ public struct ClusterWindowRestorationRecord: Hashable, Codable, Sendable, Ident
             contextName: contextName,
             contextReference: contextReference
         ))
+    }
+
+    /// AppKit's per-window frame key. The restoration record identity is
+    /// intentionally used instead of the context reference because several
+    /// windows may point at the same exact kubeconfig context.
+    public var frameAutosaveName: String {
+        "\(Self.frameAutosaveNamePrefix)\(id)"
     }
 
     public func validated() throws -> Self {

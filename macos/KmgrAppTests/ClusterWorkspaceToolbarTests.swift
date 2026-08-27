@@ -3416,6 +3416,9 @@ private func makeWorkspace(
         id: "toolbar-test",
         contextName: "test-context"
     ),
+    placement: WorkspaceWindowPlacementMode = .fresh,
+    suppressInitialActivation: Bool = false,
+    occupiedWindowFrames: [NSRect]? = nil,
     startsAuthenticated: Bool = true
 ) -> ClusterWorkspaceWindowController {
     let portForwards = PortForwardCoordinator(provider: NoopPortForwardProvider())
@@ -3439,6 +3442,9 @@ private func makeWorkspace(
         namespacePickerPresenter: namespacePickerPresenter,
         namespacePickerKeyWindowCheck: namespacePickerKeyWindowCheck,
         restoration: restoration,
+        placement: placement,
+        suppressInitialActivation: suppressInitialActivation,
+        occupiedWindowFrames: occupiedWindowFrames,
         startsAuthenticated: startsAuthenticated,
         onShowPortForwards: {}
     )
@@ -3462,11 +3468,15 @@ func makeColumnPropagationWorkspace(
     tableColumnMutationAllowed: @escaping @MainActor () -> Bool = {
         NSEvent.pressedMouseButtons == 0
     },
+    restoration: ClusterWindowRestorationRecord? = nil,
     restorationState: ClusterWindowRestorationState? = nil,
-    initialWindowFrameSize: ClusterWorkspaceWindowSize? = nil
+    initialWindowFrameSize: ClusterWorkspaceWindowSize? = nil,
+    placement: WorkspaceWindowPlacementMode = .fresh,
+    suppressInitialActivation: Bool = false,
+    occupiedWindowFrames: [NSRect]? = nil
 ) -> ClusterWorkspaceWindowController {
     let portForwards = PortForwardCoordinator(provider: NoopPortForwardProvider())
-    let restoration = restorationState.map {
+    let restoration = restoration ?? restorationState.map {
         ClusterWindowRestorationRecord(
             id: "column-propagation-\(UUID().uuidString)",
             state: $0
@@ -3498,6 +3508,9 @@ func makeColumnPropagationWorkspace(
         confirmationPreferences: { ConfirmationPreferences() },
         restoration: restoration,
         initialWindowFrameSize: initialWindowFrameSize,
+        placement: placement,
+        suppressInitialActivation: suppressInitialActivation,
+        occupiedWindowFrames: occupiedWindowFrames,
         onShowPortForwards: {}
     )
 }

@@ -34,6 +34,7 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private let engineMetricsRefreshSeconds: Int
     private let columnConfigurationCoordinator: ColumnConfigurationCoordinator
     private let restorationStore: WorkspaceRestorationStore
+    private let workspaceFrameBookmarkStore: WorkspaceFrameBookmarkStore
     private let workspaceWindowSizeStore: ClusterWorkspaceWindowSizeStore
     private var pendingRestorationNotice: ClusterManagerInitialNotice?
     private let settingsWindowController: SettingsWindowController
@@ -76,6 +77,7 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         self.engineSupervisor = supervisor
         let restorationStore = WorkspaceRestorationStore()
         self.restorationStore = restorationStore
+        self.workspaceFrameBookmarkStore = WorkspaceFrameBookmarkStore()
         self.workspaceWindowSizeStore = ClusterWorkspaceWindowSizeStore()
         self.pendingRestorationNotice = restorationStore.loadIssue.map {
             ClusterManagerInitialNotice(
@@ -419,12 +421,20 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             // changed in the kubeconfig since this state was recorded.
             initialState.contextName = session.contextName
             initialState.contextReference = session.contextReference
+            let placement = workspaceFrameBookmarkStore.bookmark(
+                for: session.contextReference
+            ).map {
+                WorkspaceWindowPlacementMode.contextBookmark(
+                    seedFrameAutosaveName: $0.frameAutosaveName
+                )
+            } ?? .fresh
             _ = openWorkspace(
                 for: session,
                 restoration: ClusterWindowRestorationRecord(
                     state: initialState
                 ),
-                initialWindowFrameSize: workspaceWindowSizeStore.lastSize
+                initialWindowFrameSize: workspaceWindowSizeStore.lastSize,
+                placement: placement
             )
         }
         controller.onClose = { [weak self] in
@@ -437,6 +447,8 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         for session: OpenedClusterSession,
         restoration: ClusterWindowRestorationRecord,
         initialWindowFrameSize: ClusterWorkspaceWindowSize? = nil,
+        placement: WorkspaceWindowPlacementMode = .fresh,
+        suppressInitialActivation: Bool = false,
         startsAuthenticated: Bool = true
     ) -> ClusterWorkspaceWindowController {
         // A newly opened workspace supersedes any stale last-window-close
@@ -489,6 +501,8 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             },
             restoration: restoration,
             initialWindowFrameSize: initialWindowFrameSize,
+            placement: placement,
+            suppressInitialActivation: suppressInitialActivation,
             startsAuthenticated: startsAuthenticated,
             onShowPortForwards: { [weak self] in
                 self?.showPortForwards(nil)
@@ -502,7 +516,12 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             // callbacks during teardown. Disarm persistence before removing
             // its record so those callbacks cannot resurrect the window.
             controller.onRestorationCheckpoint = nil
+            controller.onActivationCheckpoint = nil
+            controller.onFrameCheckpoint = nil
+            controller.onWindowSizeCheckpoint = nil
             if !isTerminating {
+                controller.window?.setFrameAutosaveName("")
+                NSWindow.removeFrame(usingName: restoration.frameAutosaveName)
                 try? restorationStore.remove(id: restoration.id)
             }
             columnsManagerControllers.removeValue(forKey: identifier)?.close()
@@ -544,12 +563,26 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             self.showColumns(request, for: controller)
         }
         controller.onRestorationCheckpoint = { [weak self, weak controller] record in
+            guard let self, controller != nil else { return }
+            try? restorationStore.upsert(record)
+        }
+        controller.onActivationCheckpoint = { [weak self, weak controller] record in
             guard let self, let controller else { return }
-            if activeWorkspaceController === controller {
-                try? restorationStore.activate(record)
-            } else {
-                try? restorationStore.upsert(record)
+            try? restorationStore.activate(record)
+            if let bookmark = try? workspaceFrameBookmarkStore.activate(
+                contextReference: record.state.contextReference,
+                sourceWindowID: record.id
+            ) {
+                controller.window?.saveFrame(usingName: bookmark.frameAutosaveName)
             }
+        }
+        controller.onFrameCheckpoint = { [weak self, weak controller] record in
+            guard let self, let controller else { return }
+            controller.window?.saveFrame(usingName: record.frameAutosaveName)
+            guard let bookmark = workspaceFrameBookmarkStore.bookmark(
+                for: record.state.contextReference
+            ), bookmark.sourceWindowID == record.id else { return }
+            controller.window?.saveFrame(usingName: bookmark.frameAutosaveName)
         }
         controller.onWindowSizeCheckpoint = { [weak self] size in
             _ = self?.workspaceWindowSizeStore.save(size)
@@ -557,6 +590,17 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         try? restorationStore.upsert(restoration)
         controller.showWindow(nil)
         controller.window?.makeKeyAndOrderFront(nil)
+        if placement != .restored {
+            // A newly opened context is immediately a valid source, even if
+            // AppKit has not yet emitted a user activation notification.
+            try? restorationStore.activate(restoration)
+            if let bookmark = try? workspaceFrameBookmarkStore.activate(
+                contextReference: restoration.state.contextReference,
+                sourceWindowID: restoration.id
+            ) {
+                controller.window?.saveFrame(usingName: bookmark.frameAutosaveName)
+            }
+        }
         return controller
     }
 
@@ -572,6 +616,18 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             NSSound.beep()
             return
         }
+
+        // The source may have a pending editor/frame change that has not yet
+        // reached its debounce. Capture it before choosing the context's
+        // reusable starting frame.
+        _ = source?.checkpointActiveWorkspace()
+        let placement = workspaceFrameBookmarkStore.bookmark(
+            for: request.contextReference
+        ).map {
+            WorkspaceWindowPlacementMode.contextBookmark(
+                seedFrameAutosaveName: $0.frameAutosaveName
+            )
+        } ?? .fresh
 
         // Present a shell synchronously so a Command-click or Command-Return
         // changes focus immediately. The request is deliberately kept out of
@@ -594,6 +650,7 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             for: shell.session,
             restoration: record,
             initialWindowFrameSize: workspaceWindowSizeStore.lastSize,
+            placement: placement,
             startsAuthenticated: false
         )
         let identifier = ObjectIdentifier(controller)
@@ -651,20 +708,28 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             // A skipped document describes windows from a process that no
             // longer exists. Consume it now so re-enabling restoration later
             // cannot resurrect an older launch's workspace set.
+            let records = restorationStore.windows
             try? restorationStore.removeAllOpenWindows()
+            records.forEach(removeWorkspaceFrameAutosave)
             showClusterManager()
             return
         }
         let records = restorationStore.windows
         guard !records.isEmpty else { showClusterManager(); return }
+        var lastRestoredByContext: [
+            String: (record: ClusterWindowRestorationRecord, controller: ClusterWorkspaceWindowController)
+        ] = [:]
         for record in records {
             let shell = RestoredWorkspaceShell(record: record)
             let controller = openWorkspace(
                 for: shell.session,
                 restoration: record,
                 initialWindowFrameSize: workspaceWindowSizeStore.lastSize,
+                placement: .restored,
+                suppressInitialActivation: true,
                 startsAuthenticated: false
             )
+            lastRestoredByContext[record.state.contextReference] = (record, controller)
             let identifier = ObjectIdentifier(controller)
             let attempt = RestoredWorkspaceConnectionAttempt(
                 provider: clusterContextProvider,
@@ -695,6 +760,22 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             restoredWorkspaceAttempts[identifier] = attempt
             attempt.start()
         }
+
+        // A v3 restoration document may predate frame bookmarks. Seed only
+        // the last record for each context (restore order puts the previously
+        // active record last), and never replace an established bookmark.
+        for (contextReference, value) in lastRestoredByContext {
+            guard workspaceFrameBookmarkStore.bookmark(for: contextReference) == nil,
+                let bookmark = try? workspaceFrameBookmarkStore.ensure(
+                    contextReference: contextReference,
+                    sourceWindowID: value.record.id
+                )
+            else { continue }
+            value.controller.window?.saveFrame(usingName: bookmark.frameAutosaveName)
+        }
+        lastRestoredByContext.values.forEach {
+            $0.controller.completeInitialPresentation()
+        }
     }
 
     private func checkpointWorkspaceStateForTermination() {
@@ -721,7 +802,18 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         // asynchronous termination handshake (for example, during a direct
         // test or an AppKit shutdown path). Disarm callbacks here as well as
         // in each controller's normal termination preparation.
-        controllers.forEach { $0.onRestorationCheckpoint = nil }
+        controllers.forEach {
+            $0.onRestorationCheckpoint = nil
+            $0.onActivationCheckpoint = nil
+            $0.onFrameCheckpoint = nil
+            $0.onWindowSizeCheckpoint = nil
+        }
+    }
+
+    private func removeWorkspaceFrameAutosave(
+        _ record: ClusterWindowRestorationRecord
+    ) {
+        NSWindow.removeFrame(usingName: record.frameAutosaveName)
     }
 
     private var activeWorkspaceController: ClusterWorkspaceWindowController? {
