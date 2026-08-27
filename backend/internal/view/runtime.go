@@ -1106,6 +1106,9 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 	// automatic catalog query follows the usable snapshot and reads that cache,
 	// while later LIST/WATCH upserts supply race-closing stream hints.
 	subscription.initializeSealedRows(warmRows)
+	if snapshotComplete && !usedWarmProjection && !skipRetiredProjection {
+		subscription.seedInitialMetricEpochUnlocked(objects, subscription.serverCells)
+	}
 	var initialStatus *kmgrv1.ViewStatus
 	r.mu.Lock()
 	if r.closed || r.openings[streamKey] != attempt || openCtx.Err() != nil {
@@ -1214,6 +1217,7 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 		// able to target this subscription. A compact warm projection may also
 		// lag raw events already retained in the store. Its catch-up takes a fresh
 		// store snapshot.
+		subscription.discardInitialMetricEpochSeedUnlocked()
 		subscription.snapshotComplete = entry.snapshotComplete
 		if usedWarmProjection && entry.state == resourceRunning {
 			subscription.warmCatchupRunNumber = entry.runNumber
@@ -2582,7 +2586,11 @@ type Subscription struct {
 	metricRefreshAfter    time.Time
 	metricRefreshPending  bool
 	metricsReconciling    bool
-	lastStatus            *kmgrv1.ViewStatus
+	// A staged view with metric-dependent membership or ordering reconciles
+	// against one immutable base-object epoch. WATCH churn is coalesced behind
+	// that epoch so it cannot continually move the first ViewReconciled barrier.
+	initialMetricEpoch *initialMetricEpoch
+	lastStatus         *kmgrv1.ViewStatus
 
 	mu                          sync.Mutex
 	generation                  uint64
@@ -2799,13 +2807,27 @@ func (s *Subscription) applyMetrics(snapshot metrics.Snapshot) {
 	s.projectionRevision++
 	s.projectionResnapshot = true
 	if s.metricPlan.dependency.requiresCompleteCoverage() && s.snapshotComplete {
-		if !s.metricsReconciling {
-			s.metricCoverageID++
-			s.setMetricsReconcilingLocked(true)
-		}
-		if s.metricRefreshAfter.IsZero() || !snapshot.UpdatedAt.Before(s.metricRefreshAfter) {
-			s.metricCoverageCommit = s.metricCoverageID
-			s.metricRefreshAfter = time.Time{}
+		epoch := s.activeInitialMetricEpochLocked()
+		switch {
+		case epoch != nil:
+			if epoch.objectsReady &&
+				(s.metricRefreshAfter.IsZero() || !snapshot.UpdatedAt.Before(s.metricRefreshAfter)) {
+				s.metricCoverageCommit = epoch.coverageID
+				s.metricRefreshAfter = time.Time{}
+			}
+		case s.shouldStartInitialMetricEpochLocked():
+			// Open will pin the base epoch immediately after attaching the
+			// provider. A cached pre-epoch sample can update the projector, but it
+			// cannot satisfy the first staged reconciliation barrier.
+		default:
+			if !s.metricsReconciling {
+				s.metricCoverageID++
+				s.setMetricsReconcilingLocked(true)
+			}
+			if s.metricRefreshAfter.IsZero() || !snapshot.UpdatedAt.Before(s.metricRefreshAfter) {
+				s.metricCoverageCommit = s.metricCoverageID
+				s.metricRefreshAfter = time.Time{}
+			}
 		}
 	}
 	s.scheduleProjectionLocked()
@@ -3033,6 +3055,7 @@ func (s *Subscription) prepareForResourceRestartUnlocked(fenceRun uint64) {
 	s.metricCoverageID++
 	s.metricCoverageCommit = 0
 	s.metricCoverageDirty = false
+	s.initialMetricEpoch = nil
 	s.stopCompletePodMetricCoverageTimerLocked()
 
 	clear(s.rows)
@@ -3129,6 +3152,27 @@ func (s *Subscription) applyBatchForRun(
 	}
 	s.applyServerTableBatchLocked(batch)
 	s.optionalResourceHints.observeLocked(observedOptionalResourceKeys)
+	if epoch := s.activeInitialMetricEpochLocked(); epoch != nil {
+		// A relist that races the pinned metric epoch is newer state. The raw
+		// store already contains it, so one post-barrier resnapshot is both
+		// bounded and sufficient; applying progressive pages here could keep
+		// invalidating the older epoch under sustained churn.
+		epoch.dirty = true
+		epoch.needsResnapshot = true
+		clear(s.pendingObjects)
+		if batch.SnapshotComplete {
+			s.snapshotComplete = true
+			s.setStatusLocked(&kmgrv1.ViewStatus{
+				Freshness:              kmgrv1.ViewFreshness_VIEW_FRESHNESS_WATCHING,
+				ObjectsExamined:        uint64(batch.ObjectsListed),
+				RowsVisible:            uint64(len(s.rows)),
+				LastSynchronizedUnixMs: batch.SynchronizedAt.UnixMilli(),
+			})
+		}
+		s.requireCompleteMetricCoverageLocked(false)
+		s.signalLocked(batch.FromList)
+		return
+	}
 	// LIST pages and snapshot-complete batches are projection barriers. An
 	// older WATCH projection may still be running when flushProjection returns;
 	// advancing the revision before touching rows prevents that work from
@@ -3226,6 +3270,41 @@ func (s *Subscription) enqueueWatchBatch(
 	}
 	tableDisabled := batch.Table != nil && batch.Table.Disabled && s.serverSchema != nil
 	s.applyServerTableBatchLocked(batch)
+	s.optionalResourceHints.observeLocked(observedOptionalResourceKeys)
+	if s.shouldDeferForInitialMetricEpochLocked() {
+		epoch := s.activeInitialMetricEpochLocked()
+		if epoch == nil {
+			s.startInitialMetricEpochLocked(true)
+			epoch = s.activeInitialMetricEpochLocked()
+		}
+		// Keep only bounded newest-per-UID upserts behind the pinned barrier.
+		// Deletions and table fallback require one latest-store resnapshot because
+		// pendingObjects deliberately has no tombstone representation.
+		epoch.dirty = true
+		if tableDisabled || len(batch.RemovedUIDs) != 0 {
+			epoch.needsResnapshot = true
+		}
+		for _, uid := range batch.RemovedUIDs {
+			delete(s.pendingObjects, string(uid))
+		}
+		if !epoch.needsResnapshot {
+			for _, object := range batch.Upserts {
+				if object == nil || object.GetUID() == "" {
+					continue
+				}
+				s.pendingObjects[string(object.GetUID())] = object
+			}
+			if len(s.pendingObjects) > s.pendingLimit {
+				clear(s.pendingObjects)
+				epoch.needsResnapshot = true
+			}
+		}
+		s.requireCompleteMetricCoverageLocked(false)
+		if s.pendingSchema != nil {
+			s.signalLocked(true)
+		}
+		return
+	}
 	if tableDisabled {
 		// The raw fallback has no server cells. Rebuild every retained row so a
 		// persisted server column cannot keep displaying a stale pre-fallback
@@ -3233,7 +3312,6 @@ func (s *Subscription) enqueueWatchBatch(
 		s.projectionRevision++
 		s.projectionResnapshot = true
 	}
-	s.optionalResourceHints.observeLocked(observedOptionalResourceKeys)
 	presentationChanged := false
 	for _, uid := range batch.RemovedUIDs {
 		key := string(uid)
@@ -3287,7 +3365,8 @@ func (s *Subscription) enqueueWatchBatch(
 }
 
 func (s *Subscription) scheduleProjectionLocked() {
-	if s.closed || s.projectionScheduled || s.projectionRunning {
+	if s.closed || s.projectionScheduled || s.projectionRunning ||
+		s.initialMetricEpochBlocksProjectionLocked() {
 		return
 	}
 	s.projectionScheduled = true
@@ -3319,7 +3398,8 @@ func (s *Subscription) flushScheduledProjection(scheduleID uint64) {
 	}
 	s.projectionScheduled = false
 	s.projectionTimer = nil
-	if s.projectionRunning || (len(s.pendingObjects) == 0 && !s.projectionResnapshot) {
+	if s.projectionRunning || s.initialMetricEpochBlocksProjectionLocked() ||
+		(len(s.pendingObjects) == 0 && !s.projectionResnapshot) {
 		s.mu.Unlock()
 		return
 	}
@@ -3334,7 +3414,7 @@ func (s *Subscription) flushScheduledProjection(scheduleID uint64) {
 func (s *Subscription) flushProjection() {
 	s.mu.Lock()
 	s.cancelProjectionScheduleLocked()
-	if s.closed || s.projectionRunning ||
+	if s.closed || s.projectionRunning || s.initialMetricEpochBlocksProjectionLocked() ||
 		(len(s.pendingObjects) == 0 && !s.projectionResnapshot) {
 		s.mu.Unlock()
 		return
@@ -3366,17 +3446,24 @@ func (s *Subscription) runProjection() {
 		projector := s.projector
 		full := s.projectionResnapshot
 		s.projectionResnapshot = false
-		objects := make([]*unstructured.Unstructured, 0, len(s.pendingObjects))
-		for _, object := range s.pendingObjects {
-			objects = append(objects, object)
-		}
-		clear(s.pendingObjects)
-		var serverCells map[string][]*kmgrv1.Cell
-		if len(s.serverCells) != 0 {
-			serverCells = make(map[string][]*kmgrv1.Cell, len(s.serverCells))
-			for uid, cells := range s.serverCells {
-				serverCells[uid] = cells
+		epoch := s.activeInitialMetricEpochLocked()
+		pinnedMetricEpoch := full && epoch != nil && epoch.objectsReady &&
+			s.metricCoverageCommit == epoch.coverageID
+		var objects []*unstructured.Unstructured
+		if pinnedMetricEpoch {
+			objects = epoch.objects
+		} else {
+			objects = make([]*unstructured.Unstructured, 0, len(s.pendingObjects))
+			for _, object := range s.pendingObjects {
+				objects = append(objects, object)
 			}
+			clear(s.pendingObjects)
+		}
+		var serverCells map[string][]*kmgrv1.Cell
+		if pinnedMetricEpoch {
+			serverCells = epoch.serverCells
+		} else {
+			serverCells = cloneServerCells(s.serverCells)
 		}
 		var baseRows map[string]*kmgrv1.ResourceRow
 		if full && s.resource == nil {
@@ -3408,7 +3495,9 @@ func (s *Subscription) runProjection() {
 				}
 				fullAdmissionHeld = true
 			}
-			objects, projectionErr = resourceStore.SnapshotContext(projectionContext)
+			if !pinnedMetricEpoch {
+				objects, projectionErr = resourceStore.SnapshotContext(projectionContext)
+			}
 		}
 		var projectedRows map[string]*kmgrv1.ResourceRow
 		if !full {
@@ -4011,6 +4100,7 @@ func (s *Subscription) retireLocked() metricSubscription {
 		s.metricInterestStop = nil
 	}
 	s.stopCompletePodMetricCoverageTimerLocked()
+	s.initialMetricEpoch = nil
 	metricSubscription := s.metrics
 	s.metrics = nil
 	if s.timer != nil {

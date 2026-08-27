@@ -12,6 +12,7 @@ import (
 	"github.com/charlie0129/kmgr/backend/internal/metrics"
 	kmgrv1 "github.com/charlie0129/kmgr/gen/go/kmgr/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
 )
 
@@ -478,6 +479,181 @@ func TestCompleteExactMetricsRefreshOnCacheCadence(t *testing.T) {
 	// Kubernetes implementation its per-object cache refreshes only expired
 	// entries, while still providing complete order coverage atomically.
 	_ = receiveExactMetricReferences(t, metricSource.calls)
+}
+
+func TestStagedDefaultPodKeywordReconcilesDuringWatchChurn(t *testing.T) {
+	t.Parallel()
+	client := newScriptedResource()
+	basePod := metricInterestPod(t, "uid-match", "mm-lb")
+	basePod.SetResourceVersion("rv-1")
+	client.listPages = []*unstructured.UnstructuredList{listPage("rv-1", "", basePod)}
+
+	fetcher := &runtimeBlockingMetricFetcher{
+		started: make(chan struct{}, 1),
+		result:  make(chan runtimeMetricResult, 2),
+		stopped: make(chan struct{}),
+	}
+	provider, err := metrics.NewProvider(fetcher, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Hold one fetch open before the view exists. Open's refresh request then
+	// deterministically starts a post-barrier second fetch after this one ends.
+	prewarmLease, err := provider.Acquire()
+	if err != nil {
+		t.Fatal(err)
+	}
+	prewarm := prewarmLease.Subscribe()
+	if prewarm == nil {
+		t.Fatal("prewarm metric subscription was not created")
+	}
+	defer prewarm.Close()
+	select {
+	case <-fetcher.started:
+	case <-time.After(time.Second):
+		t.Fatal("pre-barrier metric fetch did not start")
+	}
+
+	runtime, err := NewRuntime(RuntimeConfig{
+		Source:  &fakeResourceSource{authority: "cluster-a", client: client},
+		Metrics: &fakeMetricSource{provider: provider}, BatchDelay: time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+
+	// Establish the same already-running Pod resource stream that a restored
+	// filter or a Pods -> Nodes -> Pods navigation leaves behind.
+	firstRequest := openView("session", "filtered", 1)
+	firstRequest.Spec.ColumnIds = []string{"name", "status"}
+	firstRequest.Spec.FilterExpression = "mm-lb"
+	first, err := runtime.Open(firstRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	waitForRow(t, first, "uid-match")
+	eventually(t, time.Second, func() bool { return client.watchCalls.Load() == 1 })
+
+	request := openView("session", "filtered", 2)
+	request.StageUntilReconciled = true
+	request.Spec.ColumnIds = nil
+	request.Spec.FilterExpression = "mm-l"
+	subscription, err := runtime.Open(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer subscription.Close()
+	initial, err := subscription.Next(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := subscription.AcknowledgeDelivery(initial); err != nil {
+		t.Fatal(err)
+	}
+	if eventsContainReconciled(initial) || !eventsReportMetricsReconciling(initial) {
+		t.Fatalf("initial staged events = %#v", initial)
+	}
+
+	// Finish the pre-barrier fetch and wait for the refresh requested by Open.
+	fetcher.result <- runtimeMetricResult{samples: map[string]metrics.Sample{
+		"uid-match": metricCPUSample(100_000_000),
+	}}
+	select {
+	case <-fetcher.started:
+	case <-time.After(time.Second):
+		t.Fatal("post-barrier metric fetch did not start")
+	}
+
+	// Keep changing the Pod after that metric fetch has started. This used to
+	// advance the completeness timestamp past every result and strand the view
+	// in its staged Resuming state.
+	for index := range 16 {
+		modified := basePod.DeepCopy()
+		modified.SetResourceVersion(fmt.Sprintf("rv-%d", index+2))
+		if err := unstructured.SetNestedField(modified.Object, "Pending", "status", "phase"); err != nil {
+			t.Fatal(err)
+		}
+		client.lastWatch().channel <- watch.Event{Type: watch.Modified, Object: modified}
+	}
+	eventually(t, time.Second, func() bool {
+		objects := subscription.resource.currentStore().GetMany([]types.UID{"uid-match"})
+		return len(objects) == 1 && objects[0] != nil && objects[0].GetResourceVersion() == "rv-17"
+	})
+	watchStream := client.lastWatch()
+	stopChurn := make(chan struct{})
+	churnDone := make(chan struct{})
+	var stopChurnOnce sync.Once
+	stopContinuousChurn := func() {
+		stopChurnOnce.Do(func() { close(stopChurn) })
+		<-churnDone
+	}
+	defer stopContinuousChurn()
+	go func() {
+		defer close(churnDone)
+		ticker := time.NewTicker(time.Millisecond)
+		defer ticker.Stop()
+		for revision := 18; ; revision++ {
+			select {
+			case <-stopChurn:
+				return
+			case <-ticker.C:
+			}
+			modified := basePod.DeepCopy()
+			modified.SetResourceVersion(fmt.Sprintf("rv-%d", revision))
+			modified.Object["status"].(map[string]any)["phase"] = "Pending"
+			select {
+			case <-stopChurn:
+				return
+			case watchStream.channel <- watch.Event{Type: watch.Modified, Object: modified}:
+			}
+		}
+	}()
+	eventually(t, time.Second, func() bool {
+		objects := subscription.resource.currentStore().GetMany([]types.UID{"uid-match"})
+		return len(objects) == 1 && objects[0] != nil &&
+			objects[0].GetResourceVersion() != "rv-17"
+	})
+	fetcher.result <- runtimeMetricResult{samples: map[string]metrics.Sample{
+		"uid-match": metricCPUSample(200_000_000),
+	}}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	for {
+		events, nextErr := subscription.Next(ctx)
+		if nextErr != nil {
+			t.Fatalf("waiting for staged reconciliation: %v", nextErr)
+		}
+		if err := subscription.AcknowledgeDelivery(events); err != nil {
+			t.Fatal(err)
+		}
+		if eventsContainReconciled(events) {
+			break
+		}
+	}
+	stopContinuousChurn()
+
+	// Changes newer than the pinned epoch resume normal incremental delivery.
+	later := basePod.DeepCopy()
+	later.SetResourceVersion("rv-final")
+	if err := unstructured.SetNestedField(later.Object, "Succeeded", "status", "phase"); err != nil {
+		t.Fatal(err)
+	}
+	client.lastWatch().channel <- watch.Event{Type: watch.Modified, Object: later}
+	eventually(t, time.Second, func() bool {
+		subscription.mu.Lock()
+		defer subscription.mu.Unlock()
+		row := subscription.rows["uid-match"]
+		return row != nil && cellByID(row, "status").GetDisplayText() == "Succeeded"
+	})
+	if client.listCalls.Load() != 1 || client.watchCalls.Load() != 1 {
+		t.Fatalf(
+			"staged reconciliation restarted resources: LIST=%d WATCH=%d",
+			client.listCalls.Load(), client.watchCalls.Load(),
+		)
+	}
 }
 
 func TestCompleteSharedMetricsReconcileAfterBaseBarrier(t *testing.T) {
