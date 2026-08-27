@@ -377,6 +377,16 @@ Versioned UI settings and column configuration are kept under
 restored, but warm object caches remain process-memory-only and are never
 presented as restored cluster truth after relaunch.
 
+Cluster workspace frames are remembered independently. On relaunch, each
+restored workspace uses its own last size and position when that frame is still
+reachable; an unavailable display or invalid frame gets a visible fallback.
+When a new workspace is opened, an exact kubeconfig context with prior frame
+history starts from that context's frame (offset when another visible window
+occupies it), while an unseen context uses the global last workspace size and a
+visible cascade. Closing a workspace removes only its open-window record and
+per-window frame; the exact-context frame history remains available for a later
+new window.
+
 Warm resource stores are governed by three independent LRU ceilings. Defaults
 are 24 views, 250,000 objects, and a conservative 512 MiB retained-size
 estimate process-wide, plus 8 views, 100,000 objects, and 192 MiB for each
