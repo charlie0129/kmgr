@@ -156,51 +156,37 @@ import Testing
     let configuration = drillDownIdentity(
         resource: "configmaps", name: "api-settings"
     )
-    let relationships = ObjectRelationships(
-        values: [
-            parentRelationship(configuration),
-            parentRelationship(deployment, controller: true),
-            ObjectRelationship(
-                kind: .child,
-                identity: drillDownIdentity(resource: "pods", name: "api-child"),
-                label: "Pod"
-            ),
-        ],
-        childrenPotentiallyIncomplete: true
-    )
+    let owners = [
+        parentOwner(configuration),
+        parentOwner(deployment, controller: true),
+    ]
 
-    #expect(ResourceParentNavigationPlanner.resolve(relationships) == .parent(deployment))
+    #expect(ResourceParentNavigationPlanner.resolve(owners) == .parent(
+        parentOwner(deployment, controller: true)
+    ))
 }
 
 @Test func parentNavigationFallsBackToTheSoleLiveOwner() {
     let live = drillDownIdentity(resource: "configmaps", name: "live")
     let stale = drillDownIdentity(resource: "secrets", name: "stale")
-    let relationships = ObjectRelationships(
-        values: [
-            parentRelationship(stale, stale: true),
-            parentRelationship(live),
-        ],
-        childrenPotentiallyIncomplete: false
-    )
+    let owners = [
+        parentOwner(stale, stale: true),
+        parentOwner(live),
+    ]
 
-    #expect(ResourceParentNavigationPlanner.resolve(relationships) == .parent(live))
+    #expect(ResourceParentNavigationPlanner.resolve(owners) == .parent(parentOwner(live)))
 }
 
 @Test func parentNavigationReportsAmbiguousStaleAndMissingOwners() {
     let first = drillDownIdentity(resource: "configmaps", name: "first")
     let second = drillDownIdentity(resource: "secrets", name: "second")
-    #expect(ResourceParentNavigationPlanner.resolve(ObjectRelationships(
-        values: [parentRelationship(first), parentRelationship(second)],
-        childrenPotentiallyIncomplete: false
-    )) == .ambiguous)
-    #expect(ResourceParentNavigationPlanner.resolve(ObjectRelationships(
-        values: [parentRelationship(first, stale: true)],
-        childrenPotentiallyIncomplete: false
-    )) == .stale(first))
-    #expect(ResourceParentNavigationPlanner.resolve(ObjectRelationships(
-        values: [],
-        childrenPotentiallyIncomplete: false
-    )) == .noParent)
+    #expect(ResourceParentNavigationPlanner.resolve([
+        parentOwner(first), parentOwner(second),
+    ]) == .ambiguous)
+    #expect(ResourceParentNavigationPlanner.resolve([
+        parentOwner(first, stale: true),
+    ]) == .stale(parentOwner(first, stale: true)))
+    #expect(ResourceParentNavigationPlanner.resolve([]) == .noParent)
 }
 
 @Test func parentNavigationBuildsExactServerSideQueryAndUIDSelection() {
@@ -260,17 +246,19 @@ import Testing
     )) == nil)
 }
 
-private func parentRelationship(
+private func parentOwner(
     _ identity: ResourceIdentity,
     stale: Bool = false,
     controller: Bool = false
-) -> ObjectRelationship {
-    ObjectRelationship(
-        kind: .owner,
-        identity: identity,
-        label: identity.resource,
-        stale: stale,
-        controller: controller
+) -> ObjectOwnerReference {
+    ObjectOwnerReference(
+        group: identity.group,
+        version: identity.version,
+        kind: identity.resource,
+        name: identity.name,
+        uid: identity.uid,
+        controller: controller,
+        stale: stale
     )
 }
 

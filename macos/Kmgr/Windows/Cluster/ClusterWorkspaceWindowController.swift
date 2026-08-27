@@ -12,24 +12,32 @@ struct ClusterWorkspaceOpenRequest: Sendable {
     var resource: GVR?
     var filter: String
     var subresource: ResourceIdentity?
+    var selectionUID: ResourceUID?
 
     init(
         contextReference: String,
         namespaceScope: NamespaceSelection,
         resource: GVR? = nil,
         filter: String = "",
-        subresource: ResourceIdentity? = nil
+        subresource: ResourceIdentity? = nil,
+        selectionUID: ResourceUID? = nil
     ) {
         self.contextReference = contextReference
         self.namespaceScope = namespaceScope
         self.resource = resource
         self.filter = filter
         self.subresource = subresource
+        self.selectionUID = selectionUID
     }
 }
 
 typealias NamespacePickerPresenter = (NSPopUpButton, Any?) -> Void
 typealias NamespacePickerKeyWindowCheck = (NSWindow) -> Bool
+
+private enum ResourceParentDestination {
+    case currentWorkspace
+    case newWorkspace
+}
 
 struct ResourceColumnsRequest {
     var resourceTitle: String
@@ -121,6 +129,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     private(set) var isAuthenticated: Bool
     var onClose: (() -> Void)?
     var onStartPortForward: ((ResourceIdentity) -> Void)?
+    var onStartPortForwardAndShow: ((ResourceIdentity) -> Void)?
     var onShowColumns: ((ResourceColumnsRequest) -> Void)?
     var onOpenLogWindow: ((LogWindowController) -> Void)?
     var onOpenTerminalWindow: ((TerminalWindowController) -> Void)?
@@ -159,6 +168,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     private let nodeShellPreferences: @MainActor () -> NodeShellPreferences
     private let terminalPreferences: @MainActor () -> TerminalPreferences
     private let saveNodeShellPreferences: @MainActor (NodeShellPreferences) throws -> Void
+    private let onShowPortForwards: @MainActor () -> Void
     private let workspaceController: ClusterWorkspaceViewController
     private var restoration: ClusterWindowRestorationRecord
     private var portForwardConfigurationController: PortForwardConfigurationWindowController?
@@ -247,6 +257,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         self.nodeShellPreferences = nodeShellPreferences
         self.terminalPreferences = terminalPreferences
         self.saveNodeShellPreferences = saveNodeShellPreferences
+        self.onShowPortForwards = onShowPortForwards
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1_180, height: 760),
@@ -314,6 +325,9 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     private func installWorkspaceCallbacks() {
         workspaceController.onStartPortForward = { [weak self] identity in
             self?.onStartPortForward?(identity)
+        }
+        workspaceController.onStartPortForwardAndShow = { [weak self] identity in
+            self?.onStartPortForwardAndShow?(identity)
         }
         workspaceController.onShowColumns = { [weak self] request in
             self?.onShowColumns?(request)
@@ -664,9 +678,17 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         onOpenNewWorkspace?(request)
     }
 
-    func showPortForwardConfiguration(_ identity: ResourceIdentity) {
+    func showPortForwardConfiguration(
+        _ identity: ResourceIdentity,
+        showPortForwardsAfterStart: Bool = false
+    ) {
         guard let window else { return }
         if let current = portForwardConfigurationController {
+            if showPortForwardsAfterStart {
+                current.onStartSucceeded = { [weak self] in
+                    self?.onShowPortForwards()
+                }
+            }
             current.window?.makeKeyAndOrderFront(nil)
             NSSound.beep()
             return
@@ -677,6 +699,11 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
             objectDetailProvider: objectDetailProvider,
             coordinator: portForwards
         )
+        if showPortForwardsAfterStart {
+            controller.onStartSucceeded = { [weak self] in
+                self?.onShowPortForwards()
+            }
+        }
         controller.onDismiss = { [weak self, weak controller] in
             guard self?.portForwardConfigurationController === controller else { return }
             self?.portForwardConfigurationController = nil
@@ -1008,6 +1035,12 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     @objc func enterResourceInNewWorkspace(_ sender: Any?) {
         workspaceController.enterResourceInNewWorkspace(sender)
     }
+    @objc func showResourceParent(_ sender: Any?) {
+        workspaceController.showResourceParent(sender)
+    }
+    @objc func showResourceParentInNewWorkspace(_ sender: Any?) {
+        workspaceController.showResourceParentInNewWorkspace(sender)
+    }
     @objc func showPodNode(_ sender: Any?) { workspaceController.showPodNode(sender) }
     @objc func openResourceDetails(_ sender: Any?) { workspaceController.openResourceDetails(sender) }
     @objc func openResourceYAML(_ sender: Any?) { workspaceController.openResourceYAML(sender) }
@@ -1019,6 +1052,9 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         workspaceController.configureResourceExec(sender)
     }
     @objc func startResourcePortForward(_ sender: Any?) { workspaceController.startResourcePortForward(sender) }
+    @objc func startResourcePortForwardAndShow(_ sender: Any?) {
+        workspaceController.startResourcePortForwardAndShow(sender)
+    }
     @objc func deleteResourceSelection(_ sender: Any?) { workspaceController.deleteResourceSelection(sender) }
     @objc func scaleResourceSelection(_ sender: Any?) { workspaceController.scaleResourceSelection(sender) }
     @objc func restartResourceSelection(_ sender: Any?) { workspaceController.restartResourceSelection(sender) }
@@ -1055,6 +1091,8 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         case #selector(extendResourceSelectionDown(_:)): command = .extendDown
         case #selector(enterResource(_:)): command = .enter
         case #selector(enterResourceInNewWorkspace(_:)): command = .enterInNewWorkspace
+        case #selector(showResourceParent(_:)): command = .showParent
+        case #selector(showResourceParentInNewWorkspace(_:)): command = .showParentInNewWorkspace
         case #selector(showPodNode(_:)): command = .showNode
         case #selector(openResourceDetails(_:)): command = .open
         case #selector(openResourceYAML(_:)): command = .openYAML
@@ -1064,6 +1102,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         case #selector(openResourceExec(_:)): command = .openExec
         case #selector(configureResourceExec(_:)): command = .configureExec
         case #selector(startResourcePortForward(_:)): command = .startPortForward
+        case #selector(startResourcePortForwardAndShow(_:)): command = .startPortForwardAndShow
         case #selector(deleteResourceSelection(_:)): command = .delete
         case #selector(scaleResourceSelection(_:)): command = .scale
         case #selector(restartResourceSelection(_:)): command = .restart
@@ -1148,6 +1187,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         var filter: String
     }
     var onStartPortForward: ((ResourceIdentity) -> Void)?
+    var onStartPortForwardAndShow: ((ResourceIdentity) -> Void)?
     var onShowColumns: ((ResourceColumnsRequest) -> Void)?
     var onOpenDetails: ((ResourceIdentity) -> Void)?
     var onOpenYAML: ((ResourceIdentity) -> Void)?
@@ -1313,11 +1353,17 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         contentController.onEnterObject = { [weak self] identity in
             self?.enterObject(identity)
         }
+        contentController.onShowParent = { [weak self] identity, destination in
+            self?.showParent(for: identity, destination: destination)
+        }
         contentController.onShowPodNode = { [weak self] identity in
             self?.showNode(forPod: identity)
         }
         contentController.onStartPortForward = { [weak self] identity in
             self?.onStartPortForward?(identity)
+        }
+        contentController.onStartPortForwardAndShow = { [weak self] identity in
+            self?.onStartPortForwardAndShow?(identity)
         }
         contentController.onShowColumns = { [weak self] request in
             self?.onShowColumns?(request)
@@ -1456,6 +1502,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
                 resource: target,
                 scope: scope,
                 initialFilter: request.filter,
+                selectResultUID: request.selectionUID,
                 reason: .commandPaletteSelection
             )
             sidebarController.selectResource(matchingCurrent: target.id)
@@ -2155,6 +2202,12 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     @objc func enterResourceInNewWorkspace(_ sender: Any?) {
         contentController.performCommand(.enterInNewWorkspace)
     }
+    @objc func showResourceParent(_ sender: Any?) {
+        contentController.performCommand(.showParent)
+    }
+    @objc func showResourceParentInNewWorkspace(_ sender: Any?) {
+        contentController.performCommand(.showParentInNewWorkspace)
+    }
     @objc func showPodNode(_ sender: Any?) { contentController.performCommand(.showNode) }
     @objc func openResourceDetails(_ sender: Any?) { contentController.performCommand(.open) }
     @objc func openResourceYAML(_ sender: Any?) { contentController.performCommand(.openYAML) }
@@ -2167,6 +2220,9 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     }
     @objc func startResourcePortForward(_ sender: Any?) {
         performNetworkCommand(.startPortForward)
+    }
+    @objc func startResourcePortForwardAndShow(_ sender: Any?) {
+        performNetworkCommand(.startPortForwardAndShow)
     }
     @objc func deleteResourceSelection(_ sender: Any?) { contentController.performCommand(.delete) }
     @objc func scaleResourceSelection(_ sender: Any?) { contentController.performCommand(.scale) }
@@ -2204,7 +2260,8 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         if let action = command.subresourceNetworkAction,
             let podContainerController
         {
-            return podContainerController.canPerform(action)
+            return podContainerController.tableHasFocus
+                && podContainerController.canPerform(action)
         }
         return contentController.canPerformCommand(command)
     }
@@ -2240,6 +2297,10 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         if let action = command.subresourceNetworkAction,
             let podContainerController
         {
+            guard podContainerController.tableHasFocus else {
+                NSSound.beep()
+                return
+            }
             if !podContainerController.perform(action) { NSSound.beep() }
             return
         }
@@ -2544,6 +2605,108 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         }
     }
 
+    private func showParent(
+        for identity: ResourceIdentity,
+        destination: ResourceParentDestination
+    ) {
+        guard let returnState = contentController.captureNavigationState(),
+            let sourceSelectionTicket = contentController
+                .captureSelectionOperationTicket(for: identity)
+        else { return }
+
+        let revision = beginObjectOpenTask()
+        publishWorkspaceOperation(WorkspaceStatus(
+            "Finding the parent of \(identity.name)…",
+            busy: true
+        ))
+        objectOpenTask = Task { [weak self, objectDetailProvider] in
+            guard let self else { return }
+            defer {
+                if objectOpenRevision == revision { objectOpenTask = nil }
+            }
+            do {
+                let detail = try await objectDetailProvider.getObject(identity: identity)
+                guard !Task.isCancelled, objectOpenRevision == revision else { return }
+                publishWorkspaceOperation(nil)
+                guard drillDownSourceIsCurrent(
+                    returnState: returnState,
+                    selectionTicket: sourceSelectionTicket
+                ) else { return }
+
+                switch ResourceParentNavigationPlanner.resolve(detail.owners) {
+                case .noParent:
+                    publishWorkspaceOperation(WorkspaceStatus(
+                        "\(identity.resource)/\(identity.name) has no Kubernetes owner.",
+                        severity: .warning
+                    ))
+                case .stale(let owner):
+                    publishWorkspaceOperation(WorkspaceStatus(
+                        "The referenced parent \(owner.kind)/\(owner.name) no longer exists.",
+                        severity: .warning
+                    ))
+                case .ambiguous:
+                    publishWorkspaceOperation(WorkspaceStatus(
+                        "This object has multiple possible owners; Kmgr will not guess a parent.",
+                        severity: .warning
+                    ))
+                case .parent(let owner):
+                    guard let parentResource = resources.first(where: {
+                        $0.group == owner.group && $0.version == owner.version
+                            && $0.kind.caseInsensitiveCompare(owner.kind) == .orderedSame
+                            && $0.verbs.contains("list")
+                    }) else {
+                        publishWorkspaceOperation(WorkspaceStatus(
+                            "The parent resource list is not available in this cluster's discovered resources.",
+                            severity: .warning
+                        ))
+                        return
+                    }
+                    let parent = ResourceParentNavigationPlanner.identity(
+                        for: owner,
+                        resource: parentResource.resource,
+                        namespace: parentResource.namespaced ? identity.namespace : "",
+                        clusterSessionID: identity.clusterSessionID
+                    )
+                    let query = ResourceParentNavigationPlanner.query(for: parent)
+                    switch destination {
+                    case .currentWorkspace:
+                        guard openDrillDownResource(query) else {
+                            publishWorkspaceOperation(WorkspaceStatus(
+                                "The parent resource list is no longer available.",
+                                severity: .warning
+                            ))
+                            return
+                        }
+                    case .newWorkspace:
+                        onOpenNewWorkspace?(ClusterWorkspaceOpenRequest(
+                            contextReference: session.contextReference,
+                            namespaceScope: query.namespaceScope,
+                            resource: GVR(
+                                group: query.group,
+                                version: query.version,
+                                resource: query.resource
+                            ),
+                            filter: query.filterExpression,
+                            selectionUID: query.selectionUID
+                        ))
+                    }
+                }
+            } catch is CancellationError {
+                if objectOpenRevision == revision {
+                    publishWorkspaceOperation(nil)
+                }
+            } catch {
+                guard !Task.isCancelled, objectOpenRevision == revision else { return }
+                let presentation = UserFacingErrorPresentation(error)
+                publishWorkspaceOperation(WorkspaceStatus(
+                    presentation.inlineText,
+                    severity: .error,
+                    toolTip: presentation.detailedText
+                ))
+            }
+        }
+    }
+
     private func showNode(forPod identity: ResourceIdentity) {
         guard PodNodeNavigationPlanner.hasPotentialTarget(identity),
             resources.contains(where: {
@@ -2662,6 +2825,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             scope: query.namespaceScope,
             initialFilter: query.filterExpression,
             selectOnlyResult: selectOnlyResult,
+            selectResultUID: query.selectionUID,
             reason: .resourceDrillDown
         )
         sidebarController.selectResource(matchingCurrent: target.id)
@@ -2781,6 +2945,9 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         }
         controller.onStartPortForward = { [weak self] identity in
             self?.onStartPortForward?(identity)
+        }
+        controller.onStartPortForwardAndShow = { [weak self] identity in
+            self?.onStartPortForwardAndShow?(identity)
         }
         controller.onContextualShortcutsChanged = { [weak self] in
             self?.onContextualShortcutsChanged?()
@@ -4038,10 +4205,13 @@ private final class ResourceListViewController: NSViewController,
     private var retainedRowsLastSynchronizedAt: Date?
     private var pendingScrollAnchor: ScrollAnchor?
     private var pendingSelectionUIDs: Set<ResourceUID>?
-    /// Relationship drill-downs with an exact selector may request selection
-    /// of their sole result once its revision-pinned range is materialized.
+    /// Exact relationship drill-downs may request selection once their
+    /// revision-pinned result is materialized. When a UID is supplied, a
+    /// same-name replacement remains visible but is never auto-selected.
     private var pendingSelectOnlyResult = false
+    private var pendingSelectResultUID: ResourceUID?
     private var selectOnlyResultGeneration: UInt64?
+    private var selectResultUID: ResourceUID?
     private var restorationCheckpointTask: Task<Void, Never>?
     private var freshnessAgeTask: Task<Void, Never>?
     private var resourceViewStatus: ResourceViewStatus?
@@ -4073,6 +4243,7 @@ private final class ResourceListViewController: NSViewController,
     private var projectionRequestGeneration: UInt64?
     var onShowCommandPalette: (() -> Void)?
     var onEnterObject: ((ResourceIdentity) -> Void)?
+    var onShowParent: ((ResourceIdentity, ResourceParentDestination) -> Void)?
     var onShowPodNode: ((ResourceIdentity) -> Void)?
     var onOpenDetails: ((ResourceIdentity) -> Void)?
     var onOpenEvents: ((ResourceIdentity) -> Void)?
@@ -4081,6 +4252,7 @@ private final class ResourceListViewController: NSViewController,
     var onOpenNewWorkspace: ((ClusterWorkspaceOpenRequest) -> Void)?
     var onOpenEventsInNewWorkspace: ((ResourceIdentity) -> Void)?
     var onStartPortForward: ((ResourceIdentity) -> Void)?
+    var onStartPortForwardAndShow: ((ResourceIdentity) -> Void)?
     var onShowColumns: ((ResourceColumnsRequest) -> Void)?
     var onOpenLogs: ((LogOpenRequest) -> Void)?
     var onOpenExec: ((PodExecTarget) -> Void)?
@@ -4219,6 +4391,8 @@ private final class ResourceListViewController: NSViewController,
             title: title,
             availability: ResourceListShortcutAvailability(
                 canEnterSubresource: canUse(.enter) || canUse(.enterInNewWorkspace),
+                canShowParent: canUse(.showParent)
+                    || canUse(.showParentInNewWorkspace),
                 canShowNode: canUse(.showNode),
                 canOpenDetails: canUse(.open),
                 canOpenYAML: canUse(.openYAML),
@@ -4418,10 +4592,13 @@ private final class ResourceListViewController: NSViewController,
         scope: NamespaceSelection,
         initialFilter: String? = nil,
         selectOnlyResult: Bool = false,
+        selectResultUID: ResourceUID? = nil,
         reason: ResourceStreamOpenReason
     ) {
-        pendingSelectOnlyResult = selectOnlyResult
+        pendingSelectOnlyResult = selectOnlyResult || selectResultUID != nil
+        pendingSelectResultUID = selectResultUID
         selectOnlyResultGeneration = nil
+        self.selectResultUID = nil
         traceResourceCache(
             "event=open_resource reason=\(reason.rawValue) target_gvr="
                 + resourceCacheGVRDescription(resourceGVR(for: resource))
@@ -4483,7 +4660,9 @@ private final class ResourceListViewController: NSViewController,
     func changeNamespaceScope(_ scope: NamespaceSelection) {
         guard self.scope != scope else { return }
         pendingSelectOnlyResult = false
+        pendingSelectResultUID = nil
         selectOnlyResultGeneration = nil
+        selectResultUID = nil
         traceResourceCache(
             "event=namespace_change from=\(resourceCacheScopeDescription(self.scope))"
                 + " to=\(resourceCacheScopeDescription(scope))"
@@ -4844,6 +5023,8 @@ private final class ResourceListViewController: NSViewController,
         addGroup([
             ("Enter Subresource", .enter),
             ("Enter Subresource in New Workspace", .enterInNewWorkspace),
+            ("Go to Parent", .showParent),
+            ("Go to Parent in New Workspace", .showParentInNewWorkspace),
             ("Show Node", .showNode),
             ("Open Details", .open),
             ("Open YAML", .openYAML),
@@ -4855,6 +5036,7 @@ private final class ResourceListViewController: NSViewController,
             ("Open Terminal", .openExec),
             ("Configure Terminal…", .configureExec),
             ("Start Port Forward…", .startPortForward),
+            ("Start Port Forward and Show Port Forwards…", .startPortForwardAndShow),
         ])
         addGroup([
             ("Scale…", .scale),
@@ -4889,7 +5071,9 @@ private final class ResourceListViewController: NSViewController,
 
     func setFilter(_ value: String) {
         pendingSelectOnlyResult = false
+        pendingSelectResultUID = nil
         selectOnlyResultGeneration = nil
+        selectResultUID = nil
         resetFilterCompletion()
         filterRevision &+= 1
         filterTask?.cancel()
@@ -5135,7 +5319,9 @@ private final class ResourceListViewController: NSViewController,
     func controlTextDidChange(_ obj: Notification) {
         guard obj.object as? NSControl === filterField else { return }
         pendingSelectOnlyResult = false
+        pendingSelectResultUID = nil
         selectOnlyResultGeneration = nil
+        selectResultUID = nil
         clearTransientCellPresentation()
         filterRevision &+= 1
         filterTask?.cancel()
@@ -5474,7 +5660,9 @@ private final class ResourceListViewController: NSViewController,
             ? pendingSelectionUIDs : nil
         generation &+= 1
         selectOnlyResultGeneration = pendingSelectOnlyResult ? generation : nil
+        selectResultUID = pendingSelectOnlyResult ? pendingSelectResultUID : nil
         pendingSelectOnlyResult = false
+        pendingSelectResultUID = nil
         if previousStreamContext == nextStreamContext {
             // A new generation has a new numeric ordering even when warm rows
             // are retained. Keep the immutable displayed token for UID
@@ -6529,6 +6717,7 @@ private final class ResourceListViewController: NSViewController,
         guard selectOnlyResultGeneration == range.revision.generation else { return }
         guard range.rowsVisible <= 1 else {
             selectOnlyResultGeneration = nil
+            selectResultUID = nil
             return
         }
         guard range.rowsVisible == 1,
@@ -6537,6 +6726,11 @@ private final class ResourceListViewController: NSViewController,
         else { return }
 
         selectOnlyResultGeneration = nil
+        let expectedUID = selectResultUID
+        selectResultUID = nil
+        guard expectedUID == nil || range.rows[0].identity.uid == expectedUID else {
+            return
+        }
         _ = performSelectionGesture(ResourceTableSelectionGesture(
             row: 0,
             modifiers: [],
@@ -7821,7 +8015,9 @@ private final class ResourceListViewController: NSViewController,
         discoveredResources: [DiscoveredResource]
     ) -> Bool {
         pendingSelectOnlyResult = false
+        pendingSelectResultUID = nil
         selectOnlyResultGeneration = nil
+        selectResultUID = nil
         guard let gvr = restoration.gvr,
             let restored = discoveredResources.first(where: {
                 $0.group == gvr.group && $0.version == gvr.version && $0.resource == gvr.resource
@@ -7941,7 +8137,9 @@ private final class ResourceListViewController: NSViewController,
 
     func restoreResource(_ state: ResourceNavigationState) {
         pendingSelectOnlyResult = false
+        pendingSelectResultUID = nil
         selectOnlyResultGeneration = nil
+        selectResultUID = nil
         traceResourceCache(
             "event=restore_resource target_gvr="
                 + resourceCacheGVRDescription(GVR(
@@ -8597,15 +8795,28 @@ private final class ResourceListViewController: NSViewController,
                 resource: resource.resource
             )
         )
+        startNativeRangeTargetFetch(pending)
+        return true
+    }
+
+    /// Starts (or restarts) the one-row endpoint request while retaining the
+    /// compact drag state. A presentation-only watch update changes the
+    /// request revision but not the numeric ordering, so the drag can be
+    /// retried safely instead of being surfaced as an internal failure.
+    private func startNativeRangeTargetFetch(
+        _ pending: PendingNativeRangeSelection
+    ) {
         pendingNativeRangeSelection = pending
-        pendingUIDSelectionTableIndexes = IndexSet(integersIn: selectedRange)
+        pendingUIDSelectionTableIndexes = IndexSet(
+            integersIn: pending.selectedRange
+        )
         nativeRangeSelectionFetchTicket &+= 1
         let ticket = nativeRangeSelectionFetchTicket
         let request = ResourceViewRangeRequest(
             sessionID: session.sessionID,
             viewID: viewID,
-            revision: viewRevision,
-            startIndex: targetIndex,
+            revision: pending.expectedViewRevision,
+            startIndex: pending.targetIndex,
             length: 1
         )
         let provider = self.provider
@@ -8627,7 +8838,6 @@ private final class ResourceListViewController: NSViewController,
                 )
             }
         }
-        return true
     }
 
     private func receiveNativeRangeTarget(
@@ -8646,6 +8856,32 @@ private final class ResourceListViewController: NSViewController,
             restoreAppKitSelectionFromLoadedModel()
             let error = selectionScopeChangedIssue()
             for fence in selectionFences { fence.resolve(.failure(error)) }
+            return
+        }
+        if let currentViewRevision = rangeCache?.revision,
+            currentViewRevision.generation == pending.revision.generation,
+            currentViewRevision.index == pending.revision.indexRevision,
+            currentViewRevision.presentation != pending.expectedViewRevision.presentation
+        {
+            // Presentation-only updates retain the same UID ordering and
+            // selection revision. Re-pin the endpoint request to the new
+            // presentation, preserving any command waiting on this drag.
+            let selectionFences = pendingNativeRangeSelectionFences
+            pendingNativeRangeSelectionFences.removeAll(keepingCapacity: true)
+            let preservesPendingCommand = pendingCommandForLoadingSelection != nil
+            cancelPendingNativeRangeSelection(
+                preservingPendingCommand: preservesPendingCommand
+            )
+            pendingNativeRangeSelectionFences = selectionFences
+            startNativeRangeTargetFetch(PendingNativeRangeSelection(
+                anchorUID: pending.anchorUID,
+                targetIndex: pending.targetIndex,
+                selectedRange: pending.selectedRange,
+                revision: pending.revision,
+                expectedViewRevision: currentViewRevision,
+                expectedGVR: pending.expectedGVR
+            ))
+            scheduleViewportUpdate(immediate: true)
             return
         }
         guard range.viewID == viewID,
@@ -9349,6 +9585,12 @@ private final class ResourceListViewController: NSViewController,
                 filter: "",
                 subresource: identity
             ))
+        case .showParent, .showParentInNewWorkspace:
+            guard let identity = selected.only else { return }
+            onShowParent?(
+                identity,
+                command == .showParent ? .currentWorkspace : .newWorkspace
+            )
         case .showNode:
             guard let identity = selected.only,
                 PodNodeNavigationPlanner.hasPotentialTarget(identity)
@@ -9372,13 +9614,17 @@ private final class ResourceListViewController: NSViewController,
         case .openEventsInNewWorkspace:
             guard let identity = selected.only else { return }
             onOpenEventsInNewWorkspace?(identity)
-        case .startPortForward:
+        case .startPortForward, .startPortForwardAndShow:
             guard let identity = selected.only,
                 identity.group.isEmpty,
                 identity.version == "v1",
                 identity.resource == "pods" || identity.resource == "services"
             else { return }
-            onStartPortForward?(identity)
+            if command == .startPortForwardAndShow {
+                onStartPortForwardAndShow?(identity)
+            } else {
+                onStartPortForward?(identity)
+            }
         case .openLogs, .openPreviousLogs:
             guard LogResourceCompatibility.supportsSelection(selected)
             else { NSSound.beep(); return }
@@ -9911,6 +10157,8 @@ private final class ResourceListViewController: NSViewController,
                 uid: "_"
             )
             return ResourceDrillDownPlanner.hasPotentialTarget(identity)
+        case .showParent, .showParentInNewWorkspace:
+            return exactlyOne
         case .showNode:
             return exactlyOne && group.isEmpty && version == "v1"
                 && name == "pods"
@@ -9928,7 +10176,7 @@ private final class ResourceListViewController: NSViewController,
         case .openExec, .configureExec:
             return exactlyOne && group.isEmpty && version == "v1"
                 && (name == "pods" || name == "nodes")
-        case .startPortForward:
+        case .startPortForward, .startPortForwardAndShow:
             return exactlyOne && group.isEmpty && version == "v1"
                 && (name == "pods" || name == "services")
         case .delete:
@@ -9957,6 +10205,8 @@ private final class ResourceListViewController: NSViewController,
         case .enter, .enterInNewWorkspace:
             return selected.count == 1
                 && ResourceDrillDownPlanner.hasPotentialTarget(selected[0])
+        case .showParent, .showParentInNewWorkspace:
+            return selected.count == 1
         case .showNode:
             return selected.count == 1
                 && PodNodeNavigationPlanner.hasPotentialTarget(selected[0])
@@ -9968,7 +10218,7 @@ private final class ResourceListViewController: NSViewController,
             return selected.count == 1 && selected[0].group.isEmpty
                 && selected[0].version == "v1"
                 && (selected[0].resource == "pods" || selected[0].resource == "nodes")
-        case .startPortForward:
+        case .startPortForward, .startPortForwardAndShow:
             return selected.count == 1 && selected[0].group.isEmpty
                 && selected[0].version == "v1"
                 && (selected[0].resource == "pods" || selected[0].resource == "services")
@@ -10325,10 +10575,12 @@ private final class ObjectDetailRecentEventsController: ObjectDetailEventsContro
 private enum ResourceTableCommand: Equatable {
     case focusFilter, enter, enterInNewWorkspace, showNode
     case open, openYAML, editYAML
+    case showParent, showParentInNewWorkspace
     case openEvents, openEventsInNewWorkspace
     case openLogs, openPreviousLogs
     case openExec, configureExec
-    case startPortForward, selectAll, delete, scale, restart, editLabels, editAnnotations
+    case startPortForward, startPortForwardAndShow
+    case selectAll, delete, scale, restart, editLabels, editAnnotations
     case copyName, copyNamespacedName, copyReference, moveUp, moveDown, extendUp, extendDown
 }
 
@@ -10349,6 +10601,7 @@ private extension ResourceTableCommand {
         case .openExec: .openAutomaticExec
         case .configureExec: .configureExec
         case .startPortForward: .startPortForward
+        case .startPortForwardAndShow: .startPortForwardAndShow
         default: nil
         }
     }
@@ -10475,6 +10728,8 @@ private final class ResourceTableView: CapturedCellTableView {
         case ("j", _) where unmodified: onCommand?(.moveDown)
         case ("k", _) where unmodified: onCommand?(.moveUp)
         case ("d", _) where unmodified: onCommand?(.open)
+        case ("p", _) where commandOnly: onCommand?(.showParentInNewWorkspace)
+        case ("p", _) where unmodified: onCommand?(.showParent)
         case ("o", _) where unmodified: onCommand?(.showNode)
         case (_, 36) where commandOnly: onCommand?(.enterInNewWorkspace)
         case (_, 36) where unmodified: onCommand?(.enter)
@@ -10499,9 +10754,8 @@ private final class ResourceTableView: CapturedCellTableView {
                 return
             }
             onCommand?(event.modifierFlags.contains(.shift) ? .configureExec : .openExec)
-        case ("p", _)
-            where event.modifierFlags.intersection([.command, .control, .option]).isEmpty:
-            onCommand?(.startPortForward)
+        case ("f", _) where commandOnly: onCommand?(.startPortForwardAndShow)
+        case ("f", _) where unmodified: onCommand?(.startPortForward)
         case ("r", _) where unmodified: onCommand?(.restart)
         case ("a", _) where commandOnly: onCommand?(.selectAll)
         case (_, 51) where commandOnly: onCommand?(.delete)
