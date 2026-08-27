@@ -195,6 +195,7 @@ type Detail struct {
 	Annotations     map[string]string
 	Summary         []SummaryField
 	Containers      []ContainerDetail
+	Owners          []OwnerReference
 	// PodLabelSelector is the canonical, restrictive Kubernetes selector
 	// carried by supported built-in Pod controllers and Services. An empty
 	// value is deliberately unusable as a drill-down: the Kubernetes API
@@ -205,6 +206,19 @@ type Detail struct {
 	// authoritative read without performing a second GET or exposing raw
 	// Secret data through the response contract.
 	object *unstructured.Unstructured
+}
+
+// OwnerReference is the bounded, display-safe owner projection carried with
+// an authoritative object detail. Parent navigation uses it to choose a
+// target resource; child discovery and relationship scans are intentionally
+// outside this contract.
+type OwnerReference struct {
+	Group      string
+	Version    string
+	Kind       string
+	Name       string
+	UID        string
+	Controller bool
 }
 
 type SummaryField struct {
@@ -259,11 +273,38 @@ func detailFromObject(
 	}
 	if includeSummary {
 		detail.Summary = summarize(value)
+		detail.Owners = ownerReferences(value)
 		if identity.Group == "" && identity.Version == "v1" && identity.Resource == "pods" {
 			detail.Containers = podContainerDetails(value)
 		}
 	}
 	return detail, nil
+}
+
+func ownerReferences(value *unstructured.Unstructured) []OwnerReference {
+	if value == nil {
+		return nil
+	}
+	owners := value.GetOwnerReferences()
+	if len(owners) > maximumSummaryOwners {
+		owners = owners[:maximumSummaryOwners]
+	}
+	result := make([]OwnerReference, 0, len(owners))
+	for _, owner := range owners {
+		if owner.Name == "" || owner.UID == "" || owner.Kind == "" || owner.APIVersion == "" {
+			continue
+		}
+		groupVersion, err := schema.ParseGroupVersion(owner.APIVersion)
+		if err != nil || groupVersion.Version == "" {
+			continue
+		}
+		result = append(result, OwnerReference{
+			Group: groupVersion.Group, Version: groupVersion.Version,
+			Kind: owner.Kind, Name: owner.Name, UID: string(owner.UID),
+			Controller: owner.Controller != nil && *owner.Controller,
+		})
+	}
+	return result
 }
 
 // canonicalPodLabelSelector converts the authoritative built-in object's Pod

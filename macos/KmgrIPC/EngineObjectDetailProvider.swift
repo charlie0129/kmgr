@@ -498,7 +498,24 @@ public struct EngineObjectDetailProvider: ObjectDetailProviding {
                 uniquingKeysWith: { _, latest in latest }
             ),
             containers: response.containers.compactMap(container),
+            owners: response.owners.compactMap(owner),
             podLabelSelector: response.podLabelSelector
+        )
+    }
+
+    private static func owner(
+        _ value: Kmgr_V1_ObjectOwnerReference
+    ) -> ObjectOwnerReference? {
+        guard !value.version.isEmpty, !value.kind.isEmpty,
+            !value.name.isEmpty, !value.uid.isEmpty
+        else { return nil }
+        return ObjectOwnerReference(
+            group: value.group,
+            version: value.version,
+            kind: value.kind,
+            name: value.name,
+            uid: ResourceUID(value.uid),
+            controller: value.controller
         )
     }
 

@@ -35,6 +35,18 @@ message ObjectSummaryField {
   SummaryTimestampPresentation timestamp_presentation = 8;
 }
 
+// ObjectOwnerReference is the bounded owner metadata needed for parent
+// navigation. It is returned as part of object detail, not through a separate
+// relationship or child-scan API.
+message ObjectOwnerReference {
+  string group = 1;
+  string version = 2;
+  string kind = 3;
+  string name = 4;
+  string uid = 5;
+  bool controller = 6;
+}
+
 enum PodContainerKind {
   POD_CONTAINER_KIND_UNSPECIFIED = 0;
   POD_CONTAINER_KIND_REGULAR = 1;
@@ -74,6 +86,7 @@ message GetObjectResponse {
   // restrictive Pod selector is available; clients must not interpret it as
   // "all Pods".
   string pod_label_selector = 11;
+  repeated ObjectOwnerReference owners = 12;
 }
 
 message WatchObjectRequest {

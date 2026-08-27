@@ -407,6 +407,12 @@ func detailResponse(requestID string, identity *kmgrv1.ResourceIdentity, detail 
 		}
 		response.SummaryFields = append(response.SummaryFields, value)
 	}
+	for _, owner := range detail.Owners {
+		response.Owners = append(response.Owners, &kmgrv1.ObjectOwnerReference{
+			Group: owner.Group, Version: owner.Version, Kind: owner.Kind,
+			Name: owner.Name, Uid: owner.UID, Controller: owner.Controller,
+		})
+	}
 	for _, container := range detail.Containers {
 		response.Containers = append(response.Containers, &kmgrv1.PodContainerDetail{
 			Name: container.Name, Kind: containerKindToProto(container.Kind),

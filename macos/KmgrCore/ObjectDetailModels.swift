@@ -71,6 +71,38 @@ public struct PodContainerDetail: Hashable, Sendable {
     }
 }
 
+/// The bounded owner-reference projection used by parent navigation. It is
+/// part of the authoritative object detail response rather than a separate
+/// relationship surface; child discovery and relationship scans are not
+/// supported.
+public struct ObjectOwnerReference: Hashable, Sendable {
+    public var group: String
+    public var version: String
+    public var kind: String
+    public var name: String
+    public var uid: ResourceUID
+    public var controller: Bool
+    public var stale: Bool
+
+    public init(
+        group: String,
+        version: String,
+        kind: String,
+        name: String,
+        uid: ResourceUID,
+        controller: Bool = false,
+        stale: Bool = false
+    ) {
+        self.group = group
+        self.version = version
+        self.kind = kind
+        self.name = name
+        self.uid = uid
+        self.controller = controller
+        self.stale = stale
+    }
+}
+
 public struct ObjectDetail: Hashable, Sendable {
     public var identity: ResourceIdentity
     public var resourceVersion: String
@@ -79,6 +111,7 @@ public struct ObjectDetail: Hashable, Sendable {
     public var labels: [String: String]
     public var annotations: [String: String]
     public var containers: [PodContainerDetail]
+    public var owners: [ObjectOwnerReference]
     /// Canonical Kubernetes label selector for Pods related to this supported
     /// built-in workload or Service. Empty means no safe restrictive selector
     /// is available.
@@ -92,6 +125,7 @@ public struct ObjectDetail: Hashable, Sendable {
         labels: [String: String] = [:],
         annotations: [String: String] = [:],
         containers: [PodContainerDetail] = [],
+        owners: [ObjectOwnerReference] = [],
         podLabelSelector: String = ""
     ) {
         self.identity = identity
@@ -101,6 +135,7 @@ public struct ObjectDetail: Hashable, Sendable {
         self.labels = labels
         self.annotations = annotations
         self.containers = containers
+        self.owners = owners
         self.podLabelSelector = podLabelSelector
     }
 }

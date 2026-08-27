@@ -402,6 +402,93 @@ func (x *ObjectSummaryField) GetTimestampPresentation() SummaryTimestampPresenta
 	return SummaryTimestampPresentation_SUMMARY_TIMESTAMP_PRESENTATION_UNSPECIFIED
 }
 
+// ObjectOwnerReference is the bounded owner metadata needed for parent
+// navigation. It is returned as part of object detail, not through a separate
+// relationship or child-scan API.
+type ObjectOwnerReference struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Group         string                 `protobuf:"bytes,1,opt,name=group,proto3" json:"group,omitempty"`
+	Version       string                 `protobuf:"bytes,2,opt,name=version,proto3" json:"version,omitempty"`
+	Kind          string                 `protobuf:"bytes,3,opt,name=kind,proto3" json:"kind,omitempty"`
+	Name          string                 `protobuf:"bytes,4,opt,name=name,proto3" json:"name,omitempty"`
+	Uid           string                 `protobuf:"bytes,5,opt,name=uid,proto3" json:"uid,omitempty"`
+	Controller    bool                   `protobuf:"varint,6,opt,name=controller,proto3" json:"controller,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ObjectOwnerReference) Reset() {
+	*x = ObjectOwnerReference{}
+	mi := &file_kmgr_v1_object_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ObjectOwnerReference) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ObjectOwnerReference) ProtoMessage() {}
+
+func (x *ObjectOwnerReference) ProtoReflect() protoreflect.Message {
+	mi := &file_kmgr_v1_object_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ObjectOwnerReference.ProtoReflect.Descriptor instead.
+func (*ObjectOwnerReference) Descriptor() ([]byte, []int) {
+	return file_kmgr_v1_object_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *ObjectOwnerReference) GetGroup() string {
+	if x != nil {
+		return x.Group
+	}
+	return ""
+}
+
+func (x *ObjectOwnerReference) GetVersion() string {
+	if x != nil {
+		return x.Version
+	}
+	return ""
+}
+
+func (x *ObjectOwnerReference) GetKind() string {
+	if x != nil {
+		return x.Kind
+	}
+	return ""
+}
+
+func (x *ObjectOwnerReference) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *ObjectOwnerReference) GetUid() string {
+	if x != nil {
+		return x.Uid
+	}
+	return ""
+}
+
+func (x *ObjectOwnerReference) GetController() bool {
+	if x != nil {
+		return x.Controller
+	}
+	return false
+}
+
 // PodContainerDetail is a bounded, display-safe projection of one declared
 // Pod container. It deliberately excludes images, environment variables, and
 // the raw Pod object while retaining the fields needed by container actions.
@@ -422,7 +509,7 @@ type PodContainerDetail struct {
 
 func (x *PodContainerDetail) Reset() {
 	*x = PodContainerDetail{}
-	mi := &file_kmgr_v1_object_proto_msgTypes[2]
+	mi := &file_kmgr_v1_object_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -434,7 +521,7 @@ func (x *PodContainerDetail) String() string {
 func (*PodContainerDetail) ProtoMessage() {}
 
 func (x *PodContainerDetail) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_object_proto_msgTypes[2]
+	mi := &file_kmgr_v1_object_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -447,7 +534,7 @@ func (x *PodContainerDetail) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PodContainerDetail.ProtoReflect.Descriptor instead.
 func (*PodContainerDetail) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_object_proto_rawDescGZIP(), []int{2}
+	return file_kmgr_v1_object_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *PodContainerDetail) GetName() string {
@@ -528,14 +615,15 @@ type GetObjectResponse struct {
 	// workload, Service, or ReplicationController. Empty means no safe,
 	// restrictive Pod selector is available; clients must not interpret it as
 	// "all Pods".
-	PodLabelSelector string `protobuf:"bytes,11,opt,name=pod_label_selector,json=podLabelSelector,proto3" json:"pod_label_selector,omitempty"`
+	PodLabelSelector string                  `protobuf:"bytes,11,opt,name=pod_label_selector,json=podLabelSelector,proto3" json:"pod_label_selector,omitempty"`
+	Owners           []*ObjectOwnerReference `protobuf:"bytes,12,rep,name=owners,proto3" json:"owners,omitempty"`
 	unknownFields    protoimpl.UnknownFields
 	sizeCache        protoimpl.SizeCache
 }
 
 func (x *GetObjectResponse) Reset() {
 	*x = GetObjectResponse{}
-	mi := &file_kmgr_v1_object_proto_msgTypes[3]
+	mi := &file_kmgr_v1_object_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -547,7 +635,7 @@ func (x *GetObjectResponse) String() string {
 func (*GetObjectResponse) ProtoMessage() {}
 
 func (x *GetObjectResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_object_proto_msgTypes[3]
+	mi := &file_kmgr_v1_object_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -560,7 +648,7 @@ func (x *GetObjectResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetObjectResponse.ProtoReflect.Descriptor instead.
 func (*GetObjectResponse) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_object_proto_rawDescGZIP(), []int{3}
+	return file_kmgr_v1_object_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *GetObjectResponse) GetRequestId() string {
@@ -633,6 +721,13 @@ func (x *GetObjectResponse) GetPodLabelSelector() string {
 	return ""
 }
 
+func (x *GetObjectResponse) GetOwners() []*ObjectOwnerReference {
+	if x != nil {
+		return x.Owners
+	}
+	return nil
+}
+
 type WatchObjectRequest struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
 	Context         *RequestContext        `protobuf:"bytes,1,opt,name=context,proto3" json:"context,omitempty"`
@@ -646,7 +741,7 @@ type WatchObjectRequest struct {
 
 func (x *WatchObjectRequest) Reset() {
 	*x = WatchObjectRequest{}
-	mi := &file_kmgr_v1_object_proto_msgTypes[4]
+	mi := &file_kmgr_v1_object_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -658,7 +753,7 @@ func (x *WatchObjectRequest) String() string {
 func (*WatchObjectRequest) ProtoMessage() {}
 
 func (x *WatchObjectRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_object_proto_msgTypes[4]
+	mi := &file_kmgr_v1_object_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -671,7 +766,7 @@ func (x *WatchObjectRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WatchObjectRequest.ProtoReflect.Descriptor instead.
 func (*WatchObjectRequest) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_object_proto_rawDescGZIP(), []int{4}
+	return file_kmgr_v1_object_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *WatchObjectRequest) GetContext() *RequestContext {
@@ -721,7 +816,7 @@ type ObjectEvent struct {
 
 func (x *ObjectEvent) Reset() {
 	*x = ObjectEvent{}
-	mi := &file_kmgr_v1_object_proto_msgTypes[5]
+	mi := &file_kmgr_v1_object_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -733,7 +828,7 @@ func (x *ObjectEvent) String() string {
 func (*ObjectEvent) ProtoMessage() {}
 
 func (x *ObjectEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_object_proto_msgTypes[5]
+	mi := &file_kmgr_v1_object_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -746,7 +841,7 @@ func (x *ObjectEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ObjectEvent.ProtoReflect.Descriptor instead.
 func (*ObjectEvent) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_object_proto_rawDescGZIP(), []int{5}
+	return file_kmgr_v1_object_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *ObjectEvent) GetCursor() *StreamCursor {
@@ -793,7 +888,7 @@ type DataEntry struct {
 
 func (x *DataEntry) Reset() {
 	*x = DataEntry{}
-	mi := &file_kmgr_v1_object_proto_msgTypes[6]
+	mi := &file_kmgr_v1_object_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -805,7 +900,7 @@ func (x *DataEntry) String() string {
 func (*DataEntry) ProtoMessage() {}
 
 func (x *DataEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_object_proto_msgTypes[6]
+	mi := &file_kmgr_v1_object_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -818,7 +913,7 @@ func (x *DataEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DataEntry.ProtoReflect.Descriptor instead.
 func (*DataEntry) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_object_proto_rawDescGZIP(), []int{6}
+	return file_kmgr_v1_object_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *DataEntry) GetKey() string {
@@ -866,7 +961,7 @@ type GetDataRequest struct {
 
 func (x *GetDataRequest) Reset() {
 	*x = GetDataRequest{}
-	mi := &file_kmgr_v1_object_proto_msgTypes[7]
+	mi := &file_kmgr_v1_object_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -878,7 +973,7 @@ func (x *GetDataRequest) String() string {
 func (*GetDataRequest) ProtoMessage() {}
 
 func (x *GetDataRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_object_proto_msgTypes[7]
+	mi := &file_kmgr_v1_object_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -891,7 +986,7 @@ func (x *GetDataRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetDataRequest.ProtoReflect.Descriptor instead.
 func (*GetDataRequest) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_object_proto_rawDescGZIP(), []int{7}
+	return file_kmgr_v1_object_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *GetDataRequest) GetContext() *RequestContext {
@@ -922,7 +1017,7 @@ type GetDataResponse struct {
 
 func (x *GetDataResponse) Reset() {
 	*x = GetDataResponse{}
-	mi := &file_kmgr_v1_object_proto_msgTypes[8]
+	mi := &file_kmgr_v1_object_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -934,7 +1029,7 @@ func (x *GetDataResponse) String() string {
 func (*GetDataResponse) ProtoMessage() {}
 
 func (x *GetDataResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_object_proto_msgTypes[8]
+	mi := &file_kmgr_v1_object_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -947,7 +1042,7 @@ func (x *GetDataResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetDataResponse.ProtoReflect.Descriptor instead.
 func (*GetDataResponse) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_object_proto_rawDescGZIP(), []int{8}
+	return file_kmgr_v1_object_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *GetDataResponse) GetRequestId() string {
@@ -1012,7 +1107,16 @@ const file_kmgr_v1_object_proto_rawDesc = "" +
 	"\atooltip\x18\x05 \x01(\tR\atooltip\x121\n" +
 	"\bseverity\x18\x06 \x01(\x0e2\x15.kmgr.v1.CellSeverityR\bseverity\x12*\n" +
 	"\x11timestamp_unix_ms\x18\a \x01(\x03R\x0ftimestampUnixMs\x12\\\n" +
-	"\x16timestamp_presentation\x18\b \x01(\x0e2%.kmgr.v1.SummaryTimestampPresentationR\x15timestampPresentation\"\xde\x02\n" +
+	"\x16timestamp_presentation\x18\b \x01(\x0e2%.kmgr.v1.SummaryTimestampPresentationR\x15timestampPresentation\"\xa0\x01\n" +
+	"\x14ObjectOwnerReference\x12\x14\n" +
+	"\x05group\x18\x01 \x01(\tR\x05group\x12\x18\n" +
+	"\aversion\x18\x02 \x01(\tR\aversion\x12\x12\n" +
+	"\x04kind\x18\x03 \x01(\tR\x04kind\x12\x12\n" +
+	"\x04name\x18\x04 \x01(\tR\x04name\x12\x10\n" +
+	"\x03uid\x18\x05 \x01(\tR\x03uid\x12\x1e\n" +
+	"\n" +
+	"controller\x18\x06 \x01(\bR\n" +
+	"controller\"\xde\x02\n" +
 	"\x12PodContainerDetail\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12-\n" +
 	"\x04kind\x18\x02 \x01(\x0e2\x19.kmgr.v1.PodContainerKindR\x04kind\x12\x16\n" +
@@ -1022,7 +1126,7 @@ const file_kmgr_v1_object_proto_rawDesc = "" +
 	"\x05ready\x18\x06 \x01(\bR\x05ready\x12#\n" +
 	"\rrestart_count\x18\a \x01(\x05R\frestartCount\x12\x14\n" +
 	"\x05ports\x18\b \x03(\tR\x05ports\x125\n" +
-	"\ametrics\x18\t \x03(\v2\x1b.kmgr.v1.ResourceUsageValueR\ametrics\"\x8b\x04\n" +
+	"\ametrics\x18\t \x03(\v2\x1b.kmgr.v1.ResourceUsageValueR\ametrics\"\xc2\x04\n" +
 	"\x11GetObjectResponse\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x125\n" +
@@ -1037,7 +1141,8 @@ const file_kmgr_v1_object_proto_rawDesc = "" +
 	"containers\x18\n" +
 	" \x03(\v2\x1b.kmgr.v1.PodContainerDetailR\n" +
 	"containers\x12,\n" +
-	"\x12pod_label_selector\x18\v \x01(\tR\x10podLabelSelectorJ\x04\b\b\x10\tR\ametrics\"\xf3\x01\n" +
+	"\x12pod_label_selector\x18\v \x01(\tR\x10podLabelSelector\x125\n" +
+	"\x06owners\x18\f \x03(\v2\x1d.kmgr.v1.ObjectOwnerReferenceR\x06ownersJ\x04\b\b\x10\tR\ametrics\"\xf3\x01\n" +
 	"\x12WatchObjectRequest\x121\n" +
 	"\acontext\x18\x01 \x01(\v2\x17.kmgr.v1.RequestContextR\acontext\x12(\n" +
 	"\x10object_stream_id\x18\x02 \x01(\tR\x0eobjectStreamId\x12\x1e\n" +
@@ -1104,7 +1209,7 @@ func file_kmgr_v1_object_proto_rawDescGZIP() []byte {
 }
 
 var file_kmgr_v1_object_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
-var file_kmgr_v1_object_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
+var file_kmgr_v1_object_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
 var file_kmgr_v1_object_proto_goTypes = []any{
 	(PodContainerKind)(0),             // 0: kmgr.v1.PodContainerKind
 	(ObjectEventType)(0),              // 1: kmgr.v1.ObjectEventType
@@ -1112,58 +1217,60 @@ var file_kmgr_v1_object_proto_goTypes = []any{
 	(SummaryTimestampPresentation)(0), // 3: kmgr.v1.SummaryTimestampPresentation
 	(*GetObjectRequest)(nil),          // 4: kmgr.v1.GetObjectRequest
 	(*ObjectSummaryField)(nil),        // 5: kmgr.v1.ObjectSummaryField
-	(*PodContainerDetail)(nil),        // 6: kmgr.v1.PodContainerDetail
-	(*GetObjectResponse)(nil),         // 7: kmgr.v1.GetObjectResponse
-	(*WatchObjectRequest)(nil),        // 8: kmgr.v1.WatchObjectRequest
-	(*ObjectEvent)(nil),               // 9: kmgr.v1.ObjectEvent
-	(*DataEntry)(nil),                 // 10: kmgr.v1.DataEntry
-	(*GetDataRequest)(nil),            // 11: kmgr.v1.GetDataRequest
-	(*GetDataResponse)(nil),           // 12: kmgr.v1.GetDataResponse
-	(*RequestContext)(nil),            // 13: kmgr.v1.RequestContext
-	(*ResourceIdentity)(nil),          // 14: kmgr.v1.ResourceIdentity
-	(CellSeverity)(0),                 // 15: kmgr.v1.CellSeverity
-	(*ResourceUsageValue)(nil),        // 16: kmgr.v1.ResourceUsageValue
-	(*StringMapEntry)(nil),            // 17: kmgr.v1.StringMapEntry
-	(*StructuredError)(nil),           // 18: kmgr.v1.StructuredError
-	(*StreamCursor)(nil),              // 19: kmgr.v1.StreamCursor
+	(*ObjectOwnerReference)(nil),      // 6: kmgr.v1.ObjectOwnerReference
+	(*PodContainerDetail)(nil),        // 7: kmgr.v1.PodContainerDetail
+	(*GetObjectResponse)(nil),         // 8: kmgr.v1.GetObjectResponse
+	(*WatchObjectRequest)(nil),        // 9: kmgr.v1.WatchObjectRequest
+	(*ObjectEvent)(nil),               // 10: kmgr.v1.ObjectEvent
+	(*DataEntry)(nil),                 // 11: kmgr.v1.DataEntry
+	(*GetDataRequest)(nil),            // 12: kmgr.v1.GetDataRequest
+	(*GetDataResponse)(nil),           // 13: kmgr.v1.GetDataResponse
+	(*RequestContext)(nil),            // 14: kmgr.v1.RequestContext
+	(*ResourceIdentity)(nil),          // 15: kmgr.v1.ResourceIdentity
+	(CellSeverity)(0),                 // 16: kmgr.v1.CellSeverity
+	(*ResourceUsageValue)(nil),        // 17: kmgr.v1.ResourceUsageValue
+	(*StringMapEntry)(nil),            // 18: kmgr.v1.StringMapEntry
+	(*StructuredError)(nil),           // 19: kmgr.v1.StructuredError
+	(*StreamCursor)(nil),              // 20: kmgr.v1.StreamCursor
 }
 var file_kmgr_v1_object_proto_depIdxs = []int32{
-	13, // 0: kmgr.v1.GetObjectRequest.context:type_name -> kmgr.v1.RequestContext
-	14, // 1: kmgr.v1.GetObjectRequest.identity:type_name -> kmgr.v1.ResourceIdentity
-	15, // 2: kmgr.v1.ObjectSummaryField.severity:type_name -> kmgr.v1.CellSeverity
+	14, // 0: kmgr.v1.GetObjectRequest.context:type_name -> kmgr.v1.RequestContext
+	15, // 1: kmgr.v1.GetObjectRequest.identity:type_name -> kmgr.v1.ResourceIdentity
+	16, // 2: kmgr.v1.ObjectSummaryField.severity:type_name -> kmgr.v1.CellSeverity
 	3,  // 3: kmgr.v1.ObjectSummaryField.timestamp_presentation:type_name -> kmgr.v1.SummaryTimestampPresentation
 	0,  // 4: kmgr.v1.PodContainerDetail.kind:type_name -> kmgr.v1.PodContainerKind
-	15, // 5: kmgr.v1.PodContainerDetail.status_severity:type_name -> kmgr.v1.CellSeverity
-	16, // 6: kmgr.v1.PodContainerDetail.metrics:type_name -> kmgr.v1.ResourceUsageValue
-	14, // 7: kmgr.v1.GetObjectResponse.identity:type_name -> kmgr.v1.ResourceIdentity
+	16, // 5: kmgr.v1.PodContainerDetail.status_severity:type_name -> kmgr.v1.CellSeverity
+	17, // 6: kmgr.v1.PodContainerDetail.metrics:type_name -> kmgr.v1.ResourceUsageValue
+	15, // 7: kmgr.v1.GetObjectResponse.identity:type_name -> kmgr.v1.ResourceIdentity
 	5,  // 8: kmgr.v1.GetObjectResponse.summary_fields:type_name -> kmgr.v1.ObjectSummaryField
-	17, // 9: kmgr.v1.GetObjectResponse.labels:type_name -> kmgr.v1.StringMapEntry
-	17, // 10: kmgr.v1.GetObjectResponse.annotations:type_name -> kmgr.v1.StringMapEntry
-	18, // 11: kmgr.v1.GetObjectResponse.error:type_name -> kmgr.v1.StructuredError
-	6,  // 12: kmgr.v1.GetObjectResponse.containers:type_name -> kmgr.v1.PodContainerDetail
-	13, // 13: kmgr.v1.WatchObjectRequest.context:type_name -> kmgr.v1.RequestContext
-	14, // 14: kmgr.v1.WatchObjectRequest.identity:type_name -> kmgr.v1.ResourceIdentity
-	19, // 15: kmgr.v1.ObjectEvent.cursor:type_name -> kmgr.v1.StreamCursor
-	1,  // 16: kmgr.v1.ObjectEvent.type:type_name -> kmgr.v1.ObjectEventType
-	7,  // 17: kmgr.v1.ObjectEvent.object:type_name -> kmgr.v1.GetObjectResponse
-	18, // 18: kmgr.v1.ObjectEvent.error:type_name -> kmgr.v1.StructuredError
-	2,  // 19: kmgr.v1.DataEntry.kind:type_name -> kmgr.v1.DataEntryKind
-	13, // 20: kmgr.v1.GetDataRequest.context:type_name -> kmgr.v1.RequestContext
-	14, // 21: kmgr.v1.GetDataRequest.identity:type_name -> kmgr.v1.ResourceIdentity
-	14, // 22: kmgr.v1.GetDataResponse.identity:type_name -> kmgr.v1.ResourceIdentity
-	10, // 23: kmgr.v1.GetDataResponse.entries:type_name -> kmgr.v1.DataEntry
-	18, // 24: kmgr.v1.GetDataResponse.error:type_name -> kmgr.v1.StructuredError
-	4,  // 25: kmgr.v1.ObjectService.GetObject:input_type -> kmgr.v1.GetObjectRequest
-	8,  // 26: kmgr.v1.ObjectService.WatchObject:input_type -> kmgr.v1.WatchObjectRequest
-	11, // 27: kmgr.v1.ObjectService.GetData:input_type -> kmgr.v1.GetDataRequest
-	7,  // 28: kmgr.v1.ObjectService.GetObject:output_type -> kmgr.v1.GetObjectResponse
-	9,  // 29: kmgr.v1.ObjectService.WatchObject:output_type -> kmgr.v1.ObjectEvent
-	12, // 30: kmgr.v1.ObjectService.GetData:output_type -> kmgr.v1.GetDataResponse
-	28, // [28:31] is the sub-list for method output_type
-	25, // [25:28] is the sub-list for method input_type
-	25, // [25:25] is the sub-list for extension type_name
-	25, // [25:25] is the sub-list for extension extendee
-	0,  // [0:25] is the sub-list for field type_name
+	18, // 9: kmgr.v1.GetObjectResponse.labels:type_name -> kmgr.v1.StringMapEntry
+	18, // 10: kmgr.v1.GetObjectResponse.annotations:type_name -> kmgr.v1.StringMapEntry
+	19, // 11: kmgr.v1.GetObjectResponse.error:type_name -> kmgr.v1.StructuredError
+	7,  // 12: kmgr.v1.GetObjectResponse.containers:type_name -> kmgr.v1.PodContainerDetail
+	6,  // 13: kmgr.v1.GetObjectResponse.owners:type_name -> kmgr.v1.ObjectOwnerReference
+	14, // 14: kmgr.v1.WatchObjectRequest.context:type_name -> kmgr.v1.RequestContext
+	15, // 15: kmgr.v1.WatchObjectRequest.identity:type_name -> kmgr.v1.ResourceIdentity
+	20, // 16: kmgr.v1.ObjectEvent.cursor:type_name -> kmgr.v1.StreamCursor
+	1,  // 17: kmgr.v1.ObjectEvent.type:type_name -> kmgr.v1.ObjectEventType
+	8,  // 18: kmgr.v1.ObjectEvent.object:type_name -> kmgr.v1.GetObjectResponse
+	19, // 19: kmgr.v1.ObjectEvent.error:type_name -> kmgr.v1.StructuredError
+	2,  // 20: kmgr.v1.DataEntry.kind:type_name -> kmgr.v1.DataEntryKind
+	14, // 21: kmgr.v1.GetDataRequest.context:type_name -> kmgr.v1.RequestContext
+	15, // 22: kmgr.v1.GetDataRequest.identity:type_name -> kmgr.v1.ResourceIdentity
+	15, // 23: kmgr.v1.GetDataResponse.identity:type_name -> kmgr.v1.ResourceIdentity
+	11, // 24: kmgr.v1.GetDataResponse.entries:type_name -> kmgr.v1.DataEntry
+	19, // 25: kmgr.v1.GetDataResponse.error:type_name -> kmgr.v1.StructuredError
+	4,  // 26: kmgr.v1.ObjectService.GetObject:input_type -> kmgr.v1.GetObjectRequest
+	9,  // 27: kmgr.v1.ObjectService.WatchObject:input_type -> kmgr.v1.WatchObjectRequest
+	12, // 28: kmgr.v1.ObjectService.GetData:input_type -> kmgr.v1.GetDataRequest
+	8,  // 29: kmgr.v1.ObjectService.GetObject:output_type -> kmgr.v1.GetObjectResponse
+	10, // 30: kmgr.v1.ObjectService.WatchObject:output_type -> kmgr.v1.ObjectEvent
+	13, // 31: kmgr.v1.ObjectService.GetData:output_type -> kmgr.v1.GetDataResponse
+	29, // [29:32] is the sub-list for method output_type
+	26, // [26:29] is the sub-list for method input_type
+	26, // [26:26] is the sub-list for extension type_name
+	26, // [26:26] is the sub-list for extension extendee
+	0,  // [0:26] is the sub-list for field type_name
 }
 
 func init() { file_kmgr_v1_object_proto_init() }
@@ -1178,7 +1285,7 @@ func file_kmgr_v1_object_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_kmgr_v1_object_proto_rawDesc), len(file_kmgr_v1_object_proto_rawDesc)),
 			NumEnums:      4,
-			NumMessages:   9,
+			NumMessages:   10,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
