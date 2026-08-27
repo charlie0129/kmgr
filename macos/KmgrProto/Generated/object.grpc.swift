@@ -46,45 +46,6 @@ public enum Kmgr_V1_ObjectService: Sendable {
                 type: .serverStreaming
             )
         }
-        /// Namespace for "GetRelationships" metadata.
-        public enum GetRelationships: Sendable {
-            /// Request type for "GetRelationships".
-            public typealias Input = Kmgr_V1_GetRelationshipsRequest
-            /// Response type for "GetRelationships".
-            public typealias Output = Kmgr_V1_GetRelationshipsResponse
-            /// Descriptor for "GetRelationships".
-            public static let descriptor = GRPCCore.MethodDescriptor(
-                service: GRPCCore.ServiceDescriptor(fullyQualifiedService: "kmgr.v1.ObjectService"),
-                method: "GetRelationships",
-                type: .unary
-            )
-        }
-        /// Namespace for "ScanRelationships" metadata.
-        public enum ScanRelationships: Sendable {
-            /// Request type for "ScanRelationships".
-            public typealias Input = Kmgr_V1_ScanRelationshipsRequest
-            /// Response type for "ScanRelationships".
-            public typealias Output = Kmgr_V1_RelationshipScanEvent
-            /// Descriptor for "ScanRelationships".
-            public static let descriptor = GRPCCore.MethodDescriptor(
-                service: GRPCCore.ServiceDescriptor(fullyQualifiedService: "kmgr.v1.ObjectService"),
-                method: "ScanRelationships",
-                type: .serverStreaming
-            )
-        }
-        /// Namespace for "CancelRelationshipScan" metadata.
-        public enum CancelRelationshipScan: Sendable {
-            /// Request type for "CancelRelationshipScan".
-            public typealias Input = Kmgr_V1_CancelRelationshipScanRequest
-            /// Response type for "CancelRelationshipScan".
-            public typealias Output = Kmgr_V1_Acknowledgement
-            /// Descriptor for "CancelRelationshipScan".
-            public static let descriptor = GRPCCore.MethodDescriptor(
-                service: GRPCCore.ServiceDescriptor(fullyQualifiedService: "kmgr.v1.ObjectService"),
-                method: "CancelRelationshipScan",
-                type: .unary
-            )
-        }
         /// Namespace for "GetData" metadata.
         public enum GetData: Sendable {
             /// Request type for "GetData".
@@ -102,9 +63,6 @@ public enum Kmgr_V1_ObjectService: Sendable {
         public static let descriptors: [GRPCCore.MethodDescriptor] = [
             GetObject.descriptor,
             WatchObject.descriptor,
-            GetRelationships.descriptor,
-            ScanRelationships.descriptor,
-            CancelRelationshipScan.descriptor,
             GetData.descriptor
         ]
     }
@@ -161,63 +119,6 @@ extension Kmgr_V1_ObjectService {
             deserializer: some GRPCCore.MessageDeserializer<Kmgr_V1_ObjectEvent>,
             options: GRPCCore.CallOptions,
             onResponse handleResponse: @Sendable @escaping (GRPCCore.StreamingClientResponse<Kmgr_V1_ObjectEvent>) async throws -> Result
-        ) async throws -> Result where Result: Sendable
-
-        /// Call the "GetRelationships" method.
-        ///
-        /// - Parameters:
-        ///   - request: A request containing a single `Kmgr_V1_GetRelationshipsRequest` message.
-        ///   - serializer: A serializer for `Kmgr_V1_GetRelationshipsRequest` messages.
-        ///   - deserializer: A deserializer for `Kmgr_V1_GetRelationshipsResponse` messages.
-        ///   - options: Options to apply to this RPC.
-        ///   - handleResponse: A closure which handles the response, the result of which is
-        ///       returned to the caller. Returning from the closure will cancel the RPC if it
-        ///       hasn't already finished.
-        /// - Returns: The result of `handleResponse`.
-        func getRelationships<Result>(
-            request: GRPCCore.ClientRequest<Kmgr_V1_GetRelationshipsRequest>,
-            serializer: some GRPCCore.MessageSerializer<Kmgr_V1_GetRelationshipsRequest>,
-            deserializer: some GRPCCore.MessageDeserializer<Kmgr_V1_GetRelationshipsResponse>,
-            options: GRPCCore.CallOptions,
-            onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Kmgr_V1_GetRelationshipsResponse>) async throws -> Result
-        ) async throws -> Result where Result: Sendable
-
-        /// Call the "ScanRelationships" method.
-        ///
-        /// - Parameters:
-        ///   - request: A request containing a single `Kmgr_V1_ScanRelationshipsRequest` message.
-        ///   - serializer: A serializer for `Kmgr_V1_ScanRelationshipsRequest` messages.
-        ///   - deserializer: A deserializer for `Kmgr_V1_RelationshipScanEvent` messages.
-        ///   - options: Options to apply to this RPC.
-        ///   - handleResponse: A closure which handles the response, the result of which is
-        ///       returned to the caller. Returning from the closure will cancel the RPC if it
-        ///       hasn't already finished.
-        /// - Returns: The result of `handleResponse`.
-        func scanRelationships<Result>(
-            request: GRPCCore.ClientRequest<Kmgr_V1_ScanRelationshipsRequest>,
-            serializer: some GRPCCore.MessageSerializer<Kmgr_V1_ScanRelationshipsRequest>,
-            deserializer: some GRPCCore.MessageDeserializer<Kmgr_V1_RelationshipScanEvent>,
-            options: GRPCCore.CallOptions,
-            onResponse handleResponse: @Sendable @escaping (GRPCCore.StreamingClientResponse<Kmgr_V1_RelationshipScanEvent>) async throws -> Result
-        ) async throws -> Result where Result: Sendable
-
-        /// Call the "CancelRelationshipScan" method.
-        ///
-        /// - Parameters:
-        ///   - request: A request containing a single `Kmgr_V1_CancelRelationshipScanRequest` message.
-        ///   - serializer: A serializer for `Kmgr_V1_CancelRelationshipScanRequest` messages.
-        ///   - deserializer: A deserializer for `Kmgr_V1_Acknowledgement` messages.
-        ///   - options: Options to apply to this RPC.
-        ///   - handleResponse: A closure which handles the response, the result of which is
-        ///       returned to the caller. Returning from the closure will cancel the RPC if it
-        ///       hasn't already finished.
-        /// - Returns: The result of `handleResponse`.
-        func cancelRelationshipScan<Result>(
-            request: GRPCCore.ClientRequest<Kmgr_V1_CancelRelationshipScanRequest>,
-            serializer: some GRPCCore.MessageSerializer<Kmgr_V1_CancelRelationshipScanRequest>,
-            deserializer: some GRPCCore.MessageDeserializer<Kmgr_V1_Acknowledgement>,
-            options: GRPCCore.CallOptions,
-            onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Kmgr_V1_Acknowledgement>) async throws -> Result
         ) async throws -> Result where Result: Sendable
 
         /// Call the "GetData" method.
@@ -314,94 +215,6 @@ extension Kmgr_V1_ObjectService {
             )
         }
 
-        /// Call the "GetRelationships" method.
-        ///
-        /// - Parameters:
-        ///   - request: A request containing a single `Kmgr_V1_GetRelationshipsRequest` message.
-        ///   - serializer: A serializer for `Kmgr_V1_GetRelationshipsRequest` messages.
-        ///   - deserializer: A deserializer for `Kmgr_V1_GetRelationshipsResponse` messages.
-        ///   - options: Options to apply to this RPC.
-        ///   - handleResponse: A closure which handles the response, the result of which is
-        ///       returned to the caller. Returning from the closure will cancel the RPC if it
-        ///       hasn't already finished.
-        /// - Returns: The result of `handleResponse`.
-        public func getRelationships<Result>(
-            request: GRPCCore.ClientRequest<Kmgr_V1_GetRelationshipsRequest>,
-            serializer: some GRPCCore.MessageSerializer<Kmgr_V1_GetRelationshipsRequest>,
-            deserializer: some GRPCCore.MessageDeserializer<Kmgr_V1_GetRelationshipsResponse>,
-            options: GRPCCore.CallOptions = .defaults,
-            onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Kmgr_V1_GetRelationshipsResponse>) async throws -> Result = { response in
-                try response.message
-            }
-        ) async throws -> Result where Result: Sendable {
-            try await self.client.unary(
-                request: request,
-                descriptor: Kmgr_V1_ObjectService.Method.GetRelationships.descriptor,
-                serializer: serializer,
-                deserializer: deserializer,
-                options: options,
-                onResponse: handleResponse
-            )
-        }
-
-        /// Call the "ScanRelationships" method.
-        ///
-        /// - Parameters:
-        ///   - request: A request containing a single `Kmgr_V1_ScanRelationshipsRequest` message.
-        ///   - serializer: A serializer for `Kmgr_V1_ScanRelationshipsRequest` messages.
-        ///   - deserializer: A deserializer for `Kmgr_V1_RelationshipScanEvent` messages.
-        ///   - options: Options to apply to this RPC.
-        ///   - handleResponse: A closure which handles the response, the result of which is
-        ///       returned to the caller. Returning from the closure will cancel the RPC if it
-        ///       hasn't already finished.
-        /// - Returns: The result of `handleResponse`.
-        public func scanRelationships<Result>(
-            request: GRPCCore.ClientRequest<Kmgr_V1_ScanRelationshipsRequest>,
-            serializer: some GRPCCore.MessageSerializer<Kmgr_V1_ScanRelationshipsRequest>,
-            deserializer: some GRPCCore.MessageDeserializer<Kmgr_V1_RelationshipScanEvent>,
-            options: GRPCCore.CallOptions = .defaults,
-            onResponse handleResponse: @Sendable @escaping (GRPCCore.StreamingClientResponse<Kmgr_V1_RelationshipScanEvent>) async throws -> Result
-        ) async throws -> Result where Result: Sendable {
-            try await self.client.serverStreaming(
-                request: request,
-                descriptor: Kmgr_V1_ObjectService.Method.ScanRelationships.descriptor,
-                serializer: serializer,
-                deserializer: deserializer,
-                options: options,
-                onResponse: handleResponse
-            )
-        }
-
-        /// Call the "CancelRelationshipScan" method.
-        ///
-        /// - Parameters:
-        ///   - request: A request containing a single `Kmgr_V1_CancelRelationshipScanRequest` message.
-        ///   - serializer: A serializer for `Kmgr_V1_CancelRelationshipScanRequest` messages.
-        ///   - deserializer: A deserializer for `Kmgr_V1_Acknowledgement` messages.
-        ///   - options: Options to apply to this RPC.
-        ///   - handleResponse: A closure which handles the response, the result of which is
-        ///       returned to the caller. Returning from the closure will cancel the RPC if it
-        ///       hasn't already finished.
-        /// - Returns: The result of `handleResponse`.
-        public func cancelRelationshipScan<Result>(
-            request: GRPCCore.ClientRequest<Kmgr_V1_CancelRelationshipScanRequest>,
-            serializer: some GRPCCore.MessageSerializer<Kmgr_V1_CancelRelationshipScanRequest>,
-            deserializer: some GRPCCore.MessageDeserializer<Kmgr_V1_Acknowledgement>,
-            options: GRPCCore.CallOptions = .defaults,
-            onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Kmgr_V1_Acknowledgement>) async throws -> Result = { response in
-                try response.message
-            }
-        ) async throws -> Result where Result: Sendable {
-            try await self.client.unary(
-                request: request,
-                descriptor: Kmgr_V1_ObjectService.Method.CancelRelationshipScan.descriptor,
-                serializer: serializer,
-                deserializer: deserializer,
-                options: options,
-                onResponse: handleResponse
-            )
-        }
-
         /// Call the "GetData" method.
         ///
         /// - Parameters:
@@ -480,79 +293,6 @@ extension Kmgr_V1_ObjectService.ClientProtocol {
             request: request,
             serializer: GRPCProtobuf.ProtobufSerializer<Kmgr_V1_WatchObjectRequest>(),
             deserializer: GRPCProtobuf.ProtobufDeserializer<Kmgr_V1_ObjectEvent>(),
-            options: options,
-            onResponse: handleResponse
-        )
-    }
-
-    /// Call the "GetRelationships" method.
-    ///
-    /// - Parameters:
-    ///   - request: A request containing a single `Kmgr_V1_GetRelationshipsRequest` message.
-    ///   - options: Options to apply to this RPC.
-    ///   - handleResponse: A closure which handles the response, the result of which is
-    ///       returned to the caller. Returning from the closure will cancel the RPC if it
-    ///       hasn't already finished.
-    /// - Returns: The result of `handleResponse`.
-    public func getRelationships<Result>(
-        request: GRPCCore.ClientRequest<Kmgr_V1_GetRelationshipsRequest>,
-        options: GRPCCore.CallOptions = .defaults,
-        onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Kmgr_V1_GetRelationshipsResponse>) async throws -> Result = { response in
-            try response.message
-        }
-    ) async throws -> Result where Result: Sendable {
-        try await self.getRelationships(
-            request: request,
-            serializer: GRPCProtobuf.ProtobufSerializer<Kmgr_V1_GetRelationshipsRequest>(),
-            deserializer: GRPCProtobuf.ProtobufDeserializer<Kmgr_V1_GetRelationshipsResponse>(),
-            options: options,
-            onResponse: handleResponse
-        )
-    }
-
-    /// Call the "ScanRelationships" method.
-    ///
-    /// - Parameters:
-    ///   - request: A request containing a single `Kmgr_V1_ScanRelationshipsRequest` message.
-    ///   - options: Options to apply to this RPC.
-    ///   - handleResponse: A closure which handles the response, the result of which is
-    ///       returned to the caller. Returning from the closure will cancel the RPC if it
-    ///       hasn't already finished.
-    /// - Returns: The result of `handleResponse`.
-    public func scanRelationships<Result>(
-        request: GRPCCore.ClientRequest<Kmgr_V1_ScanRelationshipsRequest>,
-        options: GRPCCore.CallOptions = .defaults,
-        onResponse handleResponse: @Sendable @escaping (GRPCCore.StreamingClientResponse<Kmgr_V1_RelationshipScanEvent>) async throws -> Result
-    ) async throws -> Result where Result: Sendable {
-        try await self.scanRelationships(
-            request: request,
-            serializer: GRPCProtobuf.ProtobufSerializer<Kmgr_V1_ScanRelationshipsRequest>(),
-            deserializer: GRPCProtobuf.ProtobufDeserializer<Kmgr_V1_RelationshipScanEvent>(),
-            options: options,
-            onResponse: handleResponse
-        )
-    }
-
-    /// Call the "CancelRelationshipScan" method.
-    ///
-    /// - Parameters:
-    ///   - request: A request containing a single `Kmgr_V1_CancelRelationshipScanRequest` message.
-    ///   - options: Options to apply to this RPC.
-    ///   - handleResponse: A closure which handles the response, the result of which is
-    ///       returned to the caller. Returning from the closure will cancel the RPC if it
-    ///       hasn't already finished.
-    /// - Returns: The result of `handleResponse`.
-    public func cancelRelationshipScan<Result>(
-        request: GRPCCore.ClientRequest<Kmgr_V1_CancelRelationshipScanRequest>,
-        options: GRPCCore.CallOptions = .defaults,
-        onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Kmgr_V1_Acknowledgement>) async throws -> Result = { response in
-            try response.message
-        }
-    ) async throws -> Result where Result: Sendable {
-        try await self.cancelRelationshipScan(
-            request: request,
-            serializer: GRPCProtobuf.ProtobufSerializer<Kmgr_V1_CancelRelationshipScanRequest>(),
-            deserializer: GRPCProtobuf.ProtobufDeserializer<Kmgr_V1_Acknowledgement>(),
             options: options,
             onResponse: handleResponse
         )
@@ -637,91 +377,6 @@ extension Kmgr_V1_ObjectService.ClientProtocol {
             metadata: metadata
         )
         return try await self.watchObject(
-            request: request,
-            options: options,
-            onResponse: handleResponse
-        )
-    }
-
-    /// Call the "GetRelationships" method.
-    ///
-    /// - Parameters:
-    ///   - message: request message to send.
-    ///   - metadata: Additional metadata to send, defaults to empty.
-    ///   - options: Options to apply to this RPC, defaults to `.defaults`.
-    ///   - handleResponse: A closure which handles the response, the result of which is
-    ///       returned to the caller. Returning from the closure will cancel the RPC if it
-    ///       hasn't already finished.
-    /// - Returns: The result of `handleResponse`.
-    public func getRelationships<Result>(
-        _ message: Kmgr_V1_GetRelationshipsRequest,
-        metadata: GRPCCore.Metadata = [:],
-        options: GRPCCore.CallOptions = .defaults,
-        onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Kmgr_V1_GetRelationshipsResponse>) async throws -> Result = { response in
-            try response.message
-        }
-    ) async throws -> Result where Result: Sendable {
-        let request = GRPCCore.ClientRequest<Kmgr_V1_GetRelationshipsRequest>(
-            message: message,
-            metadata: metadata
-        )
-        return try await self.getRelationships(
-            request: request,
-            options: options,
-            onResponse: handleResponse
-        )
-    }
-
-    /// Call the "ScanRelationships" method.
-    ///
-    /// - Parameters:
-    ///   - message: request message to send.
-    ///   - metadata: Additional metadata to send, defaults to empty.
-    ///   - options: Options to apply to this RPC, defaults to `.defaults`.
-    ///   - handleResponse: A closure which handles the response, the result of which is
-    ///       returned to the caller. Returning from the closure will cancel the RPC if it
-    ///       hasn't already finished.
-    /// - Returns: The result of `handleResponse`.
-    public func scanRelationships<Result>(
-        _ message: Kmgr_V1_ScanRelationshipsRequest,
-        metadata: GRPCCore.Metadata = [:],
-        options: GRPCCore.CallOptions = .defaults,
-        onResponse handleResponse: @Sendable @escaping (GRPCCore.StreamingClientResponse<Kmgr_V1_RelationshipScanEvent>) async throws -> Result
-    ) async throws -> Result where Result: Sendable {
-        let request = GRPCCore.ClientRequest<Kmgr_V1_ScanRelationshipsRequest>(
-            message: message,
-            metadata: metadata
-        )
-        return try await self.scanRelationships(
-            request: request,
-            options: options,
-            onResponse: handleResponse
-        )
-    }
-
-    /// Call the "CancelRelationshipScan" method.
-    ///
-    /// - Parameters:
-    ///   - message: request message to send.
-    ///   - metadata: Additional metadata to send, defaults to empty.
-    ///   - options: Options to apply to this RPC, defaults to `.defaults`.
-    ///   - handleResponse: A closure which handles the response, the result of which is
-    ///       returned to the caller. Returning from the closure will cancel the RPC if it
-    ///       hasn't already finished.
-    /// - Returns: The result of `handleResponse`.
-    public func cancelRelationshipScan<Result>(
-        _ message: Kmgr_V1_CancelRelationshipScanRequest,
-        metadata: GRPCCore.Metadata = [:],
-        options: GRPCCore.CallOptions = .defaults,
-        onResponse handleResponse: @Sendable @escaping (GRPCCore.ClientResponse<Kmgr_V1_Acknowledgement>) async throws -> Result = { response in
-            try response.message
-        }
-    ) async throws -> Result where Result: Sendable {
-        let request = GRPCCore.ClientRequest<Kmgr_V1_CancelRelationshipScanRequest>(
-            message: message,
-            metadata: metadata
-        )
-        return try await self.cancelRelationshipScan(
             request: request,
             options: options,
             onResponse: handleResponse

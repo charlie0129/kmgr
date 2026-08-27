@@ -261,7 +261,7 @@ public final class SensitiveBytes: @unchecked Sendable {
 public enum CommandID: String, Hashable, Codable, Sendable {
     case openDetails
     case openYAML
-    case editYAMLInNewWindow
+    case editYAML
     case openEvents
     case openLogs
     case openExec
@@ -452,13 +452,13 @@ public enum CommandValidator {
         case .copyName, .copyNamespacedName, .copyReference, .selectAll,
             .focusFilter:
             break
-        case .openDetails, .openYAML, .editYAMLInNewWindow, .openEvents, .openLogs, .openExec,
+        case .openDetails, .openYAML, .editYAML, .openEvents, .openLogs, .openExec,
             .startPortForward, .delete, .scale, .restart,
             .editLabels, .editAnnotations, .save:
             guard context.networkActionsAllowed else { return false }
         }
         switch command {
-        case .openDetails, .openYAML, .editYAMLInNewWindow, .openEvents:
+        case .openDetails, .openYAML, .editYAML, .openEvents:
             return context.firstResponder == .resourceTable && count == 1
         case .openLogs:
             return context.firstResponder == .resourceTable && count > 0 && context.logCompatibleSelection

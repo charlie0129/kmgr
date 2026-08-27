@@ -122,29 +122,11 @@ public enum ContextualShortcutCatalog {
             items.append(item("resource.node", "O", "Show selected Pod's Node"))
         }
         if availability.canOpenDetails {
-            items.append(item("resource.details", "D", "Describe selected object"))
-            items.append(item(
-                "resource.details.window",
-                "\u{2318}D",
-                "Describe selected object in a new window"
-            ))
+            items.append(item("resource.details", "D", "Open selected object Details"))
         }
         if availability.canOpenYAML {
-            items.append(item(
-                "resource.yaml",
-                "Y",
-                "Open selected object YAML in Details"
-            ))
-            items.append(item(
-                "resource.yaml.window",
-                "\u{2318}Y",
-                "Open selected object YAML in a new window"
-            ))
-            items.append(item(
-                "resource.yaml.edit-window",
-                "E",
-                "Open YAML in a new window and start editing"
-            ))
+            items.append(item("resource.yaml", "Y", "Open selected object YAML"))
+            items.append(item("resource.yaml.edit", "E", "Edit selected object YAML"))
         }
         if availability.canOpenLogs {
             items.append(item("resource.logs", "L", "Open logs"))

@@ -1609,25 +1609,6 @@ private actor SequencedDataObjectDetailProvider: ObjectDetailProviding {
         AsyncThrowingStream { $0.finish() }
     }
 
-    func getRelationships(
-        identity: ResourceIdentity,
-        includeChildren: Bool
-    ) async throws -> ObjectRelationships {
-        ObjectRelationships(values: [], childrenPotentiallyIncomplete: true)
-    }
-
-    nonisolated func scanRelationships(
-        identity: ResourceIdentity
-    ) -> AsyncThrowingStream<RelationshipScanMessage, Error> {
-        AsyncThrowingStream { $0.finish() }
-    }
-
-    func cancelRelationshipScan(
-        sessionID: String,
-        scanID: String,
-        generation: UInt64
-    ) async {}
-
     func getData(identity: ResourceIdentity) async throws -> ObjectData {
         dataCalls += 1
         requestedIdentities.append(identity)
@@ -1695,25 +1676,6 @@ private actor DraftMutationObjectDetailProvider: ObjectDetailProviding {
     ) -> AsyncThrowingStream<ObjectWatchEvent, Error> {
         AsyncThrowingStream { $0.finish() }
     }
-
-    func getRelationships(
-        identity: ResourceIdentity,
-        includeChildren: Bool
-    ) async throws -> ObjectRelationships {
-        ObjectRelationships(values: [], childrenPotentiallyIncomplete: true)
-    }
-
-    nonisolated func scanRelationships(
-        identity: ResourceIdentity
-    ) -> AsyncThrowingStream<RelationshipScanMessage, Error> {
-        AsyncThrowingStream { $0.finish() }
-    }
-
-    func cancelRelationshipScan(
-        sessionID: String,
-        scanID: String,
-        generation: UInt64
-    ) async {}
 
     func getData(identity: ResourceIdentity) async throws -> ObjectData {
         dataFetchCount += 1
@@ -1830,25 +1792,6 @@ private struct DraftObjectDetailProvider: ObjectDetailProviding {
     ) -> AsyncThrowingStream<ObjectWatchEvent, Error> {
         AsyncThrowingStream { $0.finish() }
     }
-
-    func getRelationships(
-        identity: ResourceIdentity,
-        includeChildren: Bool
-    ) async throws -> ObjectRelationships {
-        ObjectRelationships(values: [], childrenPotentiallyIncomplete: true)
-    }
-
-    func scanRelationships(
-        identity: ResourceIdentity
-    ) -> AsyncThrowingStream<RelationshipScanMessage, Error> {
-        AsyncThrowingStream { $0.finish() }
-    }
-
-    func cancelRelationshipScan(
-        sessionID: String,
-        scanID: String,
-        generation: UInt64
-    ) async {}
 
     func getData(identity: ResourceIdentity) async throws -> ObjectData { data }
 

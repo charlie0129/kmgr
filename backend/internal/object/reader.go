@@ -21,7 +21,6 @@ import (
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
-	"k8s.io/client-go/metadata"
 	"sigs.k8s.io/yaml"
 
 	"github.com/charlie0129/kmgr/backend/internal/cluster"
@@ -78,17 +77,6 @@ type Resolver interface {
 	Resource(sessionID string, gvr schema.GroupVersionResource, namespace string) (dynamic.ResourceInterface, error)
 }
 
-// MetadataResourceResolver is an optional Resolver capability for reads that
-// need only Kubernetes identity metadata. It keeps callers from transferring
-// complete objects merely to validate a UID or inspect owner references.
-type MetadataResourceResolver interface {
-	MetadataResource(
-		sessionID string,
-		gvr schema.GroupVersionResource,
-		namespace string,
-	) (metadata.ResourceInterface, error)
-}
-
 // ContextNameResolver is an optional Resolver capability used only to enrich
 // display-safe structured errors with the human kubeconfig context name. The
 // cluster session ID remains the authority boundary; callers must not treat
@@ -120,28 +108,6 @@ func (r ClusterResolver) Resource(
 	return resource.Namespace(namespace), nil
 }
 
-func (r ClusterResolver) MetadataResource(
-	sessionID string,
-	gvr schema.GroupVersionResource,
-	namespace string,
-) (metadata.ResourceInterface, error) {
-	if r.Sessions == nil {
-		return nil, ErrSessionNotFound
-	}
-	session, ok := r.Sessions.Get(sessionID)
-	if !ok {
-		return nil, ErrSessionNotFound
-	}
-	if session.Metadata() == nil {
-		return nil, ErrRelationshipResolutionUnavailable
-	}
-	resource := session.Metadata().Resource(gvr)
-	if namespace == "" {
-		return resource, nil
-	}
-	return resource.Namespace(namespace), nil
-}
-
 func (r ClusterResolver) ContextName(sessionID string) (string, bool) {
 	if r.Sessions == nil {
 		return "", false
@@ -153,101 +119,8 @@ func (r ClusterResolver) ContextName(sessionID string) (string, bool) {
 	return session.Context().Name, true
 }
 
-// MetadataForKind resolves an owner reference through the authority-shared API
-// catalog. Kubernetes resource names are not derived by pluralizing kinds:
-// that is incorrect for many built-ins and arbitrary CRDs. Reusing the same
-// catalog as the workspace and relationship scanner avoids waking a separate
-// DeferredDiscoveryRESTMapper cache for the first owner lookup. The returned
-// metadata client keeps owner UID verification from transferring an entire
-// controller or custom-resource payload.
-func (r ClusterResolver) MetadataForKind(
-	ctx context.Context,
-	sessionID string,
-	gvk schema.GroupVersionKind,
-	namespace string,
-) (metadata.ResourceInterface, schema.GroupVersionResource, string, error) {
-	if r.Sessions == nil {
-		return nil, schema.GroupVersionResource{}, "", ErrSessionNotFound
-	}
-	session, ok := r.Sessions.Get(sessionID)
-	if !ok {
-		return nil, schema.GroupVersionResource{}, "", ErrSessionNotFound
-	}
-	if session.Metadata() == nil {
-		return nil, schema.GroupVersionResource{}, "", ErrRelationshipResolutionUnavailable
-	}
-	catalog, err := session.DiscoverResourcesCached(ctx, false)
-	if err != nil {
-		return nil, schema.GroupVersionResource{}, "", err
-	}
-	discovered, found := resourceForExactKind(catalog.Resources, gvk)
-	if !found {
-		return nil, schema.GroupVersionResource{}, "", fmt.Errorf(
-			"%w: API resource for %s was not found in the shared discovery catalog",
-			ErrRelationshipResolutionUnavailable, gvk.String(),
-		)
-	}
-	gvr := schema.GroupVersionResource{
-		Group: discovered.Group, Version: discovered.Version, Resource: discovered.Resource,
-	}
-	namespaceable := session.Metadata().Resource(gvr)
-	var resource metadata.ResourceInterface = namespaceable
-	resolvedNamespace := ""
-	if discovered.Namespaced {
-		if namespace == "" {
-			return nil, schema.GroupVersionResource{}, "", fmt.Errorf(
-				"namespaced owner %s has no namespace", gvk.String(),
-			)
-		}
-		resolvedNamespace = namespace
-		resource = namespaceable.Namespace(namespace)
-	}
-	return resource, gvr, resolvedNamespace, nil
-}
-
-func resourceForExactKind(resources []cluster.APIResource, gvk schema.GroupVersionKind) (cluster.APIResource, bool) {
-	for _, resource := range resources {
-		if resource.Group == gvk.Group && resource.Version == gvk.Version &&
-			resource.Kind == gvk.Kind && resource.Resource != "" {
-			return resource, true
-		}
-	}
-	return cluster.APIResource{}, false
-}
-
-func (r ClusterResolver) RelationshipScanSession(sessionID string) (RelationshipScanSession, error) {
-	if r.Sessions == nil {
-		return nil, ErrSessionNotFound
-	}
-	session, ok := r.Sessions.Get(sessionID)
-	if !ok {
-		return nil, ErrSessionNotFound
-	}
-	if session.Discovery() == nil || session.Metadata() == nil {
-		return nil, ErrRelationshipResolutionUnavailable
-	}
-	return clusterRelationshipScanSession{session: session}, nil
-}
-
-// clusterRelationshipScanSession keeps discovery caching at the shared
-// Kubernetes authority boundary. Object scanning sees only the immutable
-// catalog operation and the metadata client it actually needs; it cannot
-// accidentally bypass the cache through a raw discovery client.
-type clusterRelationshipScanSession struct {
-	session *cluster.Session
-}
-
-func (s clusterRelationshipScanSession) DiscoverResources(ctx context.Context) (cluster.ResourceDiscovery, error) {
-	return s.session.DiscoverResourcesCached(ctx, false)
-}
-
-func (s clusterRelationshipScanSession) Metadata() metadata.Interface {
-	return s.session.Metadata()
-}
-
 type Reader struct {
-	resolver       Resolver
-	cachedChildren CachedChildSource
+	resolver Resolver
 }
 
 func NewReader(resolver Resolver) (*Reader, error) {
@@ -255,10 +128,6 @@ func NewReader(resolver Resolver) (*Reader, error) {
 		return nil, errors.New("object resolver must not be nil")
 	}
 	return &Reader{resolver: resolver}, nil
-}
-
-func (r *Reader) SetCachedChildSource(source CachedChildSource) {
-	r.cachedChildren = source
 }
 
 // ContextName returns display context for a currently live cluster session

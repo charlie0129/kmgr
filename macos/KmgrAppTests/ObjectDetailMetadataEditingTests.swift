@@ -11,7 +11,7 @@ struct ObjectDetailMetadataEditingTests {
     @Test("Summary exposes separate section actions and Return edits the selected kind")
     func sectionActionsAndReturn() async throws {
         let identity = detailMetadataIdentity()
-        let controller = ObjectDetailViewController(
+        let controller = ObjectSummaryViewController(
             identity: identity,
             provider: DetailMetadataProvider(detail: ObjectDetail(
                 identity: identity,
@@ -21,9 +21,7 @@ struct ObjectDetailMetadataEditingTests {
             ))
         )
         var requests: [(ResourceMetadataKind, String?)] = []
-        var shortcutRefreshCount = 0
         controller.onEditMetadata = { _, kind, key in requests.append((kind, key)) }
-        controller.onContextualShortcutsChanged = { shortcutRefreshCount += 1 }
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 900, height: 650),
             styleMask: [.titled],
@@ -84,20 +82,12 @@ struct ObjectDetailMetadataEditingTests {
         #expect(controller.contextualShortcutSnapshot.items.contains {
             $0.id == "details.edit-metadata"
         })
-        let segmented = try #require(detailMetadataDescendants(of: controller.view)
-            .compactMap { $0 as? NSSegmentedControl }.first)
-        segmented.selectedSegment = ObjectDetailInitialTab.yaml.segment
-        _ = segmented.sendAction(segmented.action, to: segmented.target)
-        #expect(controller.contextualShortcutSnapshot.items.contains {
-            $0.id == "details.edit-metadata"
-        } == false)
-        #expect(shortcutRefreshCount > 0)
     }
 
     @Test("empty metadata still exposes both kind-specific edit actions")
     func emptySectionsRemainEditable() async throws {
         let identity = detailMetadataIdentity()
-        let controller = ObjectDetailViewController(
+        let controller = ObjectSummaryViewController(
             identity: identity,
             provider: DetailMetadataProvider(detail: ObjectDetail(
                 identity: identity,
@@ -143,7 +133,7 @@ struct ObjectDetailMetadataEditingTests {
         let labels = Dictionary(uniqueKeysWithValues: (0..<64).map {
             (String(format: "label-%02d", $0), "value-\($0)")
         })
-        let controller = ObjectDetailViewController(
+        let controller = ObjectSummaryViewController(
             identity: identity,
             provider: DetailMetadataProvider(detail: ObjectDetail(
                 identity: identity,
@@ -252,22 +242,6 @@ private struct DetailMetadataProvider: ObjectDetailProviding {
     ) -> AsyncThrowingStream<ObjectWatchEvent, Error> {
         AsyncThrowingStream { $0.finish() }
     }
-    func getRelationships(
-        identity: ResourceIdentity,
-        includeChildren: Bool
-    ) async throws -> ObjectRelationships {
-        ObjectRelationships(values: [], childrenPotentiallyIncomplete: true)
-    }
-    func scanRelationships(
-        identity: ResourceIdentity
-    ) -> AsyncThrowingStream<RelationshipScanMessage, Error> {
-        AsyncThrowingStream { $0.finish() }
-    }
-    func cancelRelationshipScan(
-        sessionID: String,
-        scanID: String,
-        generation: UInt64
-    ) async {}
     func getData(identity: ResourceIdentity) async throws -> ObjectData {
         throw CancellationError()
     }

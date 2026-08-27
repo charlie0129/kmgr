@@ -201,7 +201,7 @@ import Testing
     #expect(valid.contains(.openLogs))
     #expect(valid.contains(.openExec))
     #expect(PaletteOperation.openExec.title == "Open Terminal")
-    #expect(PaletteOperation.editYAML.title == "Edit YAML in New Window")
+    #expect(PaletteOperation.editYAML.title == "Edit YAML")
     #expect(valid.contains(.startPortForward))
     #expect(valid.contains(.delete))
     #expect(valid.contains(.editLabels))

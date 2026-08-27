@@ -350,36 +350,22 @@ enum NativeMainMenuBuilder {
         )
         addResponderItem(
             to: menu,
-            title: "Describe",
+            title: "Open Details",
             action: #selector(ClusterWorkspaceWindowController.openResourceDetails(_:)),
             keyEquivalent: "d",
             modifiers: []
         )
         addResponderItem(
             to: menu,
-            title: "Describe in New Window",
-            action: #selector(ClusterWorkspaceWindowController.openResourceDetailsInNewWindow(_:)),
-            keyEquivalent: "d",
-            modifiers: [.command]
-        )
-        addResponderItem(
-            to: menu,
-            title: "Open YAML in Details",
+            title: "Open YAML",
             action: #selector(ClusterWorkspaceWindowController.openResourceYAML(_:)),
             keyEquivalent: "y",
             modifiers: []
         )
         addResponderItem(
             to: menu,
-            title: "Open YAML in New Window",
-            action: #selector(ClusterWorkspaceWindowController.openResourceYAMLSnapshot(_:)),
-            keyEquivalent: "y",
-            modifiers: [.command]
-        )
-        addResponderItem(
-            to: menu,
-            title: "Edit YAML in New Window",
-            action: #selector(ClusterWorkspaceWindowController.editResourceYAMLInNewWindow(_:)),
+            title: "Edit YAML",
+            action: #selector(ClusterWorkspaceWindowController.editResourceYAML(_:)),
             keyEquivalent: "e",
             modifiers: []
         )

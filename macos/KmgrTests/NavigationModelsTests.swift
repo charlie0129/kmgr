@@ -24,25 +24,6 @@ import Testing
     #expect(history.goForward() == .resource(nodes))
 }
 
-@Test func objectHistoryReturnsToExactResourceNavigation() {
-    let table = ResourceNavigationState(
-        group: "", version: "v1", resource: "pods", kind: "Pod",
-        namespaceSelection: .namespace("team-a"), filter: "name:api",
-        sortColumnID: "restarts", sortDescending: true,
-        selectedUIDs: ["pod-uid"],
-        scrollAnchor: ScrollAnchor(uid: "pod-uid", pixelOffsetFromTop: 4, priorRowIndex: 50)
-    )
-    let identity = ResourceIdentity(
-        clusterSessionID: "session", group: "", version: "v1",
-        resource: "pods", namespace: "team-a", name: "api", uid: "pod-uid"
-    )
-    var history = WorkspaceNavigationHistory(initial: .resource(table))
-    history.navigate(to: .object(identity, returnState: table))
-
-    #expect(history.goBack() == .resource(table))
-    #expect(history.goForward() == .object(identity, returnState: table))
-}
-
 @Test func navigationRetainsAuthoritativeResourceScope() {
     let nodes = ResourceNavigationState(
         group: "", version: "v1", resource: "nodes", kind: "Node",
@@ -116,20 +97,19 @@ import Testing
     first.clusterSessionID = "old-session"
     second.clusterSessionID = "old-session"
     var history = WorkspaceNavigationHistory(initial: .resource(table))
-    history.navigate(to: .object(first, returnState: table))
     history.navigate(to: .subresource(second, returnState: table))
 
     history.rebindClusterSessionID("new-session")
 
-    let objectSessions = history.entries.compactMap { destination -> String? in
+    let subresourceSessions = history.entries.compactMap { destination -> String? in
         switch destination {
-        case .object(let identity, _), .subresource(let identity, _):
+        case .subresource(let identity, _):
             identity.clusterSessionID
         case .resource:
             nil
         }
     }
-    #expect(objectSessions == ["new-session", "new-session"])
+    #expect(subresourceSessions == ["new-session"])
     #expect(history.current == .subresource(
         ResourceIdentity(
             clusterSessionID: "new-session", group: second.group,

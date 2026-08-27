@@ -176,7 +176,6 @@ func NewServer(launchToken string, options ServerOptions) (*Server, error) {
 		viewRuntime.Close()
 		return nil, err
 	}
-	objectReader.SetCachedChildSource(relationshipCacheAdapter{runtime: viewRuntime})
 	containerMetrics, err := object.NewKubernetesPodContainerMetricsProvider(metricSource)
 	if err != nil {
 		viewRuntime.Close()

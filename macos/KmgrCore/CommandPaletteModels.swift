@@ -293,14 +293,14 @@ public enum PaletteOperation: CaseIterable, Hashable, Sendable {
         case .copyName: .copyName
         case .copyNamespacedName: .copyNamespacedName
         case .copyReference: .copyReference
-        case .editYAML: .editYAMLInNewWindow
+        case .editYAML: .editYAML
         }
     }
 
     public var title: String {
         switch self {
         case .openDetails: "Open Details"
-        case .openYAML: "Open YAML in Details"
+        case .openYAML: "Open YAML"
         case .openEvents: "Open Events"
         case .openLogs: "Open Logs…"
         case .openExec: "Open Terminal"
@@ -313,7 +313,7 @@ public enum PaletteOperation: CaseIterable, Hashable, Sendable {
         case .copyName: "Copy Name"
         case .copyNamespacedName: "Copy Namespace/Name"
         case .copyReference: "Copy kubectl Reference"
-        case .editYAML: "Edit YAML in New Window"
+        case .editYAML: "Edit YAML"
         }
     }
 

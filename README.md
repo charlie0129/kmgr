@@ -88,12 +88,11 @@ already checked into the repository.
 
 Each context workspace is a separate native window. Opening the same context
 twice creates independent UI/navigation state while allowing the engine to
-share compatible cluster authority and warm cache state. Details replace the
-table in the current workspace, while `⌘D` also provides a focused auxiliary
-Details window. YAML uses the same split: `Y` opens the current Details YAML
-tab, `⌘Y` opens a focused read-only auxiliary YAML window, and `E` opens that
-window and starts editing. Logs and terminals use independent windows, and all
-forwards live in one app-wide Port Forwards window.
+share compatible cluster authority and warm cache state. Details and YAML are
+dedicated utility windows, so the resource table remains visible while `D`
+opens Details and `Y` opens YAML. `E` opens or focuses the YAML utility and
+starts editing. Logs and terminals use independent windows, and all forwards
+live in one app-wide Port Forwards window.
 
 ## Main workflows
 
@@ -115,20 +114,20 @@ forwards live in one app-wide Port Forwards window.
   with the key selected. The metadata and ConfigMap/Secret Data editors use the
   same searchable, draggable key/value split view, keyboard
   behavior, structured-text highlighting, whitespace markers, staged row
-  states, and save review while keeping their validation rules separate. Details also
-  provide YAML and Relationships, while ConfigMap/Secret Data is the complete
-  Return-driven key/value viewer and editor. Oversized Summary values,
+  states, and save review while keeping their validation rules separate. The
+  dedicated YAML utility handles full-object viewing and editing, while
+  ConfigMap/Secret Data is the complete Return-driven key/value viewer and
+  editor. Oversized Summary values,
   including metadata values, stay available through cell copy while their
   inline presentation remains bounded to one line.
 - When core/v1 Events are listable, Details appends up to the 10 most recent
   UID-filtered Events to Summary. They load after the object Summary is visible
   and never block it. Press `E` in Details Summary to open the complete
   sortable, virtualized live Events list in a new full workspace.
-- `Y` opens the selected object's YAML tab inside current Details. `⌘Y` opens
-  an independent, UID-pinned read-only YAML window; `E` opens or focuses that
-  same window and immediately enters editing. The auxiliary YAML window has
-  an exact received-byte count, explicit refresh, and the validated edit/apply
-  workflow.
+- `Y` opens an independent, UID-pinned read-only YAML utility; `E` opens or
+  focuses that same utility and immediately enters editing. The YAML utility
+  has an exact received-byte count, explicit refresh, and the validated
+  edit/apply workflow.
 - YAML edits are parsed in Go, identity-checked, and dry-run as an exact
   material JSON Patch before the semantic diff is shown. UID/resourceVersion
   test operations prevent retargeting or stale writes, unchanged unknown fields
@@ -186,32 +185,10 @@ forwards live in one app-wide Port Forwards window.
   changes on close or Back. Deletes carry UID preconditions and report
   per-object partial failures.
 
-### Relationships and scan cost
-
-Opening **Relationships** is intentionally cheap by default. It gets owners
-authoritatively and reads child relationships only from resource caches the
-engine already has; it never wakes stopped watches or lists every resource
-kind. The UI labels these child results **Cached children · potentially
-incomplete**, including when no cached children were found.
-
-Press `P` on a selected resource to follow its immediate Kubernetes owner in
-the current workspace, or Command-P to open that parent in a new workspace.
-Kmgr prefers the unique controlling owner, otherwise follows the sole live
-owner, and warns instead of guessing when references are absent, stale, or
-ambiguous. The destination list uses a visible exact
-`fieldSelector:"metadata.name=…"` server-side query and auto-selects only the
-referenced UID, never a same-name replacement.
-
-Choose **Scan All Resources…** only when fuller coverage is worth the API cost.
-After confirmation, Kmgr performs cancellable, paginated metadata LISTs across
-discovered listable resource types and reports progress. The result can still
-be marked potentially incomplete when discovery is partial or RBAC denies a
-resource. The scan anchors the target's exact UID before doing bulk reads.
-
 ## Keyboard reference
 
 Resource-table single-letter commands apply only while that table is first
-responder. Details, auxiliary YAML, and other leaf views expose their own
+responder. Details, YAML, and other leaf views expose their own
 contextual letters without stealing input from editable controls, filters,
 logs, or terminals.
 Kmgr also keeps one passive **Shortcuts** panel above its windows while the app
@@ -244,41 +221,35 @@ globally across launches rather than per cluster.
 | Command-click | Toggle one selected row |
 | Command-A | Select all visible rows |
 | `O` | Show the selected Pod's assigned Node in the Node list |
-| `D` | Open Details for exactly one object in the current workspace |
-| Command-D | Open or focus Details in an auxiliary window |
+| `D` | Open or focus Details in a utility window for exactly one object |
 | Return | Enter a useful subresource in the current workspace |
 | Command-Return | Enter the selected subresource in a new full workspace |
-| `P` | Go to the selected object's immediate Kubernetes owner |
-| Command-P | Go to the selected object's owner in a new full workspace |
 | Command-click in the sidebar | Open the selected resource in a new full workspace |
 | Command-[ / Command-] | Back / Forward |
 | Escape | Clear selection or return focus to the table |
-| `Y` | Open the YAML tab in current Details for one object |
-| Command-Y | Open or focus read-only YAML in an auxiliary window |
-| `E` in a resource table | Open or focus auxiliary YAML and start editing |
-| `E` in auxiliary YAML | Start editing the YAML |
+| `Y` | Open or focus the read-only YAML utility for one object |
+| `E` in a resource table | Open or focus the YAML utility and start editing |
+| `E` in the YAML utility | Start editing the YAML |
 | `E` in Details Summary | Open the complete object Events list in a new workspace |
 | `L` | Tail all containers for compatible selected Pods or workloads |
 | Shift-L | Show logs from the previous container instance for compatible selected Pods or workloads |
 | `S` | Open a terminal for one Pod using automatic container and shell defaults |
 | Shift-S | Configure the container, shell, or executable for one Pod |
-| `F` | Configure a port-forward for one Pod or Service |
-| Command-F in a resource or Pod-container table | Configure a port-forward, then show Port Forwards after it starts |
+| `P` | Configure a port-forward for one Pod or Service |
 | Command-Backspace | Confirm deletion of selected resources |
 | Command-S | Save the active YAML or key/value edit |
 
 Standard AppKit text editing, copy, undo/redo, find, and window behavior remain
 with the focused native control.
 
-Both YAML surfaces use the native Command-F find bar. While editing YAML,
+The YAML utility uses the native Command-F find bar. While editing YAML,
 unmodified letters always enter the document and standard Command shortcuts
 provide find, copy, paste, undo, redo, and save.
 
 In a Pod's Containers subresource, `L`/Return opens the selected container's
 current logs, Shift-L opens its previous container instance's logs, `S` opens
-its terminal, Shift-S configures its terminal, `F` starts a port-forward for
-the UID-pinned parent Pod, and Command-F shows Port Forwards after a successful
-start. `P` is reserved for resource-list parent navigation and is unbound here.
+its terminal, Shift-S configures its terminal, and `P` starts a port-forward
+for the UID-pinned parent Pod.
 
 New Pod terminals and Node shells open at 120 columns by 35 rows by default.
 Settings can choose an initial size from 80–300 columns and 20–100 rows;
@@ -474,9 +445,8 @@ includes LIST/WATCH continuity, 410 relists, cache
 retention/eviction, UID replacement safety, Secret sanitization, CEL limits,
 resource accounting, bounded streams, port-forward reconnects, and a 100,000
 row synthetic model plus native `NSTableView` harness. Targeted AppKit tests
-also pin the resource workspace's accessibility roles/text alternatives and
-the Relationships view's potentially-incomplete default with its explicit
-expensive-scan action.
+also pin the resource workspace's accessibility roles, text alternatives, and
+the Details/YAML utility presentations.
 
 For a manual smoke test, provide the exact disposable context name and
 explicitly authorize the test scope first. Merely making a context available
@@ -519,11 +489,11 @@ temporary `kmgr-smoke` namespace in a disposable cluster. Then:
     object-local allocatable/capacity values, exact huge-page/accelerator
     columns appear after the base snapshot, and opening Nodes starts no Pod
     LIST/WATCH.
-11. In Details, verify Summary appears before its bounded recent Events section,
-    then press `E` and confirm a new full workspace contains only the
-    UID-pinned object's Events. In Relationships, verify cached results are labeled
-    potentially incomplete; run **Scan All Resources…** only against a cluster
-    where that read load is acceptable.
+11. Press `D` on a selected object and verify its Summary and bounded recent
+    Events appear in a utility window while the resource list remains visible.
+    Press `Y` to open the object's YAML utility, then `E` to enter editing and
+    confirm the validated save flow. From Details, press `E` and confirm a new
+    full workspace contains only the UID-pinned object's Events.
 12. While a safe resource or detail view is visible, terminate the helper and
     verify the workspace shows a disconnected state, reopens through a fresh
     authenticated session, and does not replay mutations, exec commands, or
@@ -532,8 +502,7 @@ temporary `kmgr-smoke` namespace in a disposable cluster. Then:
 A real smoke run requires an explicit context name and begins read-only.
 Creating/deleting the `kmgr-smoke` namespace or anything inside it requires
 separate authorization. Use a disposable cluster and least-privilege
-credentials; the relationship scan can issue LIST requests across every
-discoverable listable type.
+credentials.
 
 ## Known limitations
 
@@ -544,8 +513,6 @@ discoverable listable type.
   following dynamic workload membership is not implemented.
 - Exec reconnect starts a new process; it cannot preserve the original remote
   process.
-- Relationship cache results are deliberately incomplete by default, and even
-  an explicit full scan is limited by discovery and RBAC visibility.
 - Port-forwards and other live sessions are not restored after an app relaunch.
   An unexpected helper restart reopens safe cluster resource/detail views, but
   it does not replay mutations or exec commands; old forwards become failed
@@ -575,10 +542,6 @@ discoverable listable type.
   locally and are preserved by the restart.
 - **Metrics show Unavailable:** grant read access to `metrics.k8s.io` or install
   a compatible Metrics Server. Base LIST/WATCH remains independent.
-- **A relationship is missing:** cached results are expected to be potentially
-  incomplete. Use **Scan All Resources…** if the added cluster-wide reads are
-  acceptable; failures listed during that scan usually indicate RBAC or partial
-  discovery.
 - **A forward stays Failed after Pod replacement:** this is the UID safety
   contract. Start a new forward explicitly for the replacement Pod.
 - **Column configuration fails to load:** verify both version strings and use

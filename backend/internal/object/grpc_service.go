@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"slices"
 	"sort"
-	"sync"
 	"time"
 
 	"github.com/charlie0129/kmgr/backend/internal/kubeerrors"
@@ -26,14 +25,6 @@ type GRPCService struct {
 	reader                   *Reader
 	containerMetricsProvider PodContainerMetricsProvider
 	watchRetryDelay          func(int) time.Duration
-	scanMu                   sync.Mutex
-	scans                    map[relationshipScanKey]context.CancelFunc
-}
-
-type relationshipScanKey struct {
-	sessionID  string
-	scanID     string
-	generation uint64
 }
 
 // objectWatchStreamSendError separates a failed gRPC delivery from failures
@@ -54,10 +45,7 @@ func NewGRPCService(reader *Reader, metricsProviders ...PodContainerMetricsProvi
 	if len(metricsProviders) > 1 {
 		return nil, errors.New("at most one object detail metrics provider may be configured")
 	}
-	service := &GRPCService{
-		reader: reader, scans: make(map[relationshipScanKey]context.CancelFunc),
-		watchRetryDelay: objectWatchRetryDelay,
-	}
+	service := &GRPCService{reader: reader, watchRetryDelay: objectWatchRetryDelay}
 	if len(metricsProviders) == 1 {
 		service.containerMetricsProvider = metricsProviders[0]
 	}
@@ -310,167 +298,6 @@ func retryableObjectWatchError(err error) bool {
 	return true
 }
 
-func (s *GRPCService) GetRelationships(
-	ctx context.Context,
-	request *kmgrv1.GetRelationshipsRequest,
-) (*kmgrv1.GetRelationshipsResponse, error) {
-	requestID, operationContext, cancel, err := objectRequestContext(ctx, request.GetContext())
-	if err != nil {
-		return nil, err
-	}
-	defer cancel()
-	identity, err := identityFromProto(request.GetIdentity(), request.GetContext().GetClusterSessionId())
-	if err != nil {
-		return nil, status.Error(codes.InvalidArgument, err.Error())
-	}
-	values, childrenIncomplete, err := s.reader.Relationships(
-		operationContext, identity, request.GetIncludeOwners(), request.GetIncludeChildren(),
-	)
-	response := &kmgrv1.GetRelationshipsResponse{
-		RequestId: requestID, ChildrenPotentiallyIncomplete: childrenIncomplete,
-	}
-	if err != nil {
-		response.Error = structuredObjectError(
-			err, request.GetIdentity(), "get-relationships", s.contextName(request.GetContext()),
-		)
-		return response, nil
-	}
-	response.Relationships = make([]*kmgrv1.ResourceRelationship, 0, len(values))
-	for _, value := range values {
-		response.Relationships = append(response.Relationships, relationshipToProto(value))
-	}
-	return response, nil
-}
-
-func (s *GRPCService) ScanRelationships(
-	request *kmgrv1.ScanRelationshipsRequest,
-	stream kmgrv1.ObjectService_ScanRelationshipsServer,
-) error {
-	if request == nil || stream == nil || request.GetContext() == nil ||
-		request.GetScanId() == "" || request.GetGeneration() == 0 {
-		return status.Error(codes.InvalidArgument, "request context, scan ID, and generation are required")
-	}
-	_, operationContext, deadlineCancel, err := objectRequestContext(stream.Context(), request.GetContext())
-	if err != nil {
-		return err
-	}
-	defer deadlineCancel()
-	identity, err := identityFromProto(request.GetIdentity(), request.GetContext().GetClusterSessionId())
-	if err != nil {
-		return status.Error(codes.InvalidArgument, err.Error())
-	}
-	contextName := s.contextName(request.GetContext())
-	ctx, cancel := context.WithCancel(operationContext)
-	key := relationshipScanKey{
-		sessionID: request.GetContext().GetClusterSessionId(), scanID: request.GetScanId(),
-		generation: request.GetGeneration(),
-	}
-	s.scanMu.Lock()
-	for existing, existingCancel := range s.scans {
-		if existing.sessionID != key.sessionID || existing.scanID != key.scanID {
-			continue
-		}
-		switch {
-		case existing.generation > key.generation:
-			s.scanMu.Unlock()
-			cancel()
-			return status.Error(codes.FailedPrecondition, "relationship scan generation is stale")
-		case existing.generation < key.generation:
-			existingCancel()
-			delete(s.scans, existing)
-		}
-	}
-	if existing := s.scans[key]; existing != nil {
-		s.scanMu.Unlock()
-		cancel()
-		return status.Error(codes.AlreadyExists, "relationship scan generation is already active")
-	}
-	s.scans[key] = cancel
-	s.scanMu.Unlock()
-	defer func() {
-		cancel()
-		s.scanMu.Lock()
-		if current := s.scans[key]; current != nil {
-			delete(s.scans, key)
-		}
-		s.scanMu.Unlock()
-	}()
-
-	sequence := uint64(0)
-	err = s.reader.ScanRelationships(ctx, identity, func(update RelationshipScanUpdate) error {
-		sequence++
-		event := &kmgrv1.RelationshipScanEvent{
-			Cursor: &kmgrv1.StreamCursor{
-				StreamId: request.GetScanId(), Generation: request.GetGeneration(), Sequence: sequence,
-			},
-			Progress: relationshipScanProgressToProto(update.Progress),
-		}
-		for _, relationship := range update.Relationships {
-			event.Relationships = append(event.Relationships, relationshipToProto(relationship))
-		}
-		if update.Warning != nil {
-			event.Warning = structuredObjectError(
-				update.Warning, request.GetIdentity(), "scan-relationships", contextName,
-			)
-		}
-		return stream.Send(event)
-	})
-	if err == nil {
-		return nil
-	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return objectStatusError(err)
-	}
-	sequence++
-	if sendErr := stream.Send(&kmgrv1.RelationshipScanEvent{
-		Cursor: &kmgrv1.StreamCursor{
-			StreamId: request.GetScanId(), Generation: request.GetGeneration(), Sequence: sequence,
-		},
-		Error: structuredObjectError(
-			err, request.GetIdentity(), "scan-relationships", contextName,
-		),
-	}); sendErr != nil {
-		return sendErr
-	}
-	return nil
-}
-
-func (s *GRPCService) CancelRelationshipScan(
-	ctx context.Context,
-	request *kmgrv1.CancelRelationshipScanRequest,
-) (*kmgrv1.Acknowledgement, error) {
-	if request == nil {
-		return nil, status.Error(codes.InvalidArgument, "request is required")
-	}
-	requestID, operationContext, cancelContext, err := objectRequestContext(ctx, request.GetContext())
-	if err != nil {
-		return nil, err
-	}
-	defer cancelContext()
-	if err := operationContext.Err(); err != nil {
-		return nil, objectStatusError(err)
-	}
-	if request.GetScanId() == "" || request.GetGeneration() == 0 {
-		return nil, status.Error(codes.InvalidArgument, "request, session, scan ID, and generation are required")
-	}
-	key := relationshipScanKey{
-		sessionID: request.GetContext().GetClusterSessionId(), scanID: request.GetScanId(),
-		generation: request.GetGeneration(),
-	}
-	s.scanMu.Lock()
-	cancel := s.scans[key]
-	if cancel != nil {
-		delete(s.scans, key)
-	}
-	s.scanMu.Unlock()
-	if cancel != nil {
-		cancel()
-	}
-	return &kmgrv1.Acknowledgement{
-		RequestId: requestID, Accepted: cancel != nil,
-	}, nil
-}
-
 func (s *GRPCService) GetData(
 	ctx context.Context,
 	request *kmgrv1.GetDataRequest,
@@ -625,37 +452,6 @@ func identityToProto(identity Identity) *kmgrv1.ResourceIdentity {
 	}
 }
 
-func relationshipToProto(value Relationship) *kmgrv1.ResourceRelationship {
-	kind := kmgrv1.RelationshipKind_RELATIONSHIP_KIND_RELATED
-	switch value.Kind {
-	case RelationshipOwner:
-		kind = kmgrv1.RelationshipKind_RELATIONSHIP_KIND_OWNER
-	case RelationshipChild:
-		kind = kmgrv1.RelationshipKind_RELATIONSHIP_KIND_CHILD
-	}
-	return &kmgrv1.ResourceRelationship{
-		Kind: kind, Identity: identityToProto(value.Identity), Label: value.Label,
-		Stale: value.Stale, PotentiallyIncomplete: value.PotentiallyIncomplete,
-		Controller: value.Controller,
-	}
-}
-
-func relationshipScanProgressToProto(value RelationshipScanProgress) *kmgrv1.RelationshipScanProgress {
-	result := &kmgrv1.RelationshipScanProgress{
-		ResourcesTotal: uint32(value.ResourcesTotal), ResourcesScanned: uint32(value.ResourcesScanned),
-		ObjectsExamined: value.ObjectsExamined, ResourcesFailed: uint32(value.ResourcesFailed),
-		Complete: value.Complete, PotentiallyIncomplete: value.PotentiallyIncomplete,
-	}
-	if value.Current.Resource != "" {
-		result.CurrentResource = &kmgrv1.ResourceType{
-			Group: value.Current.Group, Version: value.Current.Version,
-			Resource: value.Current.Resource, Kind: value.Current.Kind,
-			Namespaced: value.Current.Namespaced,
-		}
-	}
-	return result
-}
-
 func objectCursor(request *kmgrv1.WatchObjectRequest, sequence uint64) *kmgrv1.StreamCursor {
 	return &kmgrv1.StreamCursor{
 		StreamId: request.GetObjectStreamId(), Generation: request.GetGeneration(), Sequence: sequence,
@@ -737,15 +533,6 @@ func structuredObjectError(
 		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_UNSUPPORTED
 		result.Reason = "DataEditorUnsupported"
 		result.Message = "Key/value data editing is available only for ConfigMaps and Secrets."
-	case errors.Is(err, ErrRelationshipResolutionUnavailable):
-		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_UNAVAILABLE
-		result.Reason = "RelationshipResolutionUnavailable"
-		result.Message = "Kubernetes API relationship mapping is unavailable."
-		result.Retryable = true
-	case errors.Is(err, ErrRelationshipScanLimit):
-		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_RESOURCE_EXHAUSTED
-		result.Reason = "RelationshipScanLimitReached"
-		result.Message = err.Error()
 	case errors.Is(err, ErrObjectWatchClosed):
 		result.Category = kmgrv1.ErrorCategory_ERROR_CATEGORY_UNAVAILABLE
 		result.Reason = "ObjectWatchClosed"

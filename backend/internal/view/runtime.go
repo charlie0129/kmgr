@@ -352,16 +352,6 @@ type Runtime struct {
 	closed             bool
 }
 
-// CachedChild identifies an object already retained by a visible or warm
-// resource view. It deliberately exposes no store or watcher lifetime: callers
-// get one bounded point-in-time slice and must treat it as incomplete coverage.
-type CachedChild struct {
-	Group    string
-	Version  string
-	Resource string
-	Object   *unstructured.Unstructured
-}
-
 // OptionalResourceCatalog is one cache-only scheduler-resource discovery
 // result. Coverage is reported separately because namespace/selector-scoped
 // Pod stores can prove presence but generally cannot prove cluster absence.
@@ -2501,63 +2491,6 @@ func (r *Runtime) DiscoverOptionalResources(ctx context.Context, sessionID strin
 	// conclusive; scoped Pod caches likewise keep coverage explicitly partial.
 	result.PotentiallyIncomplete = conversionIncomplete || !nodesClusterWideComplete || !podsClusterWideComplete
 	return result, nil
-}
-
-// CachedChildren returns only children visible in existing view caches for the
-// selected session authority. It never opens a resource, starts a watcher, or
-// performs network I/O. Different selectors/scopes can retain overlapping
-// objects, so results are de-duplicated by full GVR plus UID.
-func (r *Runtime) CachedChildren(sessionID, ownerUID string) []CachedChild {
-	if strings.TrimSpace(sessionID) == "" || strings.TrimSpace(ownerUID) == "" {
-		return nil
-	}
-	authoritySource, ok := r.source.(interface {
-		AuthorityID(string) (string, bool)
-	})
-	if !ok {
-		return nil
-	}
-	authorityID, ok := authoritySource.AuthorityID(sessionID)
-	if !ok {
-		return nil
-	}
-
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	seen := make(map[string]struct{})
-	result := make([]CachedChild, 0)
-	for key, entry := range r.resources {
-		currentStore := entry.currentStore()
-		if key.authorityID != authorityID || currentStore == nil {
-			continue
-		}
-		for _, object := range currentStore.Children(types.UID(ownerUID)) {
-			if object == nil || object.GetUID() == "" {
-				continue
-			}
-			unique := strings.Join([]string{
-				key.group, key.version, key.resource, string(object.GetUID()),
-			}, "\x00")
-			if _, exists := seen[unique]; exists {
-				continue
-			}
-			seen[unique] = struct{}{}
-			result = append(result, CachedChild{
-				Group: key.group, Version: key.version, Resource: key.resource, Object: object,
-			})
-		}
-	}
-	sort.Slice(result, func(i, j int) bool {
-		left, right := result[i], result[j]
-		return strings.Join([]string{
-			left.Group, left.Version, left.Resource, left.Object.GetNamespace(),
-			left.Object.GetName(), string(left.Object.GetUID()),
-		}, "\x00") < strings.Join([]string{
-			right.Group, right.Version, right.Resource, right.Object.GetNamespace(),
-			right.Object.GetName(), string(right.Object.GetUID()),
-		}, "\x00")
-	})
-	return result
 }
 
 // Subscription owns one complete filtered/sorted backend presentation and a

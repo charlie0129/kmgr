@@ -11,19 +11,6 @@ public protocol ObjectDetailRPC: Sendable {
         timeout: Duration,
         receive: @escaping @Sendable (Kmgr_V1_ObjectEvent) throws -> Void
     ) async throws
-    func getRelationships(
-        _ request: Kmgr_V1_GetRelationshipsRequest,
-        timeout: Duration
-    ) async throws -> Kmgr_V1_GetRelationshipsResponse
-    func scanRelationships(
-        _ request: Kmgr_V1_ScanRelationshipsRequest,
-        timeout: Duration,
-        receive: @escaping @Sendable (Kmgr_V1_RelationshipScanEvent) throws -> Void
-    ) async throws
-    func cancelRelationshipScan(
-        _ request: Kmgr_V1_CancelRelationshipScanRequest,
-        timeout: Duration
-    ) async throws -> Kmgr_V1_Acknowledgement
     func getData(_ request: Kmgr_V1_GetDataRequest, timeout: Duration) async throws
         -> Kmgr_V1_GetDataResponse
     func prepareYAML(_ request: Kmgr_V1_PrepareYamlEditRequest, timeout: Duration) async throws
@@ -66,35 +53,6 @@ public struct EngineObjectDetailRPC: ObjectDetailRPC {
         ) { response in
             for try await event in response.messages { try receive(event) }
         }
-    }
-
-    public func getRelationships(
-        _ request: Kmgr_V1_GetRelationshipsRequest,
-        timeout: Duration
-    ) async throws -> Kmgr_V1_GetRelationshipsResponse {
-        try await connection.objectClient().getRelationships(request, options: callOptions(timeout))
-    }
-
-    public func scanRelationships(
-        _ request: Kmgr_V1_ScanRelationshipsRequest,
-        timeout: Duration,
-        receive: @escaping @Sendable (Kmgr_V1_RelationshipScanEvent) throws -> Void
-    ) async throws {
-        try await connection.objectClient().scanRelationships(
-            request,
-            options: callOptions(timeout)
-        ) { response in
-            for try await event in response.messages { try receive(event) }
-        }
-    }
-
-    public func cancelRelationshipScan(
-        _ request: Kmgr_V1_CancelRelationshipScanRequest,
-        timeout: Duration
-    ) async throws -> Kmgr_V1_Acknowledgement {
-        try await connection.objectClient().cancelRelationshipScan(
-            request, options: callOptions(timeout)
-        )
     }
 
     public func getData(
@@ -274,102 +232,6 @@ public struct EngineObjectDetailProvider: ObjectDetailProviding {
             }
             continuation.onTermination = { @Sendable _ in task.cancel() }
         }
-    }
-
-    public func getRelationships(
-        identity: ResourceIdentity,
-        includeChildren: Bool = true
-    ) async throws -> ObjectRelationships {
-        var request = Kmgr_V1_GetRelationshipsRequest()
-        request.context = context(identity.clusterSessionID, timeout: unaryTimeout)
-        request.identity = Self.protoIdentity(identity)
-        request.includeOwners = true
-        request.includeChildren = includeChildren
-        do {
-            let response = try await rpc.getRelationships(request, timeout: unaryTimeout)
-            try Self.validate(response.requestID, expected: request.context.requestID)
-            if response.hasError { throw EngineClusterContextProvider.issue(from: response.error) }
-            return ObjectRelationships(
-                values: response.relationships.map(Self.relationship),
-                childrenPotentiallyIncomplete: response.childrenPotentiallyIncomplete
-            )
-        } catch {
-            throw Self.issue(error, operation: "get object relationships")
-        }
-    }
-
-    public func scanRelationships(
-        identity: ResourceIdentity
-    ) -> AsyncThrowingStream<RelationshipScanMessage, Error> {
-        let scanID = identifier()
-        var request = Kmgr_V1_ScanRelationshipsRequest()
-        request.context = context(identity.clusterSessionID, timeout: streamTimeout)
-        request.scanID = scanID
-        request.generation = 1
-        request.identity = Self.protoIdentity(identity)
-        let immutableRequest = request
-        let rpc = self.rpc
-        let timeout = streamTimeout
-        let cancelTimeout = unaryTimeout
-        let limit = maximumBufferedMessages
-        return AsyncThrowingStream(bufferingPolicy: .bufferingOldest(limit)) { continuation in
-            let cursor = RelationshipScanCursorValidator(
-                streamID: scanID,
-                generation: immutableRequest.generation
-            )
-            let task = Task.detached(priority: .userInitiated) {
-                do {
-                    try await rpc.scanRelationships(immutableRequest, timeout: timeout) { value in
-                        try cursor.validate(value.cursor)
-                        if value.hasError {
-                            throw EngineClusterContextProvider.issue(from: value.error)
-                        }
-                        switch continuation.yield(Self.relationshipScanMessage(value)) {
-                        case .enqueued: break
-                        case .dropped:
-                            throw ObjectDetailBridgeError.relationshipScanBufferExceeded(limit)
-                        case .terminated: throw CancellationError()
-                        @unknown default:
-                            throw ObjectDetailBridgeError.relationshipScanBufferExceeded(limit)
-                        }
-                    }
-                    continuation.finish()
-                } catch {
-                    if Task.isCancelled || error is CancellationError {
-                        continuation.finish()
-                    } else {
-                        continuation.finish(throwing: Self.issue(error, operation: "scan relationships"))
-                    }
-                }
-            }
-            continuation.onTermination = { @Sendable _ in
-                task.cancel()
-                Task.detached(priority: .utility) {
-                    var cancelRequest = Kmgr_V1_CancelRelationshipScanRequest()
-                    cancelRequest.context = immutableRequest.context
-                    cancelRequest.context.requestID = identifier()
-                    cancelRequest.context.deadlineUnixMs = 0
-                    cancelRequest.scanID = immutableRequest.scanID
-                    cancelRequest.generation = immutableRequest.generation
-                    _ = try? await rpc.cancelRelationshipScan(
-                        cancelRequest,
-                        timeout: cancelTimeout
-                    )
-                }
-            }
-        }
-    }
-
-    public func cancelRelationshipScan(
-        sessionID: String,
-        scanID: String,
-        generation: UInt64
-    ) async {
-        var request = Kmgr_V1_CancelRelationshipScanRequest()
-        request.context = context(sessionID, timeout: unaryTimeout)
-        request.scanID = scanID
-        request.generation = generation
-        _ = try? await rpc.cancelRelationshipScan(request, timeout: unaryTimeout)
     }
 
     public func getData(identity: ResourceIdentity) async throws -> ObjectData {
@@ -699,58 +561,6 @@ public struct EngineObjectDetailProvider: ObjectDetailProviding {
         }
     }
 
-    private static func relationshipKind(
-        _ value: Kmgr_V1_RelationshipKind
-    ) -> ObjectRelationshipKind {
-        switch value {
-        case .owner: .owner
-        case .child: .child
-        case .related, .unspecified, .UNRECOGNIZED: .related
-        }
-    }
-
-    private static func relationship(
-        _ value: Kmgr_V1_ResourceRelationship
-    ) -> ObjectRelationship {
-        ObjectRelationship(
-            kind: relationshipKind(value.kind),
-            identity: identity(value.identity),
-            label: value.label,
-            stale: value.stale,
-            potentiallyIncomplete: value.potentiallyIncomplete,
-            controller: value.controller
-        )
-    }
-
-    private static func relationshipScanMessage(
-        _ value: Kmgr_V1_RelationshipScanEvent
-    ) -> RelationshipScanMessage {
-        let current = value.progress.currentResource
-        let currentResource = current.resource.isEmpty
-            ? ""
-            : ([current.group, current.version, current.resource]
-                .filter { !$0.isEmpty }.joined(separator: "/"))
-        return RelationshipScanMessage(
-            scanID: value.cursor.streamID,
-            cursor: StreamCursor(
-                generation: value.cursor.generation,
-                sequence: value.cursor.sequence
-            ),
-            relationships: value.relationships.map(relationship),
-            progress: RelationshipScanProgress(
-                resourcesTotal: value.progress.resourcesTotal,
-                resourcesScanned: value.progress.resourcesScanned,
-                objectsExamined: value.progress.objectsExamined,
-                resourcesFailed: value.progress.resourcesFailed,
-                currentResource: currentResource,
-                complete: value.progress.complete,
-                potentiallyIncomplete: value.progress.potentiallyIncomplete
-            ),
-            warning: value.hasWarning
-                ? EngineClusterContextProvider.issue(from: value.warning) : nil
-        )
-    }
-
     private static func date(_ unixMilliseconds: Int64) -> Date? {
         guard unixMilliseconds > 0 else { return nil }
         return Date(timeIntervalSince1970: TimeInterval(unixMilliseconds) / 1_000)
@@ -853,14 +663,6 @@ public struct EngineObjectDetailProvider: ObjectDetailProviding {
                 operation: operation,
                 safeDetails: ["buffered_message_limit": String(limit)]
             )
-        case ObjectDetailBridgeError.relationshipScanBufferExceeded(let limit):
-            return ClusterManagerIssue(
-                category: .resourceExhausted,
-                reason: "RelationshipScanBufferExceeded",
-                message: "Relationship scan progress arrived faster than the detail page could apply it.",
-                operation: operation,
-                safeDetails: ["buffered_message_limit": String(limit)]
-            )
         case ObjectDetailBridgeError.emptyObjectYAML:
             return ClusterManagerIssue(
                 category: .internalFailure,
@@ -872,8 +674,7 @@ public struct EngineObjectDetailProvider: ObjectDetailProviding {
             )
         case ObjectDetailBridgeError.requestIDMismatch,
             ObjectDetailBridgeError.objectEnvelopeMismatch,
-            ObjectDetailBridgeError.operationEnvelopeMismatch,
-            ObjectDetailBridgeError.relationshipScanEnvelopeMismatch:
+            ObjectDetailBridgeError.operationEnvelopeMismatch:
             return ClusterManagerIssue(
                 category: .internalFailure,
                 reason: "OperationEnvelopeMismatch",
@@ -907,32 +708,6 @@ private enum ObjectDetailBridgeError: Error {
     case operationRejected
     case operationEnvelopeMismatch
     case operationBufferExceeded(Int)
-    case relationshipScanEnvelopeMismatch
-    case relationshipScanBufferExceeded(Int)
-}
-
-private final class RelationshipScanCursorValidator: @unchecked Sendable {
-    private let streamID: String
-    private let generation: UInt64
-    private let lock = NSLock()
-    private var lastSequence: UInt64 = 0
-
-    init(streamID: String, generation: UInt64) {
-        self.streamID = streamID
-        self.generation = generation
-    }
-
-    func validate(_ cursor: Kmgr_V1_StreamCursor) throws {
-        lock.lock()
-        defer { lock.unlock() }
-        guard cursor.streamID == streamID,
-            cursor.generation == generation,
-            cursor.sequence > lastSequence
-        else {
-            throw ObjectDetailBridgeError.relationshipScanEnvelopeMismatch
-        }
-        lastSequence = cursor.sequence
-    }
 }
 
 private final class DetailOperationWatchLifetime: @unchecked Sendable {

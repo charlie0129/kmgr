@@ -8,11 +8,7 @@ private actor ObjectDetailRPCCapture: ObjectDetailRPC {
     var object = Kmgr_V1_GetObjectResponse()
     var objectRequest: Kmgr_V1_GetObjectRequest?
     var watched: [Kmgr_V1_ObjectEvent] = []
-    var relationships = Kmgr_V1_GetRelationshipsResponse()
-    var relationshipScan: [Kmgr_V1_RelationshipScanEvent] = []
     var watchRequest: Kmgr_V1_WatchObjectRequest?
-    var relationshipScanRequest: Kmgr_V1_ScanRelationshipsRequest?
-    var relationshipCancelRequest: Kmgr_V1_CancelRelationshipScanRequest?
     var yamlPreparation = Kmgr_V1_PrepareYamlEditResponse()
     var yamlPreparationRequest: Kmgr_V1_PrepareYamlEditRequest?
     var operationCancelRequest: Kmgr_V1_CancelOperationRequest?
@@ -37,32 +33,6 @@ private actor ObjectDetailRPCCapture: ObjectDetailRPC {
     ) async throws {
         watchRequest = request
         for value in watched { try receive(value) }
-    }
-
-    func getRelationships(
-        _ request: Kmgr_V1_GetRelationshipsRequest,
-        timeout: Duration
-    ) async throws -> Kmgr_V1_GetRelationshipsResponse {
-        var value = relationships
-        value.requestID = request.context.requestID
-        return value
-    }
-
-    func scanRelationships(
-        _ request: Kmgr_V1_ScanRelationshipsRequest,
-        timeout: Duration,
-        receive: @escaping @Sendable (Kmgr_V1_RelationshipScanEvent) throws -> Void
-    ) async throws {
-        relationshipScanRequest = request
-        for value in relationshipScan { try receive(value) }
-    }
-
-    func cancelRelationshipScan(
-        _ request: Kmgr_V1_CancelRelationshipScanRequest,
-        timeout: Duration
-    ) async throws -> Kmgr_V1_Acknowledgement {
-        relationshipCancelRequest = request
-        return .init()
     }
 
     func getData(
@@ -127,19 +97,7 @@ private actor ObjectDetailRPCCapture: ObjectDetailRPC {
     func installWatch(_ values: [Kmgr_V1_ObjectEvent]) { watched = values }
     func installObject(_ value: Kmgr_V1_GetObjectResponse) { object = value }
     func capturedObject() -> Kmgr_V1_GetObjectRequest? { objectRequest }
-    func installRelationships(_ value: Kmgr_V1_GetRelationshipsResponse) {
-        relationships = value
-    }
-    func installRelationshipScan(_ values: [Kmgr_V1_RelationshipScanEvent]) {
-        relationshipScan = values
-    }
     func capturedWatch() -> Kmgr_V1_WatchObjectRequest? { watchRequest }
-    func capturedRelationshipScan() -> Kmgr_V1_ScanRelationshipsRequest? {
-        relationshipScanRequest
-    }
-    func capturedRelationshipCancel() -> Kmgr_V1_CancelRelationshipScanRequest? {
-        relationshipCancelRequest
-    }
     func installYAMLPreparation(_ value: Kmgr_V1_PrepareYamlEditResponse) {
         yamlPreparation = value
     }
@@ -409,117 +367,6 @@ private actor ObjectDetailRPCCapture: ObjectDetailRPC {
     for try await _ in stream {}
     try await Task.sleep(for: .milliseconds(30))
     #expect(await rpc.capturedOperationCancel() == nil)
-}
-
-@Test func objectDetailProviderMapsAuthoritativeOwners() async throws {
-    let rpc = ObjectDetailRPCCapture()
-    var relationshipResponse = Kmgr_V1_GetRelationshipsResponse()
-    var owner = Kmgr_V1_ResourceRelationship()
-    owner.kind = .owner
-    owner.identity = protoIdentity(resource: "deployments", name: "api", uid: "deploy-1")
-    owner.label = "Deployment/api"
-    owner.potentiallyIncomplete = false
-    owner.controller = true
-    relationshipResponse.relationships = [owner]
-    relationshipResponse.childrenPotentiallyIncomplete = true
-    await rpc.installRelationships(relationshipResponse)
-
-    let provider = EngineObjectDetailProvider(rpc: rpc, identifier: { "request" })
-    let target = identity(name: "api-abc", uid: "pod-1")
-    let relationships = try await provider.getRelationships(
-        identity: target,
-        includeChildren: false
-    )
-
-    #expect(relationships.values.first?.kind == .owner)
-    #expect(relationships.values.first?.identity.uid == "deploy-1")
-    #expect(relationships.values.first?.controller == true)
-    #expect(relationships.childrenPotentiallyIncomplete)
-}
-
-@Test func objectDetailProviderMapsRelationshipScanProgressAndCoverage() async throws {
-    let rpc = ObjectDetailRPCCapture()
-    var event = Kmgr_V1_RelationshipScanEvent()
-    event.cursor.streamID = "scan-1"
-    event.cursor.generation = 1
-    event.cursor.sequence = 2
-    event.progress.resourcesTotal = 10
-    event.progress.resourcesScanned = 4
-    event.progress.objectsExamined = 1_234
-    event.progress.currentResource.group = "apps"
-    event.progress.currentResource.version = "v1"
-    event.progress.currentResource.resource = "replicasets"
-    event.progress.potentiallyIncomplete = true
-    var child = Kmgr_V1_ResourceRelationship()
-    child.kind = .child
-    child.identity = protoIdentity(resource: "replicasets", name: "api-abc", uid: "rs-1")
-    event.relationships = [child]
-    await rpc.installRelationshipScan([event])
-    let provider = EngineObjectDetailProvider(rpc: rpc, identifier: { "scan-1" })
-
-    var values: [RelationshipScanMessage] = []
-    for try await message in provider.scanRelationships(
-        identity: identity(name: "api", uid: "deploy-1")
-    ) { values.append(message) }
-
-    #expect(values.first?.cursor.sequence == 2)
-    #expect(values.first?.relationships.first?.identity.uid == "rs-1")
-    #expect(values.first?.progress.currentResource == "apps/v1/replicasets")
-    #expect(values.first?.progress.objectsExamined == 1_234)
-    #expect(values.first?.progress.potentiallyIncomplete == true)
-}
-
-@Test func relationshipScanRejectsZeroDuplicateAndOutOfOrderSequences() async {
-    for sequences in [[0], [1, 1], [2, 1]] {
-        let rpc = ObjectDetailRPCCapture()
-        var events: [Kmgr_V1_RelationshipScanEvent] = []
-        for sequence in sequences {
-            var event = Kmgr_V1_RelationshipScanEvent()
-            event.cursor.streamID = "scan-ordered"
-            event.cursor.generation = 1
-            event.cursor.sequence = UInt64(sequence)
-            events.append(event)
-        }
-        await rpc.installRelationshipScan(events)
-        let provider = EngineObjectDetailProvider(
-            rpc: rpc,
-            identifier: { "scan-ordered" }
-        )
-        do {
-            for try await _ in provider.scanRelationships(
-                identity: identity(name: "api", uid: "deploy-1")
-            ) {}
-            Issue.record("Expected invalid relationship scan cursor for \(sequences)")
-        } catch let issue as ClusterManagerIssue {
-            #expect(issue.category == .internalFailure)
-            #expect(issue.reason == "OperationEnvelopeMismatch")
-        } catch {
-            Issue.record("Unexpected relationship scan error: \(error)")
-        }
-    }
-}
-
-@Test func relationshipScanTerminationSendsExplicitKnownIdentityCancel() async throws {
-    let rpc = ObjectDetailRPCCapture()
-    let provider = EngineObjectDetailProvider(
-        rpc: rpc,
-        now: { Date(timeIntervalSince1970: 1_000) },
-        identifier: { "scan-cancel" }
-    )
-    let stream = provider.scanRelationships(
-        identity: identity(name: "api", uid: "deploy-1")
-    )
-    for try await _ in stream { break }
-
-    for _ in 0..<100 where await rpc.capturedRelationshipCancel() == nil {
-        try await Task.sleep(for: .milliseconds(2))
-    }
-    let started = await rpc.capturedRelationshipScan()
-    let cancelled = await rpc.capturedRelationshipCancel()
-    #expect(started?.scanID == "scan-cancel")
-    #expect(cancelled?.scanID == "scan-cancel")
-    #expect(cancelled?.generation == 1)
-    #expect(cancelled?.context.clusterSessionID == "session")
 }
 
 private func identity(name: String, uid: ResourceUID) -> ResourceIdentity {

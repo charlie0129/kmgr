@@ -1241,7 +1241,7 @@ struct ResourceViewportVirtualizationTests {
         }
     }
 
-    @Test("returning from same-list Details retains the selected identity")
+    @Test("opening Details retains the selected identity in the resource list")
     func detailsReturnRetainsSelection() async throws {
         let detailGate = ViewportDetailGate()
         await detailGate.release()
@@ -1253,8 +1253,7 @@ struct ResourceViewportVirtualizationTests {
         )
         controller.showWindow(nil)
         defer { controller.close() }
-        var table = try resourceTable(in: controller)
-        let root = try #require(controller.window?.contentView)
+        let table = try resourceTable(in: controller)
         try await waitForViewport {
             table.numberOfRows == 10_000
                 && self.cellText(in: table, row: 0) == "pod-0"
@@ -1267,15 +1266,8 @@ struct ResourceViewportVirtualizationTests {
         }
         controller.openResourceDetails(nil)
         try await waitForViewport {
-            viewportDescendants(of: root).compactMap { $0 as? NSSegmentedControl }
-                .contains { control in
-                    control.segmentCount == 3
-                        && control.label(forSegment: 0) == "Summary"
-                }
+            controller.openObjectDetailWindows.count == 1
         }
-
-        controller.navigateBack(nil)
-        table = try resourceTable(in: controller)
         try await waitForViewport {
             self.cellText(in: table, row: 5) == "pod-5"
                 && table.selectedRowIndexes == IndexSet(integer: 5)
@@ -2127,25 +2119,6 @@ private struct ViewportObjectDetailProvider: ObjectDetailProviding {
     ) -> AsyncThrowingStream<ObjectWatchEvent, Error> {
         AsyncThrowingStream { $0.finish() }
     }
-
-    func getRelationships(
-        identity: ResourceIdentity,
-        includeChildren: Bool
-    ) async throws -> ObjectRelationships {
-        ObjectRelationships(values: [], childrenPotentiallyIncomplete: true)
-    }
-
-    func scanRelationships(
-        identity: ResourceIdentity
-    ) -> AsyncThrowingStream<RelationshipScanMessage, Error> {
-        AsyncThrowingStream { $0.finish() }
-    }
-
-    func cancelRelationshipScan(
-        sessionID: String,
-        scanID: String,
-        generation: UInt64
-    ) async {}
 
     func getData(identity: ResourceIdentity) async throws -> ObjectData {
         throw CancellationError()

@@ -5,7 +5,7 @@ import KmgrCore
 ///
 /// It installs the server's UTF-8 bytes directly in AppKit's factory-created
 /// plain document text view. Editing uses the same backend validation and
-/// optimistic apply contract as the Details YAML tab, without adding Yams, a
+/// optimistic apply contract as the standalone YAML utility, without adding Yams, a
 /// custom ruler, or `TextDocumentGeometry` to this presentation path.
 @MainActor
 final class YAMLSnapshotWindowController: NSWindowController, NSWindowDelegate,

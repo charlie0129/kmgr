@@ -202,8 +202,8 @@ Targeted AppKit tests assert that the workspace resource outline and table
 retain native accessibility roles, and that the resource table, filter,
 freshness/progress state, and app-wide Port Forwards control expose text
 labels. Resource-usage cells separately verify their spoken quantity value and
-non-color marker semantics. The Relationships detail test also pins the visible
-`potentially incomplete` default and explicit `Scan All Resources…` action.
+non-color marker semantics. Focused presentation tests also cover the Details
+and YAML utility windows.
 
 These checks catch programmatic accessibility regressions, but they do not
 replace a manual VoiceOver navigation/read-order pass in the packaged app.

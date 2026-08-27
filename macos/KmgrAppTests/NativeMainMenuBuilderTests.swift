@@ -247,16 +247,10 @@ struct NativeMainMenuBuilderTests {
                 NSEvent.ModifierFlags()
             ),
             (
-                "Describe",
+                "Open Details",
                 #selector(ClusterWorkspaceWindowController.openResourceDetails(_:)),
                 "d",
                 NSEvent.ModifierFlags()
-            ),
-            (
-                "Describe in New Window",
-                #selector(ClusterWorkspaceWindowController.openResourceDetailsInNewWindow(_:)),
-                "d",
-                NSEvent.ModifierFlags.command
             ),
             (
                 "Focus Resource Filter",
@@ -307,20 +301,14 @@ struct NativeMainMenuBuilderTests {
                 NSEvent.ModifierFlags.shift
             ),
             (
-                "Open YAML in Details",
+                "Open YAML",
                 #selector(ClusterWorkspaceWindowController.openResourceYAML(_:)),
                 "y",
                 NSEvent.ModifierFlags()
             ),
             (
-                "Open YAML in New Window",
-                #selector(ClusterWorkspaceWindowController.openResourceYAMLSnapshot(_:)),
-                "y",
-                NSEvent.ModifierFlags.command
-            ),
-            (
-                "Edit YAML in New Window",
-                #selector(ClusterWorkspaceWindowController.editResourceYAMLInNewWindow(_:)),
+                "Edit YAML",
+                #selector(ClusterWorkspaceWindowController.editResourceYAML(_:)),
                 "e",
                 NSEvent.ModifierFlags()
             ),

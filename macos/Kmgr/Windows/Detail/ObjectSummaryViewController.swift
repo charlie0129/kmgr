@@ -1,21 +1,6 @@
 import AppKit
 import KmgrCore
 
-enum ObjectDetailInitialTab {
-    case automatic
-    case summary
-    case yaml
-    case relationships
-
-    var segment: Int {
-        switch self {
-        case .automatic, .summary: 0
-        case .yaml: 1
-        case .relationships: 2
-        }
-    }
-}
-
 @MainActor
 protocol ObjectDetailEventsControlling: AnyObject {
     var onSnapshotChanged: ((ObjectDetailEventsSnapshot) -> Void)? { get set }
@@ -407,102 +392,30 @@ private final class ObjectDetailRelativeTimeRefreshCenter {
     }
 }
 
-enum ObjectDetailWatchPresentation {
-    static func merging(_ update: ObjectDetail, previous: ObjectDetail?) -> ObjectDetail {
-        guard let previous else { return update }
-        var merged = update
-        // A watch payload with no YAML is not an authoritative deletion of the
-        // object's serialization. Retain the last non-empty snapshot so a
-        // transient helper/watch omission cannot blank either YAML renderer.
-        if update.yamlUTF8.isEmpty, !previous.yamlUTF8.isEmpty {
-            merged.yamlUTF8 = previous.yamlUTF8
-        }
-        return merged
-    }
-}
-
-/// A fresh, UID-authoritative detail surface. It replaces the table area in a
-/// workspace; no inspector or bottom drawer is introduced.
+/// A fresh, UID-authoritative Summary surface hosted by the utility Details
+/// window.
 @MainActor
-final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
-    NSTableViewDelegate, NSTextViewDelegate, WorkspaceStatusPublishing
+final class ObjectSummaryViewController: NSViewController, NSTableViewDataSource,
+    NSTableViewDelegate, WorkspaceStatusPublishing
 {
     private(set) var identity: ResourceIdentity
     private var session: OpenedClusterSession?
     private let provider: any ObjectDetailProviding
     private let tableLayoutStore: TableLayoutStore
-    private let initialTab: ObjectDetailInitialTab
     private let eventsController: (any ObjectDetailEventsControlling)?
-    private let yamlPresentationBuilder:
-        @Sendable (Data) -> YAMLManagedFieldsPresentation
-    private let segmented = NSSegmentedControl(
-        labels: ["Summary", "YAML", "Relationships"],
-        trackingMode: .selectOne,
-        target: nil,
-        action: nil
-    )
-    private let contentContainer = NSView()
     private let summaryTable = ObjectDetailSummaryTableView()
     private let summaryScrollView = ObjectDetailSummaryScrollView()
-    private let relationshipsTable = NSTableView()
-    private let relationshipsScrollView = NSScrollView()
-    private let relationshipsContainerView = NSView()
-    private let relationshipsCoverageLabel = NSTextField(
-        labelWithString: "Cached children are potentially incomplete."
-    )
-    private let scanRelationshipsButton = NSButton(
-        title: "Scan All Resources…", target: nil, action: nil
-    )
-    private let cancelRelationshipScanButton = NSButton(
-        title: "Cancel Scan", target: nil, action: nil
-    )
-    private lazy var yamlScrollView =
-        YAMLTextView.scrollablePlainDocumentContentTextView()
-    private lazy var yamlTextView: YAMLTextView = {
-        guard let textView = yamlScrollView.documentView as? YAMLTextView else {
-            preconditionFailure("AppKit did not create a YAML document text view")
-        }
-        return textView
-    }()
-    private var yamlSyntaxHighlighter: SyntaxHighlighter?
-    private let yamlContainerView = NSView()
-    private let secretYAMLEncodingNotice = NSTextField(labelWithString:
-        "Secret data values in YAML use Kubernetes base64 encoding. Use Data to edit decoded values."
-    )
-    private let editButton = NSButton(title: "Edit", target: nil, action: nil)
-    private let managedFieldsButton = NSButton(
-        checkboxWithTitle: "Show Managed Fields", target: nil, action: nil
-    )
-    private let saveButton = NSButton(title: "Save", target: nil, action: nil)
-    private let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
     private var detail: ObjectDetail?
-    private var originalYAML = Data()
-    private var yamlPresentation = YAMLManagedFieldsPresentation(
-        unprocessedYAMLUTF8: Data()
-    )
-    private var yamlPresentationTask: Task<Void, Never>?
-    private var pendingYAMLPresentation: (yamlUTF8: Data, generation: UInt64)?
-    private var yamlPresentationGeneration: UInt64 = 0
     private var loadTask: Task<Void, Never>?
     private var watchTask: Task<Void, Never>?
-    private var relationshipsTask: Task<Void, Never>?
-    private var relationshipScanTask: Task<Void, Never>?
-    private var activeRelationshipScan: (id: String, generation: UInt64)?
-    private var operationTask: Task<Void, Never>?
     private var recoveryTask: Task<Void, Never>?
-    private var isEditingYAML = false
     private var summaryItems: [ObjectDetailSummaryTableItem] = []
     private var eventsSnapshot = ObjectDetailEventsSnapshot.loading
     private var relativeTimeRefreshID: UUID?
-    private var relationships: [ObjectRelationship] = []
-    private var relationshipsLoaded = false
-    private var childrenPotentiallyIncomplete = true
     private var summaryTableLayoutBinding: TableLayoutBinding?
-    private var relationshipsTableLayoutBinding: TableLayoutBinding?
     private var watchGate = GenerationSequenceGate()
     private var terminalObjectState = false
 
-    var onBack: (() -> Void)?
     var onOpenEvents: ((ResourceIdentity) -> Void)?
     var onEditMetadata: ((ResourceIdentity, ResourceMetadataKind, String?) -> Void)?
     var onContextualShortcutsChanged: (() -> Void)?
@@ -510,35 +423,24 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     var onWorkspaceStatusChanged: ((WorkspaceStatus) -> Void)?
 
     var contextualShortcutSnapshot: ContextualShortcutSnapshot {
-        let summarySelected = segmented.selectedSegment
-            == ObjectDetailInitialTab.summary.segment
         return ContextualShortcutCatalog.objectDetails(
-            canEditSelectedMetadata: summarySelected,
-            canOpenEvents: summarySelected
-                && eventsController != nil
-                && onOpenEvents != nil
+            canEditSelectedMetadata: true,
+            canOpenEvents: eventsController != nil && onOpenEvents != nil
         )
     }
 
     init(
         identity: ResourceIdentity,
         provider: any ObjectDetailProviding,
-        initialTab: ObjectDetailInitialTab = .automatic,
         session: OpenedClusterSession? = nil,
         tableLayoutStore: TableLayoutStore? = nil,
-        eventsController: (any ObjectDetailEventsControlling)? = nil,
-        yamlPresentationBuilder: @escaping @Sendable (Data)
-            -> YAMLManagedFieldsPresentation = {
-            YAMLManagedFieldsPresentation(yamlUTF8: $0)
-        }
+        eventsController: (any ObjectDetailEventsControlling)? = nil
     ) {
         self.identity = identity
         self.session = session
         self.provider = provider
-        self.initialTab = initialTab
         self.tableLayoutStore = tableLayoutStore ?? TableLayoutStore()
         self.eventsController = eventsController
-        self.yamlPresentationBuilder = yamlPresentationBuilder
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -548,44 +450,31 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     deinit {
         loadTask?.cancel()
         watchTask?.cancel()
-        relationshipsTask?.cancel()
-        relationshipScanTask?.cancel()
-        operationTask?.cancel()
         recoveryTask?.cancel()
-        yamlPresentationTask?.cancel()
     }
 
     override func loadView() {
         let root = NSView()
-        let backButton = NSButton(
-            image: NSImage(systemSymbolName: "chevron.left", accessibilityDescription: "Back")!,
-            target: self,
-            action: #selector(backPressed)
-        )
-        backButton.bezelStyle = .texturedRounded
         let breadcrumb = NSTextField(labelWithString: breadcrumbText)
         breadcrumb.font = .systemFont(ofSize: 15, weight: .semibold)
         breadcrumb.lineBreakMode = .byTruncatingMiddle
-        segmented.selectedSegment = initialTab.segment
-        segmented.target = self
-        segmented.action = #selector(tabChanged)
 
-        let header = NSStackView(views: [backButton, breadcrumb, NSView(), segmented])
+        let header = NSStackView(views: [breadcrumb])
         header.orientation = .horizontal
         header.alignment = .centerY
         header.spacing = 8
         header.translatesAutoresizingMaskIntoConstraints = false
-        contentContainer.translatesAutoresizingMaskIntoConstraints = false
+        summaryScrollView.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(header)
-        root.addSubview(contentContainer)
+        root.addSubview(summaryScrollView)
         NSLayoutConstraint.activate([
             header.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 10),
             header.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -10),
             header.topAnchor.constraint(equalTo: root.topAnchor, constant: 8),
-            contentContainer.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            contentContainer.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            contentContainer.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 8),
-            contentContainer.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            summaryScrollView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            summaryScrollView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            summaryScrollView.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 8),
+            summaryScrollView.bottomAnchor.constraint(equalTo: root.bottomAnchor),
         ])
         if let eventsController {
             eventsController.onSnapshotChanged = { [weak self] snapshot in
@@ -593,18 +482,17 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
             }
         }
         configureSummary()
-        configureRelationships()
-        configureYAML()
         view = root
-        tabChanged()
+        updateEventsActivation()
     }
 
     override func viewDidAppear() {
         super.viewDidAppear()
         view.layoutSubtreeIfNeeded()
         loadObject()
-        if segmented.selectedSegment == ObjectDetailInitialTab.yaml.segment {
-            view.window?.makeFirstResponder(yamlTextView)
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.view.window != nil else { return }
+            self.view.window?.makeFirstResponder(self.summaryTable)
         }
     }
 
@@ -631,12 +519,8 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     func stop() {
         loadTask?.cancel()
         watchTask?.cancel()
-        relationshipsTask?.cancel()
-        relationshipScanTask?.cancel()
-        operationTask?.cancel()
         recoveryTask?.cancel()
         eventsController?.stop()
-        cancelYAMLPresentationPreparation()
         recoveryTask = nil
         ObjectDetailRelativeTimeRefreshCenter.shared.remove(relativeTimeRefreshID)
         relativeTimeRefreshID = nil
@@ -649,34 +533,20 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         loadObject()
     }
 
-    /// Helper restart invalidates the session behind this detail. Keep any
-    /// local editor buffer visible, but stop all work and disable mutation
-    /// controls until the workspace fresh-GETs this exact UID in a new session.
+    /// Helper restart invalidates the session behind this Summary. The utility
+    /// window keeps its last rendered rows visible until a fresh GET succeeds.
     func engineDidDisconnect() {
         loadTask?.cancel()
         loadTask = nil
         watchTask?.cancel()
         watchTask = nil
-        relationshipsTask?.cancel()
-        relationshipsTask = nil
-        relationshipScanTask?.cancel()
-        relationshipScanTask = nil
-        operationTask?.cancel()
-        operationTask = nil
         recoveryTask?.cancel()
         recoveryTask = nil
         eventsController?.engineDidDisconnect()
-        cancelYAMLPresentationPreparation()
-        activeRelationshipScan = nil
         publishStatus(WorkspaceStatus(
-            isEditingYAML
-                ? "Engine disconnected · local edit preserved"
-                : "Engine disconnected · reopening this UID when ready",
+            "Engine disconnected · reopening this UID when ready",
             severity: .warning
         ))
-        editButton.isEnabled = false
-        saveButton.isEnabled = false
-        disableEditingAfterDeletion()
     }
 
     /// Rebinds this exact UID to a newly authenticated helper session. Drafts
@@ -716,23 +586,6 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     private var breadcrumbText: String {
         let scope = identity.namespace.isEmpty ? "" : " · \(identity.namespace)"
         return "\(identity.resource)\(scope) · \(identity.name)"
-    }
-
-    var mutationConfirmationIdentityText: String {
-        clusterPresentation.targetDetails(identity)
-    }
-
-    func confirmationInformativeText(note: String) -> String {
-        "\(mutationConfirmationIdentityText)\n\n\(note)"
-    }
-
-    private var clusterPresentation: ClusterIdentityPresentation {
-        session.map(ClusterIdentityPresentation.init(session:))
-            ?? ClusterIdentityPresentation(clusterName: "", contextName: "")
-    }
-
-    private var isSecretObject: Bool {
-        identity.group.isEmpty && identity.version == "v1" && identity.resource == "secrets"
     }
 
     private func configureSummary() {
@@ -776,53 +629,6 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         }
     }
 
-    private func configureRelationships() {
-        configureTable(
-            relationshipsTable,
-            columns: [
-                ("kind", "Relationship", 110), ("resource", "Resource", 150),
-                ("namespace", "Namespace", 150), ("name", "Name", 280),
-                ("state", "State", 110),
-            ]
-        )
-        relationshipsTable.setAccessibilityLabel("Kubernetes object relationships")
-        relationshipsScrollView.documentView = relationshipsTable
-        relationshipsScrollView.hasVerticalScroller = true
-        relationshipsScrollView.hasHorizontalScroller = true
-        relationshipsTableLayoutBinding = TableLayoutBinding(
-            tableView: relationshipsTable,
-            surface: .objectRelationships,
-            store: tableLayoutStore
-        )
-        relationshipsCoverageLabel.textColor = .secondaryLabelColor
-        relationshipsCoverageLabel.lineBreakMode = .byTruncatingTail
-        scanRelationshipsButton.target = self
-        scanRelationshipsButton.action = #selector(scanAllRelationships)
-        cancelRelationshipScanButton.target = self
-        cancelRelationshipScanButton.action = #selector(cancelRelationshipScan)
-        cancelRelationshipScanButton.isHidden = true
-        let controls = NSStackView(views: [
-            relationshipsCoverageLabel, NSView(),
-            scanRelationshipsButton, cancelRelationshipScanButton,
-        ])
-        controls.orientation = .horizontal
-        controls.alignment = .centerY
-        controls.spacing = 8
-        controls.translatesAutoresizingMaskIntoConstraints = false
-        relationshipsScrollView.translatesAutoresizingMaskIntoConstraints = false
-        relationshipsContainerView.addSubview(controls)
-        relationshipsContainerView.addSubview(relationshipsScrollView)
-        NSLayoutConstraint.activate([
-            controls.leadingAnchor.constraint(equalTo: relationshipsContainerView.leadingAnchor, constant: 10),
-            controls.trailingAnchor.constraint(equalTo: relationshipsContainerView.trailingAnchor, constant: -10),
-            controls.topAnchor.constraint(equalTo: relationshipsContainerView.topAnchor, constant: 6),
-            relationshipsScrollView.leadingAnchor.constraint(equalTo: relationshipsContainerView.leadingAnchor),
-            relationshipsScrollView.trailingAnchor.constraint(equalTo: relationshipsContainerView.trailingAnchor),
-            relationshipsScrollView.topAnchor.constraint(equalTo: controls.bottomAnchor, constant: 5),
-            relationshipsScrollView.bottomAnchor.constraint(equalTo: relationshipsContainerView.bottomAnchor),
-        ])
-    }
-
     private func configureTable(
         _ table: NSTableView,
         columns: [(String, String, CGFloat)]
@@ -837,99 +643,6 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         table.dataSource = self
         table.usesAlternatingRowBackgroundColors = true
         table.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
-    }
-
-    private func configureYAML() {
-        yamlTextView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
-        yamlTextView.isRichText = false
-        yamlTextView.isEditable = false
-        yamlTextView.isSelectable = true
-        yamlTextView.usesFindBar = true
-        yamlTextView.configureAsTechnicalTextInput()
-        yamlTextView.allowsUndo = true
-        yamlTextView.delegate = self
-        yamlTextView.onPlainEditShortcut = { [weak self] in
-            guard let self,
-                segmented.selectedSegment == ObjectDetailInitialTab.yaml.segment,
-                detail != nil,
-                !isEditingYAML,
-                editButton.isEnabled
-            else { return false }
-            beginYAMLEdit()
-            return true
-        }
-        yamlTextView.setAccessibilityLabel("Kubernetes object YAML")
-        yamlTextView.textContainerInset = NSSize(width: 10, height: 10)
-        yamlScrollView.hasVerticalScroller = true
-        yamlScrollView.hasHorizontalScroller = true
-        yamlScrollView.identifier = .init("object-detail-yaml-scroll")
-        yamlScrollView.autohidesScrollers = true
-
-        editButton.target = self
-        editButton.action = #selector(beginYAMLEdit)
-        managedFieldsButton.target = self
-        managedFieldsButton.action = #selector(toggleManagedFields)
-        managedFieldsButton.state = .off
-        managedFieldsButton.isHidden = true
-        saveButton.target = self
-        saveButton.action = #selector(saveYAML)
-        cancelButton.target = self
-        cancelButton.action = #selector(cancelYAMLEdit)
-        saveButton.isHidden = true
-        cancelButton.isHidden = true
-        let controls = NSStackView(views: [
-            editButton, managedFieldsButton, saveButton, cancelButton, NSView(),
-        ])
-        controls.orientation = .horizontal
-        controls.translatesAutoresizingMaskIntoConstraints = false
-        secretYAMLEncodingNotice.identifier = .init("secret-yaml-base64-notice")
-        secretYAMLEncodingNotice.textColor = .secondaryLabelColor
-        secretYAMLEncodingNotice.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        secretYAMLEncodingNotice.lineBreakMode = .byWordWrapping
-        secretYAMLEncodingNotice.maximumNumberOfLines = 2
-        secretYAMLEncodingNotice.setAccessibilityLabel(
-            "Secret YAML values are Kubernetes base64 encoded"
-        )
-        secretYAMLEncodingNotice.translatesAutoresizingMaskIntoConstraints = false
-        yamlScrollView.translatesAutoresizingMaskIntoConstraints = false
-        yamlContainerView.addSubview(controls)
-        if isSecretObject {
-            yamlContainerView.addSubview(secretYAMLEncodingNotice)
-        }
-        yamlContainerView.addSubview(yamlScrollView)
-        var constraints = [
-            controls.leadingAnchor.constraint(equalTo: yamlContainerView.leadingAnchor, constant: 10),
-            controls.trailingAnchor.constraint(equalTo: yamlContainerView.trailingAnchor, constant: -10),
-            controls.topAnchor.constraint(equalTo: yamlContainerView.topAnchor, constant: 6),
-            yamlScrollView.leadingAnchor.constraint(equalTo: yamlContainerView.leadingAnchor),
-            yamlScrollView.trailingAnchor.constraint(equalTo: yamlContainerView.trailingAnchor),
-            yamlScrollView.bottomAnchor.constraint(equalTo: yamlContainerView.bottomAnchor),
-        ]
-        if isSecretObject {
-            constraints.append(contentsOf: [
-                secretYAMLEncodingNotice.leadingAnchor.constraint(
-                    equalTo: yamlContainerView.leadingAnchor, constant: 12
-                ),
-                secretYAMLEncodingNotice.trailingAnchor.constraint(
-                    lessThanOrEqualTo: yamlContainerView.trailingAnchor, constant: -12
-                ),
-                secretYAMLEncodingNotice.topAnchor.constraint(
-                    equalTo: controls.bottomAnchor, constant: 4
-                ),
-                yamlScrollView.topAnchor.constraint(
-                    equalTo: secretYAMLEncodingNotice.bottomAnchor, constant: 5
-                ),
-            ])
-        } else {
-            constraints.append(yamlScrollView.topAnchor.constraint(
-                equalTo: controls.bottomAnchor, constant: 5
-            ))
-        }
-        NSLayoutConstraint.activate(constraints)
-        yamlSyntaxHighlighter = SyntaxHighlighter(
-            textView: yamlTextView,
-            scrollView: yamlScrollView
-        )
     }
 
     private func loadObject() {
@@ -951,7 +664,6 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     private func install(detail: ObjectDetail) {
         identity = detail.identity
         self.detail = detail
-        installYAML(detail.yamlUTF8)
         renderSummary(detail)
         publishStatus(WorkspaceStatus("Resource version \(detail.resourceVersion)"))
         startObjectWatch(resourceVersion: detail.resourceVersion)
@@ -961,38 +673,23 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
     private func installRecovery(detail updatedDetail: ObjectDetail) throws {
         guard updatedDetail.identity.uid == identity.uid else {
             terminalObjectState = true
-            disableEditingAfterDeletion()
             throw ClusterManagerIssue(
                 category: .conflict,
                 reason: "ObjectRecreated",
-                message: "A same-name object has a different UID and cannot replace this detail view.",
+                message: "A same-name object has a different UID and cannot replace this Summary.",
                 operation: "recover object details"
             )
         }
-        let preserveYAML = isEditingYAML
         identity = updatedDetail.identity
         terminalObjectState = false
-        editButton.isEnabled = true
-        saveButton.isEnabled = isEditingYAML
-        installYAML(updatedDetail.yamlUTF8)
-        if preserveYAML, var editingBasis = detail {
-            editingBasis.identity = updatedDetail.identity
-            detail = editingBasis
-        } else {
-            detail = updatedDetail
-            showYAMLPresentation()
-        }
+        detail = updatedDetail
         renderSummary(updatedDetail)
         watchTask?.cancel()
         watchTask = nil
         startObjectWatch(resourceVersion: updatedDetail.resourceVersion)
-        relationshipsLoaded = false
-        tabChanged()
         publishStatus(WorkspaceStatus(
-            preserveYAML
-                ? "Reconnected · server refreshed · local YAML edit preserved"
-                : "Reconnected · resource version \(updatedDetail.resourceVersion)",
-            severity: preserveYAML ? .warning : .informational
+            "Reconnected · resource version \(updatedDetail.resourceVersion)",
+            severity: .informational
         ))
     }
 
@@ -1059,45 +756,8 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         }
     }
 
-    @objc private func tabChanged() {
-        let selectedSegment = segmented.selectedSegment
-        if selectedSegment != ObjectDetailInitialTab.summary.segment {
-            eventsController?.deactivate()
-        }
-        switch selectedSegment {
-        case 1:
-            show(yamlContainerView)
-            // Cmd-F is provided by NSTextView's find bar. When Y opens this
-            // controller, focus the YAML document itself instead of leaving
-            // the controller root as first responder.
-            DispatchQueue.main.async { [weak self] in
-                guard let self,
-                    self.segmented.selectedSegment == ObjectDetailInitialTab.yaml.segment,
-                    self.view.window != nil
-                else { return }
-                self.view.window?.makeFirstResponder(self.yamlTextView)
-            }
-        case ObjectDetailInitialTab.relationships.segment:
-            show(relationshipsContainerView)
-            loadRelationshipsIfNeeded()
-        default:
-            show(summaryScrollView)
-            updateEventsActivation()
-            DispatchQueue.main.async { [weak self] in
-                guard let self,
-                    self.segmented.selectedSegment == ObjectDetailInitialTab.summary.segment,
-                    self.view.window != nil
-                else { return }
-                self.view.window?.makeFirstResponder(self.summaryTable)
-            }
-        }
-        onContextualShortcutsChanged?()
-    }
-
     private func updateEventsActivation() {
-        guard detail != nil,
-            segmented.selectedSegment == ObjectDetailInitialTab.summary.segment
-        else {
+        guard detail != nil else {
             eventsController?.deactivate()
             return
         }
@@ -1133,7 +793,6 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
                             "Deleted · this UID no longer exists",
                             severity: .error
                         ))
-                        disableEditingAfterDeletion()
                     case .failure(_, let issue):
                         if issue.reason == "ObjectRecreated" || issue.reason == "NotFound" {
                             terminalObjectState = true
@@ -1141,7 +800,6 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
                                 "Unavailable · same-name objects are not substituted for this UID",
                                 severity: .error
                             ))
-                            disableEditingAfterDeletion()
                         } else {
                             let presentation = issue.userFacingPresentation
                             publishStatus(WorkspaceStatus(
@@ -1162,416 +820,28 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
 
     private func installWatchUpdate(_ updated: ObjectDetail) {
         guard updated.identity.uid == identity.uid else { return }
-        if isEditingYAML {
-            if updated.resourceVersion != detail?.resourceVersion {
-                publishStatus(WorkspaceStatus(
-                    "Server object changed · local YAML edit preserved",
-                    severity: .warning
-                ))
-            }
-            return
-        }
         // Kubernetes resourceVersion identifies the complete serialized
-        // object. Re-presenting the same version only reloads both tables and
-        // restarts YAML preparation without adding any information.
+        // object. Re-presenting the same version only reloads the Summary
+        // without adding any information.
         if !updated.resourceVersion.isEmpty,
             updated.resourceVersion == detail?.resourceVersion
         {
             return
         }
-        let presented = ObjectDetailWatchPresentation.merging(updated, previous: detail)
-        detail = presented
-        installYAML(presented.yamlUTF8)
-        renderSummary(presented)
+        detail = updated
+        renderSummary(updated)
         publishStatus(WorkspaceStatus(
             "Watching · resource version \(updated.resourceVersion)"
         ))
     }
 
-    private func disableEditingAfterDeletion() {
-        editButton.isEnabled = false
-        saveButton.isEnabled = false
-    }
-
-    private func loadRelationshipsIfNeeded() {
-        guard !relationshipsLoaded, relationshipsTask == nil else { return }
-        publishStatus(WorkspaceStatus("Loading relationships…", busy: true))
-        relationshipsTask = Task { [weak self, provider, identity] in
-            guard let self else { return }
-            defer { relationshipsTask = nil }
-            do {
-                let result = try await provider.getRelationships(
-                    identity: identity,
-                    includeChildren: true
-                )
-                guard !Task.isCancelled else { return }
-                relationships = result.values
-                childrenPotentiallyIncomplete = result.childrenPotentiallyIncomplete
-                relationshipsLoaded = true
-                relationshipsTable.reloadData()
-                updateRelationshipCoverageLabel()
-                publishStatus(WorkspaceStatus(
-                    relationships.isEmpty
-                        ? "No relationships found in current caches"
-                        : "\(relationships.count) relationship\(relationships.count == 1 ? "" : "s")"
-                ))
-            } catch {
-                guard !Task.isCancelled else { return }
-                show(error: error)
-            }
-        }
-    }
-
-    private func updateRelationshipCoverageLabel() {
-        relationshipsCoverageLabel.stringValue = childrenPotentiallyIncomplete
-            ? "Cached children · potentially incomplete"
-            : "All discovered resources scanned"
-        relationshipsCoverageLabel.textColor = childrenPotentiallyIncomplete
-            ? .systemOrange : .secondaryLabelColor
-    }
-
-    @objc private func scanAllRelationships() {
-        guard relationshipScanTask == nil else { return }
-        let alert = NSAlert()
-        alert.messageText = "Scan all listable resources?"
-        alert.informativeText = "This performs metadata LIST requests across the cluster and may be slow or denied for some resource types."
-        alert.addButton(withTitle: "Scan All Resources")
-        alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-
-        scanRelationshipsButton.isHidden = true
-        cancelRelationshipScanButton.isHidden = false
-        publishStatus(WorkspaceStatus("Starting relationship scan…", busy: true))
-        relationshipScanTask = Task { [weak self, provider, identity] in
-            guard let self else { return }
-            defer {
-                relationshipScanTask = nil
-                activeRelationshipScan = nil
-                scanRelationshipsButton.isHidden = false
-                cancelRelationshipScanButton.isHidden = true
-            }
-            do {
-                var collection = RelationshipScanCollection(baseline: relationships)
-                for try await message in provider.scanRelationships(identity: identity) {
-                    guard !Task.isCancelled else { return }
-                    activeRelationshipScan = (message.scanID, message.cursor.generation)
-                    collection.apply(message)
-                    relationships = collection.values
-                    relationshipsTable.reloadData()
-                    childrenPotentiallyIncomplete = message.progress.potentiallyIncomplete
-                    updateRelationshipCoverageLabel()
-                    if message.progress.complete {
-                        publishStatus(WorkspaceStatus(
-                            message.progress.potentiallyIncomplete
-                                ? "Scan finished with \(message.progress.resourcesFailed) inaccessible resource type(s) · results potentially incomplete"
-                                : "Scan complete · \(message.progress.objectsExamined.formatted()) objects examined",
-                            severity: message.progress.potentiallyIncomplete
-                                ? .warning : .informational,
-                            toolTip: message.warning?.userFacingPresentation.detailedText
-                        ))
-                    } else {
-                        let current = message.progress.currentResource.isEmpty
-                            ? "discovering resources" : message.progress.currentResource
-                        publishStatus(WorkspaceStatus(
-                            "Scanning \(message.progress.resourcesScanned)/\(message.progress.resourcesTotal) · \(message.progress.objectsExamined.formatted()) objects · \(current)",
-                            severity: message.warning == nil ? .informational : .warning,
-                            busy: true,
-                            toolTip: message.warning?.userFacingPresentation.detailedText
-                        ))
-                    }
-                }
-            } catch {
-                guard !Task.isCancelled else {
-                    publishStatus(WorkspaceStatus("Relationship scan cancelled"))
-                    return
-                }
-                childrenPotentiallyIncomplete = true
-                updateRelationshipCoverageLabel()
-                show(error: error)
-            }
-        }
-    }
-
-    @objc private func cancelRelationshipScan() {
-        if let activeRelationshipScan {
-            Task { [provider, identity] in
-                await provider.cancelRelationshipScan(
-                    sessionID: identity.clusterSessionID,
-                    scanID: activeRelationshipScan.id,
-                    generation: activeRelationshipScan.generation
-                )
-            }
-        }
-        relationshipScanTask?.cancel()
-    }
-
-    private func show(_ child: NSView) {
-        contentContainer.subviews.forEach { $0.removeFromSuperview() }
-        child.translatesAutoresizingMaskIntoConstraints = false
-        contentContainer.addSubview(child)
-        NSLayoutConstraint.activate([
-            child.leadingAnchor.constraint(equalTo: contentContainer.leadingAnchor),
-            child.trailingAnchor.constraint(equalTo: contentContainer.trailingAnchor),
-            child.topAnchor.constraint(equalTo: contentContainer.topAnchor),
-            child.bottomAnchor.constraint(equalTo: contentContainer.bottomAnchor),
-        ])
-        if child === yamlContainerView {
-            // The factory-created scroll view still needs its new constraints
-            // resolved at the moment a previously detached tab is installed.
-            // AppKit then owns all document sizing; no custom TextKit geometry
-            // or ruler reconciliation participates in this path.
-            contentContainer.layoutSubtreeIfNeeded()
-            yamlContainerView.layoutSubtreeIfNeeded()
-            yamlScrollView.layoutSubtreeIfNeeded()
-        }
-    }
-
-    @objc private func beginYAMLEdit() {
-        guard operationTask == nil else { return }
-        // Editing always starts from the complete authoritative YAML even when
-        // managedFields were hidden in the read-only presentation. The backend
-        // protects them from apply along with the other server-owned fields.
-        replaceYAMLText(with: String(decoding: originalYAML, as: UTF8.self))
-        isEditingYAML = true
-        editButton.isHidden = true
-        managedFieldsButton.isHidden = true
-        saveButton.isHidden = false
-        cancelButton.isHidden = false
-        updateYAMLEditControls()
-        view.window?.makeFirstResponder(yamlTextView)
-    }
-
-    @objc private func cancelYAMLEdit() {
-        guard operationTask == nil else { return }
-        finishYAMLEdit()
-    }
-
-    @objc private func saveYAML() {
-        guard let detail, operationTask == nil else { return }
-        let edited = Data(yamlTextView.string.utf8)
-        publishStatus(WorkspaceStatus("Validating…", busy: true))
-        operationTask = Task { [weak self, provider, identity] in
-            guard let self else { return }
-            defer {
-                operationTask = nil
-                updateYAMLEditControls()
-            }
-            do {
-                let prepared = try await provider.prepareYAML(
-                    identity: identity,
-                    yamlUTF8: edited,
-                    expectedResourceVersion: detail.resourceVersion,
-                    forceFieldOwnership: false
-                )
-                guard await confirm(prepared: prepared) else {
-                    publishStatus(WorkspaceStatus("Save cancelled"))
-                    return
-                }
-                let stream = try await provider.applyYAML(
-                    identity: identity,
-                    yamlUTF8: prepared.normalizedYAMLUTF8,
-                    expectedResourceVersion: detail.resourceVersion,
-                    forceFieldOwnership: false
-                )
-                for try await progress in stream {
-                    publishStatus(WorkspaceStatus(
-                        "Saving… \(progress.completedItems)/\(progress.totalItems)",
-                        busy: !progress.state.isTerminal
-                    ))
-                    if progress.state.isTerminal {
-                        if progress.state == .succeeded {
-                            originalYAML = prepared.normalizedYAMLUTF8
-                            finishYAMLEdit()
-                            loadTask?.cancel()
-                            loadTask = nil
-                            loadObject()
-                        } else {
-                            throw progress.issue ?? ClusterManagerIssue(
-                                category: .conflict,
-                                reason: "YAMLApplyFailed",
-                                message: "The YAML edit was not applied. Your local edit is still open.",
-                                operation: "apply YAML"
-                            )
-                        }
-                    }
-                }
-            } catch {
-                // Preserve the local editor buffer on conflict or validation error.
-                show(error: error)
-            }
-        }
-        updateYAMLEditControls()
-    }
-
-    private func confirm(prepared: PreparedYAMLEdit) async -> Bool {
-        guard !prepared.diff.isEmpty else { return true }
-        guard let parent = view.window else { return false }
-        let controller = YAMLDiffConfirmationWindowController(
-            targetDetails: mutationConfirmationIdentityText,
-            prepared: prepared,
-            tableLayoutStore: tableLayoutStore
-        )
-        return await controller.runSheet(for: parent) == .apply
-    }
-
-    private func finishYAMLEdit() {
-        isEditingYAML = false
-        editButton.isHidden = false
-        managedFieldsButton.isHidden = !yamlPresentation.hasManagedFields
-        saveButton.isHidden = true
-        cancelButton.isHidden = true
-        updateYAMLEditControls()
-        showYAMLPresentation()
-    }
-
-    private func updateYAMLEditControls() {
-        let idle = operationTask == nil
-        yamlTextView.isEditable = isEditingYAML && idle && !terminalObjectState
-        saveButton.isEnabled = isEditingYAML && idle && !terminalObjectState
-        cancelButton.isEnabled = isEditingYAML && idle
-        editButton.isEnabled = !isEditingYAML && idle && !terminalObjectState
-    }
-
-    @objc private func toggleManagedFields() {
-        guard !isEditingYAML else { return }
-        showYAMLPresentation()
-    }
-
-    private func installYAML(_ yamlUTF8: Data) {
-        originalYAML = yamlUTF8
-        yamlPresentationGeneration &+= 1
-        let generation = yamlPresentationGeneration
-        pendingYAMLPresentation = (yamlUTF8, generation)
-        // The first snapshot can be shown immediately while its managed-fields
-        // presentation is prepared. Once a coherent presentation exists,
-        // retain it until the replacement is ready. Installing raw YAML and
-        // hiding the toggle for every busy WATCH event makes the view alternate
-        // between raw and filtered states many times per second.
-        if yamlPresentation.completeYAML.isEmpty {
-            yamlPresentation = YAMLManagedFieldsPresentation(
-                unprocessedYAMLUTF8: yamlUTF8
-            )
-            managedFieldsButton.isHidden = true
-            if !isEditingYAML { showYAMLPresentation() }
-        }
-
-        if let yamlPresentationTask {
-            // The synchronous builder cannot be interrupted once it begins.
-            // Cancel its acceptance and retain only this latest pending input;
-            // its completion will start the replacement worker.
-            yamlPresentationTask.cancel()
-        } else {
-            startYAMLPresentationPreparation()
-        }
-    }
-
-    private func startYAMLPresentationPreparation() {
-        guard yamlPresentationTask == nil,
-            let request = pendingYAMLPresentation
-        else { return }
-        pendingYAMLPresentation = nil
-        let builder = yamlPresentationBuilder
-        yamlPresentationTask = Task { [weak self] in
-            do {
-                let presentation = try await Self.prepareYAMLPresentation(
-                    request.yamlUTF8,
-                    using: builder
-                )
-                guard !Task.isCancelled else {
-                    self?.finishYAMLPresentationPreparation()
-                    return
-                }
-                self?.acceptYAMLPresentation(
-                    presentation,
-                    generation: request.generation
-                )
-            } catch is CancellationError {
-                // A replacement or controller shutdown canceled this request.
-            } catch {
-                assertionFailure("Unexpected YAML presentation error: \(error)")
-            }
-            self?.finishYAMLPresentationPreparation()
-        }
-    }
-
-    private func acceptYAMLPresentation(
-        _ presentation: YAMLManagedFieldsPresentation,
-        generation: UInt64
-    ) {
-        guard yamlPresentationGeneration == generation else { return }
-        yamlPresentation = presentation
-        if !presentation.hasManagedFields { managedFieldsButton.state = .off }
-        managedFieldsButton.isHidden = !presentation.hasManagedFields || isEditingYAML
-        if !isEditingYAML { showYAMLPresentation() }
-    }
-
-    private func finishYAMLPresentationPreparation() {
-        yamlPresentationTask = nil
-        startYAMLPresentationPreparation()
-    }
-
-    /// Nonisolated async functions execute on the generic executor. Keeping
-    /// the synchronous Yams work inside this hop prevents large managedFields
-    /// payloads from blocking AppKit's main actor.
-    nonisolated static func prepareYAMLPresentation(
-        _ yamlUTF8: Data,
-        using builder: @Sendable (Data) -> YAMLManagedFieldsPresentation
-    ) async throws -> YAMLManagedFieldsPresentation {
-        try Task.checkCancellation()
-        let presentation = builder(yamlUTF8)
-        try Task.checkCancellation()
-        return presentation
-    }
-
-    private func cancelYAMLPresentationPreparation() {
-        yamlPresentationGeneration &+= 1
-        pendingYAMLPresentation = nil
-        yamlPresentationTask?.cancel()
-    }
-
-    private func showYAMLPresentation() {
-        let text = yamlPresentation.text(
-            showingManagedFields: managedFieldsButton.state == .on
-        )
-        replaceYAMLText(with: text)
-    }
-
-    private func replaceYAMLText(with text: String) {
-        guard yamlTextView.string != text else { return }
-        let selectedRanges = yamlTextView.selectedRanges
-        let visibleOrigin = yamlScrollView.contentView.bounds.origin
-        yamlTextView.string = text
-        let textLength = (text as NSString).length
-        let restoredRanges = selectedRanges.compactMap { value -> NSValue? in
-            let range = value.rangeValue
-            guard range.location <= textLength else { return nil }
-            return NSValue(range: NSRange(
-                location: range.location,
-                length: min(range.length, textLength - range.location)
-            ))
-        }
-        if !restoredRanges.isEmpty { yamlTextView.selectedRanges = restoredRanges }
-        yamlScrollView.contentView.scroll(to: visibleOrigin)
-        yamlScrollView.reflectScrolledClipView(yamlScrollView.contentView)
-        yamlSyntaxHighlighter?.invalidate()
-    }
-
     override func cancelOperation(_ sender: Any?) {
-        if isEditingYAML {
-            cancelYAMLEdit()
-        } else {
-            onBack?()
-        }
-    }
-
-    @objc func saveDocument(_ sender: Any?) {
-        if isEditingYAML { saveYAML() }
+        super.cancelOperation(sender)
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int {
         switch tableView {
         case summaryTable: summaryItems.count
-        case relationshipsTable: relationships.count
         default: 0
         }
     }
@@ -1603,29 +873,6 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
                 label.textColor = .secondaryLabelColor
                 return label
             }
-        }
-        if tableView === relationshipsTable {
-            guard relationships.indices.contains(row), let tableColumn else { return nil }
-            let relationship = relationships[row]
-            let value: String
-            switch tableColumn.identifier.rawValue {
-            case "kind": value = relationship.kind.rawValue.capitalized
-            case "resource": value = relationship.identity.resource
-            case "namespace": value = relationship.identity.namespace.isEmpty ? "Cluster" : relationship.identity.namespace
-            case "name": value = relationship.identity.name
-            case "state":
-                if relationship.stale {
-                    value = "Stale UID"
-                } else if relationship.potentiallyIncomplete {
-                    value = "Cached"
-                } else {
-                    value = "Current"
-                }
-            default: value = ""
-            }
-            let cell = textCell(value, table: tableView, column: tableColumn)
-            cell.textField?.textColor = relationship.stale ? .systemOrange : .labelColor
-            return cell
         }
         return nil
     }
@@ -1792,33 +1039,6 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         return cell
     }
 
-    private func textCell(
-        _ value: String,
-        table: NSTableView,
-        column: NSTableColumn
-    ) -> NSTableCellView {
-        let identifier = NSUserInterfaceItemIdentifier("detail.\(column.identifier.rawValue)")
-        let cell = table.makeView(withIdentifier: identifier, owner: self) as? NSTableCellView
-            ?? NSTableCellView()
-        cell.identifier = identifier
-        if cell.textField == nil {
-            let label = NSTextField(labelWithString: "")
-            label.lineBreakMode = .byTruncatingTail
-            label.translatesAutoresizingMaskIntoConstraints = false
-            cell.addSubview(label)
-            cell.textField = label
-            NSLayoutConstraint.activate([
-                label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 5),
-                label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -5),
-                label.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
-            ])
-        }
-        cell.textField?.stringValue = value
-        cell.textField?.toolTip = value
-        cell.textField?.textColor = .labelColor
-        return cell
-    }
-
     private func show(error: Error) {
         let presentation = UserFacingErrorPresentation(error)
         publishStatus(WorkspaceStatus(
@@ -1832,8 +1052,6 @@ final class ObjectDetailViewController: NSViewController, NSTableViewDataSource,
         workspaceStatus = status
         onWorkspaceStatusChanged?(status)
     }
-
-    @objc private func backPressed() { onBack?() }
 
 }
 

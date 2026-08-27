@@ -329,45 +329,6 @@ struct YAMLSnapshotWindowControllerTests {
         #expect(cancel.isHidden)
     }
 
-    @Test("watch omissions retain YAML and Details never requests key/value Data")
-    func detailFallbacks() async throws {
-        let identity = yamlSnapshotIdentity()
-        let source = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: settings\n"
-        let previous = ObjectDetail(
-            identity: identity,
-            resourceVersion: "rv-1",
-            yamlUTF8: Data(source.utf8)
-        )
-        let emptyUpdate = ObjectDetail(
-            identity: identity,
-            resourceVersion: "rv-2",
-            yamlUTF8: Data()
-        )
-        let merged = ObjectDetailWatchPresentation.merging(emptyUpdate, previous: previous)
-        #expect(merged.yamlUTF8 == previous.yamlUTF8)
-
-        let provider = SnapshotObjectDetailProvider(details: [previous])
-        let detail = ObjectDetailViewController(
-            identity: identity,
-            provider: provider,
-            initialTab: .yaml
-        )
-        detail.loadView()
-        detail.viewDidAppear()
-        defer { detail.stop() }
-
-        let editor = try #require(yamlSnapshotDescendants(of: detail.view)
-            .compactMap { $0 as? NSTextView }
-            .first { $0.accessibilityLabel() == "Kubernetes object YAML" })
-        try await yamlSnapshotWaitUntil { editor.string == source }
-
-        #expect(editor.string == source)
-        #expect(await provider.getDataCallCount() == 0)
-        let scroll = try #require(editor.enclosingScrollView)
-        #expect(scroll.hasVerticalRuler == false)
-        #expect(scroll.verticalRulerView == nil)
-    }
-
     @Test("failed authoritative Data recovery preserves visible values and locks editing")
     func failedDataRecoveryLocksEditor() async throws {
         let identity = yamlSnapshotIdentity()
@@ -463,25 +424,6 @@ private actor SnapshotObjectDetailProvider: ObjectDetailProviding {
         AsyncThrowingStream { $0.finish() }
     }
 
-    func getRelationships(
-        identity: ResourceIdentity,
-        includeChildren: Bool
-    ) async throws -> ObjectRelationships {
-        ObjectRelationships(values: [], childrenPotentiallyIncomplete: true)
-    }
-
-    nonisolated func scanRelationships(
-        identity: ResourceIdentity
-    ) -> AsyncThrowingStream<RelationshipScanMessage, Error> {
-        AsyncThrowingStream { $0.finish() }
-    }
-
-    func cancelRelationshipScan(
-        sessionID: String,
-        scanID: String,
-        generation: UInt64
-    ) async {}
-
     func getData(identity: ResourceIdentity) async throws -> ObjectData {
         dataCalls += 1
         if let dataFailure, dataCalls > successfulDataResponsesBeforeFailure {
@@ -548,25 +490,6 @@ private actor YAMLSnapshotEditProvider: ObjectDetailProviding {
     ) -> AsyncThrowingStream<ObjectWatchEvent, Error> {
         AsyncThrowingStream { $0.finish() }
     }
-
-    func getRelationships(
-        identity: ResourceIdentity,
-        includeChildren: Bool
-    ) async throws -> ObjectRelationships {
-        ObjectRelationships(values: [], childrenPotentiallyIncomplete: true)
-    }
-
-    nonisolated func scanRelationships(
-        identity: ResourceIdentity
-    ) -> AsyncThrowingStream<RelationshipScanMessage, Error> {
-        AsyncThrowingStream { $0.finish() }
-    }
-
-    func cancelRelationshipScan(
-        sessionID: String,
-        scanID: String,
-        generation: UInt64
-    ) async {}
 
     func getData(identity: ResourceIdentity) async throws -> ObjectData {
         throw CancellationError()

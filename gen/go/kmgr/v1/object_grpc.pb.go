@@ -19,12 +19,9 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	ObjectService_GetObject_FullMethodName              = "/kmgr.v1.ObjectService/GetObject"
-	ObjectService_WatchObject_FullMethodName            = "/kmgr.v1.ObjectService/WatchObject"
-	ObjectService_GetRelationships_FullMethodName       = "/kmgr.v1.ObjectService/GetRelationships"
-	ObjectService_ScanRelationships_FullMethodName      = "/kmgr.v1.ObjectService/ScanRelationships"
-	ObjectService_CancelRelationshipScan_FullMethodName = "/kmgr.v1.ObjectService/CancelRelationshipScan"
-	ObjectService_GetData_FullMethodName                = "/kmgr.v1.ObjectService/GetData"
+	ObjectService_GetObject_FullMethodName   = "/kmgr.v1.ObjectService/GetObject"
+	ObjectService_WatchObject_FullMethodName = "/kmgr.v1.ObjectService/WatchObject"
+	ObjectService_GetData_FullMethodName     = "/kmgr.v1.ObjectService/GetData"
 )
 
 // ObjectServiceClient is the client API for ObjectService service.
@@ -33,9 +30,6 @@ const (
 type ObjectServiceClient interface {
 	GetObject(ctx context.Context, in *GetObjectRequest, opts ...grpc.CallOption) (*GetObjectResponse, error)
 	WatchObject(ctx context.Context, in *WatchObjectRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ObjectEvent], error)
-	GetRelationships(ctx context.Context, in *GetRelationshipsRequest, opts ...grpc.CallOption) (*GetRelationshipsResponse, error)
-	ScanRelationships(ctx context.Context, in *ScanRelationshipsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[RelationshipScanEvent], error)
-	CancelRelationshipScan(ctx context.Context, in *CancelRelationshipScanRequest, opts ...grpc.CallOption) (*Acknowledgement, error)
 	GetData(ctx context.Context, in *GetDataRequest, opts ...grpc.CallOption) (*GetDataResponse, error)
 }
 
@@ -76,45 +70,6 @@ func (c *objectServiceClient) WatchObject(ctx context.Context, in *WatchObjectRe
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type ObjectService_WatchObjectClient = grpc.ServerStreamingClient[ObjectEvent]
 
-func (c *objectServiceClient) GetRelationships(ctx context.Context, in *GetRelationshipsRequest, opts ...grpc.CallOption) (*GetRelationshipsResponse, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(GetRelationshipsResponse)
-	err := c.cc.Invoke(ctx, ObjectService_GetRelationships_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *objectServiceClient) ScanRelationships(ctx context.Context, in *ScanRelationshipsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[RelationshipScanEvent], error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &ObjectService_ServiceDesc.Streams[1], ObjectService_ScanRelationships_FullMethodName, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	x := &grpc.GenericClientStream[ScanRelationshipsRequest, RelationshipScanEvent]{ClientStream: stream}
-	if err := x.ClientStream.SendMsg(in); err != nil {
-		return nil, err
-	}
-	if err := x.ClientStream.CloseSend(); err != nil {
-		return nil, err
-	}
-	return x, nil
-}
-
-// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type ObjectService_ScanRelationshipsClient = grpc.ServerStreamingClient[RelationshipScanEvent]
-
-func (c *objectServiceClient) CancelRelationshipScan(ctx context.Context, in *CancelRelationshipScanRequest, opts ...grpc.CallOption) (*Acknowledgement, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(Acknowledgement)
-	err := c.cc.Invoke(ctx, ObjectService_CancelRelationshipScan_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
 func (c *objectServiceClient) GetData(ctx context.Context, in *GetDataRequest, opts ...grpc.CallOption) (*GetDataResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(GetDataResponse)
@@ -131,9 +86,6 @@ func (c *objectServiceClient) GetData(ctx context.Context, in *GetDataRequest, o
 type ObjectServiceServer interface {
 	GetObject(context.Context, *GetObjectRequest) (*GetObjectResponse, error)
 	WatchObject(*WatchObjectRequest, grpc.ServerStreamingServer[ObjectEvent]) error
-	GetRelationships(context.Context, *GetRelationshipsRequest) (*GetRelationshipsResponse, error)
-	ScanRelationships(*ScanRelationshipsRequest, grpc.ServerStreamingServer[RelationshipScanEvent]) error
-	CancelRelationshipScan(context.Context, *CancelRelationshipScanRequest) (*Acknowledgement, error)
 	GetData(context.Context, *GetDataRequest) (*GetDataResponse, error)
 	mustEmbedUnimplementedObjectServiceServer()
 }
@@ -150,15 +102,6 @@ func (UnimplementedObjectServiceServer) GetObject(context.Context, *GetObjectReq
 }
 func (UnimplementedObjectServiceServer) WatchObject(*WatchObjectRequest, grpc.ServerStreamingServer[ObjectEvent]) error {
 	return status.Error(codes.Unimplemented, "method WatchObject not implemented")
-}
-func (UnimplementedObjectServiceServer) GetRelationships(context.Context, *GetRelationshipsRequest) (*GetRelationshipsResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method GetRelationships not implemented")
-}
-func (UnimplementedObjectServiceServer) ScanRelationships(*ScanRelationshipsRequest, grpc.ServerStreamingServer[RelationshipScanEvent]) error {
-	return status.Error(codes.Unimplemented, "method ScanRelationships not implemented")
-}
-func (UnimplementedObjectServiceServer) CancelRelationshipScan(context.Context, *CancelRelationshipScanRequest) (*Acknowledgement, error) {
-	return nil, status.Error(codes.Unimplemented, "method CancelRelationshipScan not implemented")
 }
 func (UnimplementedObjectServiceServer) GetData(context.Context, *GetDataRequest) (*GetDataResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetData not implemented")
@@ -213,53 +156,6 @@ func _ObjectService_WatchObject_Handler(srv interface{}, stream grpc.ServerStrea
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type ObjectService_WatchObjectServer = grpc.ServerStreamingServer[ObjectEvent]
 
-func _ObjectService_GetRelationships_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(GetRelationshipsRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(ObjectServiceServer).GetRelationships(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: ObjectService_GetRelationships_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ObjectServiceServer).GetRelationships(ctx, req.(*GetRelationshipsRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _ObjectService_ScanRelationships_Handler(srv interface{}, stream grpc.ServerStream) error {
-	m := new(ScanRelationshipsRequest)
-	if err := stream.RecvMsg(m); err != nil {
-		return err
-	}
-	return srv.(ObjectServiceServer).ScanRelationships(m, &grpc.GenericServerStream[ScanRelationshipsRequest, RelationshipScanEvent]{ServerStream: stream})
-}
-
-// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type ObjectService_ScanRelationshipsServer = grpc.ServerStreamingServer[RelationshipScanEvent]
-
-func _ObjectService_CancelRelationshipScan_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(CancelRelationshipScanRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(ObjectServiceServer).CancelRelationshipScan(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: ObjectService_CancelRelationshipScan_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ObjectServiceServer).CancelRelationshipScan(ctx, req.(*CancelRelationshipScanRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
 func _ObjectService_GetData_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(GetDataRequest)
 	if err := dec(in); err != nil {
@@ -290,14 +186,6 @@ var ObjectService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _ObjectService_GetObject_Handler,
 		},
 		{
-			MethodName: "GetRelationships",
-			Handler:    _ObjectService_GetRelationships_Handler,
-		},
-		{
-			MethodName: "CancelRelationshipScan",
-			Handler:    _ObjectService_CancelRelationshipScan_Handler,
-		},
-		{
 			MethodName: "GetData",
 			Handler:    _ObjectService_GetData_Handler,
 		},
@@ -306,11 +194,6 @@ var ObjectService_ServiceDesc = grpc.ServiceDesc{
 		{
 			StreamName:    "WatchObject",
 			Handler:       _ObjectService_WatchObject_Handler,
-			ServerStreams: true,
-		},
-		{
-			StreamName:    "ScanRelationships",
-			Handler:       _ObjectService_ScanRelationships_Handler,
 			ServerStreams: true,
 		},
 	},

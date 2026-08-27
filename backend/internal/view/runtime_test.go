@@ -790,52 +790,6 @@ func TestRuntimeDropsReleasedResourceRejectedByWarmObjectBudget(t *testing.T) {
 	}
 }
 
-func TestCachedChildrenUsesOnlyMatchingAuthorityAndDeduplicatesViewStores(t *testing.T) {
-	t.Parallel()
-	ownerUID := types.UID("owner-uid")
-	child := pod("child-uid", "ns", "child", "Running", 0, nil, time.Time{})
-	child.SetOwnerReferences([]metav1.OwnerReference{{UID: ownerUID}})
-	client := newScriptedResource()
-	client.listPages = []*unstructured.UnstructuredList{listPage("rv-1", "", child)}
-	source := &fakeResourceSource{
-		authority: "cluster-a",
-		client:    client,
-		sessions: map[string]string{
-			"session-a": "cluster-a", "session-shared": "cluster-a", "session-b": "cluster-b",
-		},
-	}
-	runtime, err := NewRuntime(RuntimeConfig{
-		Source: source, BatchDelay: time.Millisecond, PipelineTimeout: time.Second,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer runtime.Close()
-
-	first, err := runtime.Open(openView("session-a", "first", 1))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer first.Close()
-	second, err := runtime.Open(openView("session-shared", "second", 1))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer second.Close()
-	waitForSnapshotUID(t, first, "child-uid")
-
-	children := runtime.CachedChildren("session-shared", string(ownerUID))
-	if len(children) != 1 || children[0].Resource != "pods" || children[0].Object.GetUID() != "child-uid" {
-		t.Fatalf("cached children = %#v", children)
-	}
-	if got := runtime.CachedChildren("session-b", string(ownerUID)); len(got) != 0 {
-		t.Fatalf("other-authority cached children = %#v", got)
-	}
-	if got := runtime.CachedChildren("session-a", "different-owner"); len(got) != 0 {
-		t.Fatalf("wrong-owner cached children = %#v", got)
-	}
-}
-
 func TestRuntimeRelistKeepsWarmRowsUntilFinalPage(t *testing.T) {
 	t.Parallel()
 	client := newScriptedResource()

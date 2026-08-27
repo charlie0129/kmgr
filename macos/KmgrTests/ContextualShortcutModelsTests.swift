@@ -26,12 +26,10 @@ struct ContextualShortcutModelsTests {
         #expect(snapshot.items.map(\.keys).contains("\u{2318}Return"))
         #expect(snapshot.items.map(\.keys).contains("O"))
         #expect(snapshot.items.map(\.keys).contains("D"))
-        #expect(snapshot.items.map(\.keys).contains("\u{2318}D"))
         #expect(snapshot.items.map(\.keys).contains("Y"))
-        #expect(snapshot.items.map(\.keys).contains("\u{2318}Y"))
         #expect(snapshot.items.map(\.keys).contains("E"))
-        #expect(snapshot.items.first { $0.id == "resource.yaml.edit-window" }?.action
-            == "Open YAML in a new window and start editing")
+        #expect(snapshot.items.first { $0.id == "resource.yaml.edit" }?.action
+            == "Edit selected object YAML")
         #expect(snapshot.items.map(\.keys).contains("L"))
         #expect(snapshot.items.map(\.keys).contains("\u{21E7}L"))
         #expect(snapshot.items.map(\.keys).contains("S"))

@@ -30,7 +30,6 @@ var engineCapabilities = []*kmgrv1.Capability{
 	{Name: "view.column-preview", Version: 1},
 	{Name: "view.optional-resources", Version: 1},
 	{Name: "object.details", Version: 1},
-	{Name: "object.relationships", Version: 1},
 	{Name: "object.data", Version: 1},
 	{Name: "operation.mutations", Version: 1},
 	{Name: "logs.stream", Version: 1},

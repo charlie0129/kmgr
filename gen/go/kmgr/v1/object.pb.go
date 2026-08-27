@@ -125,58 +125,6 @@ func (ObjectEventType) EnumDescriptor() ([]byte, []int) {
 	return file_kmgr_v1_object_proto_rawDescGZIP(), []int{1}
 }
 
-type RelationshipKind int32
-
-const (
-	RelationshipKind_RELATIONSHIP_KIND_UNSPECIFIED RelationshipKind = 0
-	RelationshipKind_RELATIONSHIP_KIND_OWNER       RelationshipKind = 1
-	RelationshipKind_RELATIONSHIP_KIND_CHILD       RelationshipKind = 2
-	RelationshipKind_RELATIONSHIP_KIND_RELATED     RelationshipKind = 3
-)
-
-// Enum value maps for RelationshipKind.
-var (
-	RelationshipKind_name = map[int32]string{
-		0: "RELATIONSHIP_KIND_UNSPECIFIED",
-		1: "RELATIONSHIP_KIND_OWNER",
-		2: "RELATIONSHIP_KIND_CHILD",
-		3: "RELATIONSHIP_KIND_RELATED",
-	}
-	RelationshipKind_value = map[string]int32{
-		"RELATIONSHIP_KIND_UNSPECIFIED": 0,
-		"RELATIONSHIP_KIND_OWNER":       1,
-		"RELATIONSHIP_KIND_CHILD":       2,
-		"RELATIONSHIP_KIND_RELATED":     3,
-	}
-)
-
-func (x RelationshipKind) Enum() *RelationshipKind {
-	p := new(RelationshipKind)
-	*p = x
-	return p
-}
-
-func (x RelationshipKind) String() string {
-	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
-}
-
-func (RelationshipKind) Descriptor() protoreflect.EnumDescriptor {
-	return file_kmgr_v1_object_proto_enumTypes[2].Descriptor()
-}
-
-func (RelationshipKind) Type() protoreflect.EnumType {
-	return &file_kmgr_v1_object_proto_enumTypes[2]
-}
-
-func (x RelationshipKind) Number() protoreflect.EnumNumber {
-	return protoreflect.EnumNumber(x)
-}
-
-// Deprecated: Use RelationshipKind.Descriptor instead.
-func (RelationshipKind) EnumDescriptor() ([]byte, []int) {
-	return file_kmgr_v1_object_proto_rawDescGZIP(), []int{2}
-}
-
 type DataEntryKind int32
 
 const (
@@ -210,11 +158,11 @@ func (x DataEntryKind) String() string {
 }
 
 func (DataEntryKind) Descriptor() protoreflect.EnumDescriptor {
-	return file_kmgr_v1_object_proto_enumTypes[3].Descriptor()
+	return file_kmgr_v1_object_proto_enumTypes[2].Descriptor()
 }
 
 func (DataEntryKind) Type() protoreflect.EnumType {
-	return &file_kmgr_v1_object_proto_enumTypes[3]
+	return &file_kmgr_v1_object_proto_enumTypes[2]
 }
 
 func (x DataEntryKind) Number() protoreflect.EnumNumber {
@@ -223,7 +171,7 @@ func (x DataEntryKind) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use DataEntryKind.Descriptor instead.
 func (DataEntryKind) EnumDescriptor() ([]byte, []int) {
-	return file_kmgr_v1_object_proto_rawDescGZIP(), []int{3}
+	return file_kmgr_v1_object_proto_rawDescGZIP(), []int{2}
 }
 
 type SummaryTimestampPresentation int32
@@ -259,11 +207,11 @@ func (x SummaryTimestampPresentation) String() string {
 }
 
 func (SummaryTimestampPresentation) Descriptor() protoreflect.EnumDescriptor {
-	return file_kmgr_v1_object_proto_enumTypes[4].Descriptor()
+	return file_kmgr_v1_object_proto_enumTypes[3].Descriptor()
 }
 
 func (SummaryTimestampPresentation) Type() protoreflect.EnumType {
-	return &file_kmgr_v1_object_proto_enumTypes[4]
+	return &file_kmgr_v1_object_proto_enumTypes[3]
 }
 
 func (x SummaryTimestampPresentation) Number() protoreflect.EnumNumber {
@@ -272,7 +220,7 @@ func (x SummaryTimestampPresentation) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use SummaryTimestampPresentation.Descriptor instead.
 func (SummaryTimestampPresentation) EnumDescriptor() ([]byte, []int) {
-	return file_kmgr_v1_object_proto_rawDescGZIP(), []int{4}
+	return file_kmgr_v1_object_proto_rawDescGZIP(), []int{3}
 }
 
 type GetObjectRequest struct {
@@ -829,533 +777,6 @@ func (x *ObjectEvent) GetError() *StructuredError {
 	return nil
 }
 
-type GetRelationshipsRequest struct {
-	state           protoimpl.MessageState `protogen:"open.v1"`
-	Context         *RequestContext        `protobuf:"bytes,1,opt,name=context,proto3" json:"context,omitempty"`
-	Identity        *ResourceIdentity      `protobuf:"bytes,2,opt,name=identity,proto3" json:"identity,omitempty"`
-	IncludeOwners   bool                   `protobuf:"varint,3,opt,name=include_owners,json=includeOwners,proto3" json:"include_owners,omitempty"`
-	IncludeChildren bool                   `protobuf:"varint,4,opt,name=include_children,json=includeChildren,proto3" json:"include_children,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
-}
-
-func (x *GetRelationshipsRequest) Reset() {
-	*x = GetRelationshipsRequest{}
-	mi := &file_kmgr_v1_object_proto_msgTypes[6]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *GetRelationshipsRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*GetRelationshipsRequest) ProtoMessage() {}
-
-func (x *GetRelationshipsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_object_proto_msgTypes[6]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use GetRelationshipsRequest.ProtoReflect.Descriptor instead.
-func (*GetRelationshipsRequest) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_object_proto_rawDescGZIP(), []int{6}
-}
-
-func (x *GetRelationshipsRequest) GetContext() *RequestContext {
-	if x != nil {
-		return x.Context
-	}
-	return nil
-}
-
-func (x *GetRelationshipsRequest) GetIdentity() *ResourceIdentity {
-	if x != nil {
-		return x.Identity
-	}
-	return nil
-}
-
-func (x *GetRelationshipsRequest) GetIncludeOwners() bool {
-	if x != nil {
-		return x.IncludeOwners
-	}
-	return false
-}
-
-func (x *GetRelationshipsRequest) GetIncludeChildren() bool {
-	if x != nil {
-		return x.IncludeChildren
-	}
-	return false
-}
-
-type ResourceRelationship struct {
-	state    protoimpl.MessageState `protogen:"open.v1"`
-	Kind     RelationshipKind       `protobuf:"varint,1,opt,name=kind,proto3,enum=kmgr.v1.RelationshipKind" json:"kind,omitempty"`
-	Identity *ResourceIdentity      `protobuf:"bytes,2,opt,name=identity,proto3" json:"identity,omitempty"`
-	Label    string                 `protobuf:"bytes,3,opt,name=label,proto3" json:"label,omitempty"`
-	Stale    bool                   `protobuf:"varint,4,opt,name=stale,proto3" json:"stale,omitempty"`
-	// The relationship itself matched the requested owner UID, but the source
-	// did not provide complete coverage of every Kubernetes resource type.
-	PotentiallyIncomplete bool `protobuf:"varint,5,opt,name=potentially_incomplete,json=potentiallyIncomplete,proto3" json:"potentially_incomplete,omitempty"`
-	// True when this owner reference is the Kubernetes controlling owner.
-	// Non-owner relationships always leave this false.
-	Controller    bool `protobuf:"varint,6,opt,name=controller,proto3" json:"controller,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *ResourceRelationship) Reset() {
-	*x = ResourceRelationship{}
-	mi := &file_kmgr_v1_object_proto_msgTypes[7]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ResourceRelationship) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ResourceRelationship) ProtoMessage() {}
-
-func (x *ResourceRelationship) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_object_proto_msgTypes[7]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ResourceRelationship.ProtoReflect.Descriptor instead.
-func (*ResourceRelationship) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_object_proto_rawDescGZIP(), []int{7}
-}
-
-func (x *ResourceRelationship) GetKind() RelationshipKind {
-	if x != nil {
-		return x.Kind
-	}
-	return RelationshipKind_RELATIONSHIP_KIND_UNSPECIFIED
-}
-
-func (x *ResourceRelationship) GetIdentity() *ResourceIdentity {
-	if x != nil {
-		return x.Identity
-	}
-	return nil
-}
-
-func (x *ResourceRelationship) GetLabel() string {
-	if x != nil {
-		return x.Label
-	}
-	return ""
-}
-
-func (x *ResourceRelationship) GetStale() bool {
-	if x != nil {
-		return x.Stale
-	}
-	return false
-}
-
-func (x *ResourceRelationship) GetPotentiallyIncomplete() bool {
-	if x != nil {
-		return x.PotentiallyIncomplete
-	}
-	return false
-}
-
-func (x *ResourceRelationship) GetController() bool {
-	if x != nil {
-		return x.Controller
-	}
-	return false
-}
-
-type GetRelationshipsResponse struct {
-	state         protoimpl.MessageState  `protogen:"open.v1"`
-	RequestId     string                  `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
-	Relationships []*ResourceRelationship `protobuf:"bytes,2,rep,name=relationships,proto3" json:"relationships,omitempty"`
-	Error         *StructuredError        `protobuf:"bytes,3,opt,name=error,proto3" json:"error,omitempty"`
-	// True even when no cached children were found: an empty cache result must
-	// never be presented as proof that the object has no children.
-	ChildrenPotentiallyIncomplete bool `protobuf:"varint,4,opt,name=children_potentially_incomplete,json=childrenPotentiallyIncomplete,proto3" json:"children_potentially_incomplete,omitempty"`
-	unknownFields                 protoimpl.UnknownFields
-	sizeCache                     protoimpl.SizeCache
-}
-
-func (x *GetRelationshipsResponse) Reset() {
-	*x = GetRelationshipsResponse{}
-	mi := &file_kmgr_v1_object_proto_msgTypes[8]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *GetRelationshipsResponse) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*GetRelationshipsResponse) ProtoMessage() {}
-
-func (x *GetRelationshipsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_object_proto_msgTypes[8]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use GetRelationshipsResponse.ProtoReflect.Descriptor instead.
-func (*GetRelationshipsResponse) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_object_proto_rawDescGZIP(), []int{8}
-}
-
-func (x *GetRelationshipsResponse) GetRequestId() string {
-	if x != nil {
-		return x.RequestId
-	}
-	return ""
-}
-
-func (x *GetRelationshipsResponse) GetRelationships() []*ResourceRelationship {
-	if x != nil {
-		return x.Relationships
-	}
-	return nil
-}
-
-func (x *GetRelationshipsResponse) GetError() *StructuredError {
-	if x != nil {
-		return x.Error
-	}
-	return nil
-}
-
-func (x *GetRelationshipsResponse) GetChildrenPotentiallyIncomplete() bool {
-	if x != nil {
-		return x.ChildrenPotentiallyIncomplete
-	}
-	return false
-}
-
-type ScanRelationshipsRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Context       *RequestContext        `protobuf:"bytes,1,opt,name=context,proto3" json:"context,omitempty"`
-	ScanId        string                 `protobuf:"bytes,2,opt,name=scan_id,json=scanId,proto3" json:"scan_id,omitempty"`
-	Generation    uint64                 `protobuf:"varint,3,opt,name=generation,proto3" json:"generation,omitempty"`
-	Identity      *ResourceIdentity      `protobuf:"bytes,4,opt,name=identity,proto3" json:"identity,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *ScanRelationshipsRequest) Reset() {
-	*x = ScanRelationshipsRequest{}
-	mi := &file_kmgr_v1_object_proto_msgTypes[9]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ScanRelationshipsRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ScanRelationshipsRequest) ProtoMessage() {}
-
-func (x *ScanRelationshipsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_object_proto_msgTypes[9]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ScanRelationshipsRequest.ProtoReflect.Descriptor instead.
-func (*ScanRelationshipsRequest) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_object_proto_rawDescGZIP(), []int{9}
-}
-
-func (x *ScanRelationshipsRequest) GetContext() *RequestContext {
-	if x != nil {
-		return x.Context
-	}
-	return nil
-}
-
-func (x *ScanRelationshipsRequest) GetScanId() string {
-	if x != nil {
-		return x.ScanId
-	}
-	return ""
-}
-
-func (x *ScanRelationshipsRequest) GetGeneration() uint64 {
-	if x != nil {
-		return x.Generation
-	}
-	return 0
-}
-
-func (x *ScanRelationshipsRequest) GetIdentity() *ResourceIdentity {
-	if x != nil {
-		return x.Identity
-	}
-	return nil
-}
-
-type CancelRelationshipScanRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Context       *RequestContext        `protobuf:"bytes,1,opt,name=context,proto3" json:"context,omitempty"`
-	ScanId        string                 `protobuf:"bytes,2,opt,name=scan_id,json=scanId,proto3" json:"scan_id,omitempty"`
-	Generation    uint64                 `protobuf:"varint,3,opt,name=generation,proto3" json:"generation,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *CancelRelationshipScanRequest) Reset() {
-	*x = CancelRelationshipScanRequest{}
-	mi := &file_kmgr_v1_object_proto_msgTypes[10]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *CancelRelationshipScanRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*CancelRelationshipScanRequest) ProtoMessage() {}
-
-func (x *CancelRelationshipScanRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_object_proto_msgTypes[10]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use CancelRelationshipScanRequest.ProtoReflect.Descriptor instead.
-func (*CancelRelationshipScanRequest) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_object_proto_rawDescGZIP(), []int{10}
-}
-
-func (x *CancelRelationshipScanRequest) GetContext() *RequestContext {
-	if x != nil {
-		return x.Context
-	}
-	return nil
-}
-
-func (x *CancelRelationshipScanRequest) GetScanId() string {
-	if x != nil {
-		return x.ScanId
-	}
-	return ""
-}
-
-func (x *CancelRelationshipScanRequest) GetGeneration() uint64 {
-	if x != nil {
-		return x.Generation
-	}
-	return 0
-}
-
-type RelationshipScanProgress struct {
-	state            protoimpl.MessageState `protogen:"open.v1"`
-	ResourcesTotal   uint32                 `protobuf:"varint,1,opt,name=resources_total,json=resourcesTotal,proto3" json:"resources_total,omitempty"`
-	ResourcesScanned uint32                 `protobuf:"varint,2,opt,name=resources_scanned,json=resourcesScanned,proto3" json:"resources_scanned,omitempty"`
-	ObjectsExamined  uint64                 `protobuf:"varint,3,opt,name=objects_examined,json=objectsExamined,proto3" json:"objects_examined,omitempty"`
-	ResourcesFailed  uint32                 `protobuf:"varint,4,opt,name=resources_failed,json=resourcesFailed,proto3" json:"resources_failed,omitempty"`
-	CurrentResource  *ResourceType          `protobuf:"bytes,5,opt,name=current_resource,json=currentResource,proto3" json:"current_resource,omitempty"`
-	Complete         bool                   `protobuf:"varint,6,opt,name=complete,proto3" json:"complete,omitempty"`
-	// A completed scan remains potentially incomplete if discovery or any LIST
-	// was denied or failed. Completion means every discovered resource was
-	// attempted, not that the API server granted complete visibility.
-	PotentiallyIncomplete bool `protobuf:"varint,7,opt,name=potentially_incomplete,json=potentiallyIncomplete,proto3" json:"potentially_incomplete,omitempty"`
-	unknownFields         protoimpl.UnknownFields
-	sizeCache             protoimpl.SizeCache
-}
-
-func (x *RelationshipScanProgress) Reset() {
-	*x = RelationshipScanProgress{}
-	mi := &file_kmgr_v1_object_proto_msgTypes[11]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *RelationshipScanProgress) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*RelationshipScanProgress) ProtoMessage() {}
-
-func (x *RelationshipScanProgress) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_object_proto_msgTypes[11]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use RelationshipScanProgress.ProtoReflect.Descriptor instead.
-func (*RelationshipScanProgress) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_object_proto_rawDescGZIP(), []int{11}
-}
-
-func (x *RelationshipScanProgress) GetResourcesTotal() uint32 {
-	if x != nil {
-		return x.ResourcesTotal
-	}
-	return 0
-}
-
-func (x *RelationshipScanProgress) GetResourcesScanned() uint32 {
-	if x != nil {
-		return x.ResourcesScanned
-	}
-	return 0
-}
-
-func (x *RelationshipScanProgress) GetObjectsExamined() uint64 {
-	if x != nil {
-		return x.ObjectsExamined
-	}
-	return 0
-}
-
-func (x *RelationshipScanProgress) GetResourcesFailed() uint32 {
-	if x != nil {
-		return x.ResourcesFailed
-	}
-	return 0
-}
-
-func (x *RelationshipScanProgress) GetCurrentResource() *ResourceType {
-	if x != nil {
-		return x.CurrentResource
-	}
-	return nil
-}
-
-func (x *RelationshipScanProgress) GetComplete() bool {
-	if x != nil {
-		return x.Complete
-	}
-	return false
-}
-
-func (x *RelationshipScanProgress) GetPotentiallyIncomplete() bool {
-	if x != nil {
-		return x.PotentiallyIncomplete
-	}
-	return false
-}
-
-type RelationshipScanEvent struct {
-	state         protoimpl.MessageState    `protogen:"open.v1"`
-	Cursor        *StreamCursor             `protobuf:"bytes,1,opt,name=cursor,proto3" json:"cursor,omitempty"`
-	Relationships []*ResourceRelationship   `protobuf:"bytes,2,rep,name=relationships,proto3" json:"relationships,omitempty"`
-	Progress      *RelationshipScanProgress `protobuf:"bytes,3,opt,name=progress,proto3" json:"progress,omitempty"`
-	// A per-resource failure is non-terminal: scanning continues and the final
-	// progress explicitly reports that the result may be incomplete.
-	Warning       *StructuredError `protobuf:"bytes,4,opt,name=warning,proto3" json:"warning,omitempty"`
-	Error         *StructuredError `protobuf:"bytes,5,opt,name=error,proto3" json:"error,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *RelationshipScanEvent) Reset() {
-	*x = RelationshipScanEvent{}
-	mi := &file_kmgr_v1_object_proto_msgTypes[12]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *RelationshipScanEvent) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*RelationshipScanEvent) ProtoMessage() {}
-
-func (x *RelationshipScanEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_object_proto_msgTypes[12]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use RelationshipScanEvent.ProtoReflect.Descriptor instead.
-func (*RelationshipScanEvent) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_object_proto_rawDescGZIP(), []int{12}
-}
-
-func (x *RelationshipScanEvent) GetCursor() *StreamCursor {
-	if x != nil {
-		return x.Cursor
-	}
-	return nil
-}
-
-func (x *RelationshipScanEvent) GetRelationships() []*ResourceRelationship {
-	if x != nil {
-		return x.Relationships
-	}
-	return nil
-}
-
-func (x *RelationshipScanEvent) GetProgress() *RelationshipScanProgress {
-	if x != nil {
-		return x.Progress
-	}
-	return nil
-}
-
-func (x *RelationshipScanEvent) GetWarning() *StructuredError {
-	if x != nil {
-		return x.Warning
-	}
-	return nil
-}
-
-func (x *RelationshipScanEvent) GetError() *StructuredError {
-	if x != nil {
-		return x.Error
-	}
-	return nil
-}
-
 // value is intentionally bytes. For Secrets, Go decodes Kubernetes base64
 // before sending and re-encodes on mutation. These messages are sensitive and
 // must not be logged or persisted by either process.
@@ -1372,7 +793,7 @@ type DataEntry struct {
 
 func (x *DataEntry) Reset() {
 	*x = DataEntry{}
-	mi := &file_kmgr_v1_object_proto_msgTypes[13]
+	mi := &file_kmgr_v1_object_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1384,7 +805,7 @@ func (x *DataEntry) String() string {
 func (*DataEntry) ProtoMessage() {}
 
 func (x *DataEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_object_proto_msgTypes[13]
+	mi := &file_kmgr_v1_object_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1397,7 +818,7 @@ func (x *DataEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DataEntry.ProtoReflect.Descriptor instead.
 func (*DataEntry) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_object_proto_rawDescGZIP(), []int{13}
+	return file_kmgr_v1_object_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *DataEntry) GetKey() string {
@@ -1445,7 +866,7 @@ type GetDataRequest struct {
 
 func (x *GetDataRequest) Reset() {
 	*x = GetDataRequest{}
-	mi := &file_kmgr_v1_object_proto_msgTypes[14]
+	mi := &file_kmgr_v1_object_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1457,7 +878,7 @@ func (x *GetDataRequest) String() string {
 func (*GetDataRequest) ProtoMessage() {}
 
 func (x *GetDataRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_object_proto_msgTypes[14]
+	mi := &file_kmgr_v1_object_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1470,7 +891,7 @@ func (x *GetDataRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetDataRequest.ProtoReflect.Descriptor instead.
 func (*GetDataRequest) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_object_proto_rawDescGZIP(), []int{14}
+	return file_kmgr_v1_object_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *GetDataRequest) GetContext() *RequestContext {
@@ -1501,7 +922,7 @@ type GetDataResponse struct {
 
 func (x *GetDataResponse) Reset() {
 	*x = GetDataResponse{}
-	mi := &file_kmgr_v1_object_proto_msgTypes[15]
+	mi := &file_kmgr_v1_object_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1513,7 +934,7 @@ func (x *GetDataResponse) String() string {
 func (*GetDataResponse) ProtoMessage() {}
 
 func (x *GetDataResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_kmgr_v1_object_proto_msgTypes[15]
+	mi := &file_kmgr_v1_object_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1526,7 +947,7 @@ func (x *GetDataResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetDataResponse.ProtoReflect.Descriptor instead.
 func (*GetDataResponse) Descriptor() ([]byte, []int) {
-	return file_kmgr_v1_object_proto_rawDescGZIP(), []int{15}
+	return file_kmgr_v1_object_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *GetDataResponse) GetRequestId() string {
@@ -1629,54 +1050,7 @@ const file_kmgr_v1_object_proto_rawDesc = "" +
 	"\x06cursor\x18\x01 \x01(\v2\x15.kmgr.v1.StreamCursorR\x06cursor\x12,\n" +
 	"\x04type\x18\x02 \x01(\x0e2\x18.kmgr.v1.ObjectEventTypeR\x04type\x122\n" +
 	"\x06object\x18\x03 \x01(\v2\x1a.kmgr.v1.GetObjectResponseR\x06object\x12.\n" +
-	"\x05error\x18\x04 \x01(\v2\x18.kmgr.v1.StructuredErrorR\x05error\"\xd5\x01\n" +
-	"\x17GetRelationshipsRequest\x121\n" +
-	"\acontext\x18\x01 \x01(\v2\x17.kmgr.v1.RequestContextR\acontext\x125\n" +
-	"\bidentity\x18\x02 \x01(\v2\x19.kmgr.v1.ResourceIdentityR\bidentity\x12%\n" +
-	"\x0einclude_owners\x18\x03 \x01(\bR\rincludeOwners\x12)\n" +
-	"\x10include_children\x18\x04 \x01(\bR\x0fincludeChildren\"\xff\x01\n" +
-	"\x14ResourceRelationship\x12-\n" +
-	"\x04kind\x18\x01 \x01(\x0e2\x19.kmgr.v1.RelationshipKindR\x04kind\x125\n" +
-	"\bidentity\x18\x02 \x01(\v2\x19.kmgr.v1.ResourceIdentityR\bidentity\x12\x14\n" +
-	"\x05label\x18\x03 \x01(\tR\x05label\x12\x14\n" +
-	"\x05stale\x18\x04 \x01(\bR\x05stale\x125\n" +
-	"\x16potentially_incomplete\x18\x05 \x01(\bR\x15potentiallyIncomplete\x12\x1e\n" +
-	"\n" +
-	"controller\x18\x06 \x01(\bR\n" +
-	"controller\"\xf6\x01\n" +
-	"\x18GetRelationshipsResponse\x12\x1d\n" +
-	"\n" +
-	"request_id\x18\x01 \x01(\tR\trequestId\x12C\n" +
-	"\rrelationships\x18\x02 \x03(\v2\x1d.kmgr.v1.ResourceRelationshipR\rrelationships\x12.\n" +
-	"\x05error\x18\x03 \x01(\v2\x18.kmgr.v1.StructuredErrorR\x05error\x12F\n" +
-	"\x1fchildren_potentially_incomplete\x18\x04 \x01(\bR\x1dchildrenPotentiallyIncomplete\"\xbd\x01\n" +
-	"\x18ScanRelationshipsRequest\x121\n" +
-	"\acontext\x18\x01 \x01(\v2\x17.kmgr.v1.RequestContextR\acontext\x12\x17\n" +
-	"\ascan_id\x18\x02 \x01(\tR\x06scanId\x12\x1e\n" +
-	"\n" +
-	"generation\x18\x03 \x01(\x04R\n" +
-	"generation\x125\n" +
-	"\bidentity\x18\x04 \x01(\v2\x19.kmgr.v1.ResourceIdentityR\bidentity\"\x8b\x01\n" +
-	"\x1dCancelRelationshipScanRequest\x121\n" +
-	"\acontext\x18\x01 \x01(\v2\x17.kmgr.v1.RequestContextR\acontext\x12\x17\n" +
-	"\ascan_id\x18\x02 \x01(\tR\x06scanId\x12\x1e\n" +
-	"\n" +
-	"generation\x18\x03 \x01(\x04R\n" +
-	"generation\"\xdb\x02\n" +
-	"\x18RelationshipScanProgress\x12'\n" +
-	"\x0fresources_total\x18\x01 \x01(\rR\x0eresourcesTotal\x12+\n" +
-	"\x11resources_scanned\x18\x02 \x01(\rR\x10resourcesScanned\x12)\n" +
-	"\x10objects_examined\x18\x03 \x01(\x04R\x0fobjectsExamined\x12)\n" +
-	"\x10resources_failed\x18\x04 \x01(\rR\x0fresourcesFailed\x12@\n" +
-	"\x10current_resource\x18\x05 \x01(\v2\x15.kmgr.v1.ResourceTypeR\x0fcurrentResource\x12\x1a\n" +
-	"\bcomplete\x18\x06 \x01(\bR\bcomplete\x125\n" +
-	"\x16potentially_incomplete\x18\a \x01(\bR\x15potentiallyIncomplete\"\xae\x02\n" +
-	"\x15RelationshipScanEvent\x12-\n" +
-	"\x06cursor\x18\x01 \x01(\v2\x15.kmgr.v1.StreamCursorR\x06cursor\x12C\n" +
-	"\rrelationships\x18\x02 \x03(\v2\x1d.kmgr.v1.ResourceRelationshipR\rrelationships\x12=\n" +
-	"\bprogress\x18\x03 \x01(\v2!.kmgr.v1.RelationshipScanProgressR\bprogress\x122\n" +
-	"\awarning\x18\x04 \x01(\v2\x18.kmgr.v1.StructuredErrorR\awarning\x12.\n" +
-	"\x05error\x18\x05 \x01(\v2\x18.kmgr.v1.StructuredErrorR\x05error\"\x9f\x01\n" +
+	"\x05error\x18\x04 \x01(\v2\x18.kmgr.v1.StructuredErrorR\x05error\"\x9f\x01\n" +
 	"\tDataEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12*\n" +
 	"\x04kind\x18\x02 \x01(\x0e2\x16.kmgr.v1.DataEntryKindR\x04kind\x12\x14\n" +
@@ -1703,12 +1077,7 @@ const file_kmgr_v1_object_proto_rawDesc = "" +
 	"\x1dOBJECT_EVENT_TYPE_UNSPECIFIED\x10\x00\x12\x1d\n" +
 	"\x19OBJECT_EVENT_TYPE_UPDATED\x10\x01\x12\x1d\n" +
 	"\x19OBJECT_EVENT_TYPE_DELETED\x10\x02\x12\x1c\n" +
-	"\x18OBJECT_EVENT_TYPE_STATUS\x10\x03*\x8e\x01\n" +
-	"\x10RelationshipKind\x12!\n" +
-	"\x1dRELATIONSHIP_KIND_UNSPECIFIED\x10\x00\x12\x1b\n" +
-	"\x17RELATIONSHIP_KIND_OWNER\x10\x01\x12\x1b\n" +
-	"\x17RELATIONSHIP_KIND_CHILD\x10\x02\x12\x1d\n" +
-	"\x19RELATIONSHIP_KIND_RELATED\x10\x03*f\n" +
+	"\x18OBJECT_EVENT_TYPE_STATUS\x10\x03*f\n" +
 	"\rDataEntryKind\x12\x1f\n" +
 	"\x1bDATA_ENTRY_KIND_UNSPECIFIED\x10\x00\x12\x18\n" +
 	"\x14DATA_ENTRY_KIND_TEXT\x10\x01\x12\x1a\n" +
@@ -1716,13 +1085,10 @@ const file_kmgr_v1_object_proto_rawDesc = "" +
 	"\x1cSummaryTimestampPresentation\x12.\n" +
 	"*SUMMARY_TIMESTAMP_PRESENTATION_UNSPECIFIED\x10\x00\x120\n" +
 	",SUMMARY_TIMESTAMP_PRESENTATION_ELAPSED_SINCE\x10\x01\x12.\n" +
-	"*SUMMARY_TIMESTAMP_PRESENTATION_OCCURRED_AT\x10\x022\xe4\x03\n" +
+	"*SUMMARY_TIMESTAMP_PRESENTATION_OCCURRED_AT\x10\x022\xd5\x01\n" +
 	"\rObjectService\x12B\n" +
 	"\tGetObject\x12\x19.kmgr.v1.GetObjectRequest\x1a\x1a.kmgr.v1.GetObjectResponse\x12B\n" +
-	"\vWatchObject\x12\x1b.kmgr.v1.WatchObjectRequest\x1a\x14.kmgr.v1.ObjectEvent0\x01\x12W\n" +
-	"\x10GetRelationships\x12 .kmgr.v1.GetRelationshipsRequest\x1a!.kmgr.v1.GetRelationshipsResponse\x12X\n" +
-	"\x11ScanRelationships\x12!.kmgr.v1.ScanRelationshipsRequest\x1a\x1e.kmgr.v1.RelationshipScanEvent0\x01\x12Z\n" +
-	"\x16CancelRelationshipScan\x12&.kmgr.v1.CancelRelationshipScanRequest\x1a\x18.kmgr.v1.Acknowledgement\x12<\n" +
+	"\vWatchObject\x12\x1b.kmgr.v1.WatchObjectRequest\x1a\x14.kmgr.v1.ObjectEvent0\x01\x12<\n" +
 	"\aGetData\x12\x17.kmgr.v1.GetDataRequest\x1a\x18.kmgr.v1.GetDataResponseB>Z1github.com/charlie0129/kmgr/gen/go/kmgr/v1;kmgrv1\xba\x02\bKmgr_V1_b\x06proto3"
 
 var (
@@ -1737,98 +1103,67 @@ func file_kmgr_v1_object_proto_rawDescGZIP() []byte {
 	return file_kmgr_v1_object_proto_rawDescData
 }
 
-var file_kmgr_v1_object_proto_enumTypes = make([]protoimpl.EnumInfo, 5)
-var file_kmgr_v1_object_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
+var file_kmgr_v1_object_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
+var file_kmgr_v1_object_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
 var file_kmgr_v1_object_proto_goTypes = []any{
-	(PodContainerKind)(0),                 // 0: kmgr.v1.PodContainerKind
-	(ObjectEventType)(0),                  // 1: kmgr.v1.ObjectEventType
-	(RelationshipKind)(0),                 // 2: kmgr.v1.RelationshipKind
-	(DataEntryKind)(0),                    // 3: kmgr.v1.DataEntryKind
-	(SummaryTimestampPresentation)(0),     // 4: kmgr.v1.SummaryTimestampPresentation
-	(*GetObjectRequest)(nil),              // 5: kmgr.v1.GetObjectRequest
-	(*ObjectSummaryField)(nil),            // 6: kmgr.v1.ObjectSummaryField
-	(*PodContainerDetail)(nil),            // 7: kmgr.v1.PodContainerDetail
-	(*GetObjectResponse)(nil),             // 8: kmgr.v1.GetObjectResponse
-	(*WatchObjectRequest)(nil),            // 9: kmgr.v1.WatchObjectRequest
-	(*ObjectEvent)(nil),                   // 10: kmgr.v1.ObjectEvent
-	(*GetRelationshipsRequest)(nil),       // 11: kmgr.v1.GetRelationshipsRequest
-	(*ResourceRelationship)(nil),          // 12: kmgr.v1.ResourceRelationship
-	(*GetRelationshipsResponse)(nil),      // 13: kmgr.v1.GetRelationshipsResponse
-	(*ScanRelationshipsRequest)(nil),      // 14: kmgr.v1.ScanRelationshipsRequest
-	(*CancelRelationshipScanRequest)(nil), // 15: kmgr.v1.CancelRelationshipScanRequest
-	(*RelationshipScanProgress)(nil),      // 16: kmgr.v1.RelationshipScanProgress
-	(*RelationshipScanEvent)(nil),         // 17: kmgr.v1.RelationshipScanEvent
-	(*DataEntry)(nil),                     // 18: kmgr.v1.DataEntry
-	(*GetDataRequest)(nil),                // 19: kmgr.v1.GetDataRequest
-	(*GetDataResponse)(nil),               // 20: kmgr.v1.GetDataResponse
-	(*RequestContext)(nil),                // 21: kmgr.v1.RequestContext
-	(*ResourceIdentity)(nil),              // 22: kmgr.v1.ResourceIdentity
-	(CellSeverity)(0),                     // 23: kmgr.v1.CellSeverity
-	(*ResourceUsageValue)(nil),            // 24: kmgr.v1.ResourceUsageValue
-	(*StringMapEntry)(nil),                // 25: kmgr.v1.StringMapEntry
-	(*StructuredError)(nil),               // 26: kmgr.v1.StructuredError
-	(*StreamCursor)(nil),                  // 27: kmgr.v1.StreamCursor
-	(*ResourceType)(nil),                  // 28: kmgr.v1.ResourceType
-	(*Acknowledgement)(nil),               // 29: kmgr.v1.Acknowledgement
+	(PodContainerKind)(0),             // 0: kmgr.v1.PodContainerKind
+	(ObjectEventType)(0),              // 1: kmgr.v1.ObjectEventType
+	(DataEntryKind)(0),                // 2: kmgr.v1.DataEntryKind
+	(SummaryTimestampPresentation)(0), // 3: kmgr.v1.SummaryTimestampPresentation
+	(*GetObjectRequest)(nil),          // 4: kmgr.v1.GetObjectRequest
+	(*ObjectSummaryField)(nil),        // 5: kmgr.v1.ObjectSummaryField
+	(*PodContainerDetail)(nil),        // 6: kmgr.v1.PodContainerDetail
+	(*GetObjectResponse)(nil),         // 7: kmgr.v1.GetObjectResponse
+	(*WatchObjectRequest)(nil),        // 8: kmgr.v1.WatchObjectRequest
+	(*ObjectEvent)(nil),               // 9: kmgr.v1.ObjectEvent
+	(*DataEntry)(nil),                 // 10: kmgr.v1.DataEntry
+	(*GetDataRequest)(nil),            // 11: kmgr.v1.GetDataRequest
+	(*GetDataResponse)(nil),           // 12: kmgr.v1.GetDataResponse
+	(*RequestContext)(nil),            // 13: kmgr.v1.RequestContext
+	(*ResourceIdentity)(nil),          // 14: kmgr.v1.ResourceIdentity
+	(CellSeverity)(0),                 // 15: kmgr.v1.CellSeverity
+	(*ResourceUsageValue)(nil),        // 16: kmgr.v1.ResourceUsageValue
+	(*StringMapEntry)(nil),            // 17: kmgr.v1.StringMapEntry
+	(*StructuredError)(nil),           // 18: kmgr.v1.StructuredError
+	(*StreamCursor)(nil),              // 19: kmgr.v1.StreamCursor
 }
 var file_kmgr_v1_object_proto_depIdxs = []int32{
-	21, // 0: kmgr.v1.GetObjectRequest.context:type_name -> kmgr.v1.RequestContext
-	22, // 1: kmgr.v1.GetObjectRequest.identity:type_name -> kmgr.v1.ResourceIdentity
-	23, // 2: kmgr.v1.ObjectSummaryField.severity:type_name -> kmgr.v1.CellSeverity
-	4,  // 3: kmgr.v1.ObjectSummaryField.timestamp_presentation:type_name -> kmgr.v1.SummaryTimestampPresentation
+	13, // 0: kmgr.v1.GetObjectRequest.context:type_name -> kmgr.v1.RequestContext
+	14, // 1: kmgr.v1.GetObjectRequest.identity:type_name -> kmgr.v1.ResourceIdentity
+	15, // 2: kmgr.v1.ObjectSummaryField.severity:type_name -> kmgr.v1.CellSeverity
+	3,  // 3: kmgr.v1.ObjectSummaryField.timestamp_presentation:type_name -> kmgr.v1.SummaryTimestampPresentation
 	0,  // 4: kmgr.v1.PodContainerDetail.kind:type_name -> kmgr.v1.PodContainerKind
-	23, // 5: kmgr.v1.PodContainerDetail.status_severity:type_name -> kmgr.v1.CellSeverity
-	24, // 6: kmgr.v1.PodContainerDetail.metrics:type_name -> kmgr.v1.ResourceUsageValue
-	22, // 7: kmgr.v1.GetObjectResponse.identity:type_name -> kmgr.v1.ResourceIdentity
-	6,  // 8: kmgr.v1.GetObjectResponse.summary_fields:type_name -> kmgr.v1.ObjectSummaryField
-	25, // 9: kmgr.v1.GetObjectResponse.labels:type_name -> kmgr.v1.StringMapEntry
-	25, // 10: kmgr.v1.GetObjectResponse.annotations:type_name -> kmgr.v1.StringMapEntry
-	26, // 11: kmgr.v1.GetObjectResponse.error:type_name -> kmgr.v1.StructuredError
-	7,  // 12: kmgr.v1.GetObjectResponse.containers:type_name -> kmgr.v1.PodContainerDetail
-	21, // 13: kmgr.v1.WatchObjectRequest.context:type_name -> kmgr.v1.RequestContext
-	22, // 14: kmgr.v1.WatchObjectRequest.identity:type_name -> kmgr.v1.ResourceIdentity
-	27, // 15: kmgr.v1.ObjectEvent.cursor:type_name -> kmgr.v1.StreamCursor
+	15, // 5: kmgr.v1.PodContainerDetail.status_severity:type_name -> kmgr.v1.CellSeverity
+	16, // 6: kmgr.v1.PodContainerDetail.metrics:type_name -> kmgr.v1.ResourceUsageValue
+	14, // 7: kmgr.v1.GetObjectResponse.identity:type_name -> kmgr.v1.ResourceIdentity
+	5,  // 8: kmgr.v1.GetObjectResponse.summary_fields:type_name -> kmgr.v1.ObjectSummaryField
+	17, // 9: kmgr.v1.GetObjectResponse.labels:type_name -> kmgr.v1.StringMapEntry
+	17, // 10: kmgr.v1.GetObjectResponse.annotations:type_name -> kmgr.v1.StringMapEntry
+	18, // 11: kmgr.v1.GetObjectResponse.error:type_name -> kmgr.v1.StructuredError
+	6,  // 12: kmgr.v1.GetObjectResponse.containers:type_name -> kmgr.v1.PodContainerDetail
+	13, // 13: kmgr.v1.WatchObjectRequest.context:type_name -> kmgr.v1.RequestContext
+	14, // 14: kmgr.v1.WatchObjectRequest.identity:type_name -> kmgr.v1.ResourceIdentity
+	19, // 15: kmgr.v1.ObjectEvent.cursor:type_name -> kmgr.v1.StreamCursor
 	1,  // 16: kmgr.v1.ObjectEvent.type:type_name -> kmgr.v1.ObjectEventType
-	8,  // 17: kmgr.v1.ObjectEvent.object:type_name -> kmgr.v1.GetObjectResponse
-	26, // 18: kmgr.v1.ObjectEvent.error:type_name -> kmgr.v1.StructuredError
-	21, // 19: kmgr.v1.GetRelationshipsRequest.context:type_name -> kmgr.v1.RequestContext
-	22, // 20: kmgr.v1.GetRelationshipsRequest.identity:type_name -> kmgr.v1.ResourceIdentity
-	2,  // 21: kmgr.v1.ResourceRelationship.kind:type_name -> kmgr.v1.RelationshipKind
-	22, // 22: kmgr.v1.ResourceRelationship.identity:type_name -> kmgr.v1.ResourceIdentity
-	12, // 23: kmgr.v1.GetRelationshipsResponse.relationships:type_name -> kmgr.v1.ResourceRelationship
-	26, // 24: kmgr.v1.GetRelationshipsResponse.error:type_name -> kmgr.v1.StructuredError
-	21, // 25: kmgr.v1.ScanRelationshipsRequest.context:type_name -> kmgr.v1.RequestContext
-	22, // 26: kmgr.v1.ScanRelationshipsRequest.identity:type_name -> kmgr.v1.ResourceIdentity
-	21, // 27: kmgr.v1.CancelRelationshipScanRequest.context:type_name -> kmgr.v1.RequestContext
-	28, // 28: kmgr.v1.RelationshipScanProgress.current_resource:type_name -> kmgr.v1.ResourceType
-	27, // 29: kmgr.v1.RelationshipScanEvent.cursor:type_name -> kmgr.v1.StreamCursor
-	12, // 30: kmgr.v1.RelationshipScanEvent.relationships:type_name -> kmgr.v1.ResourceRelationship
-	16, // 31: kmgr.v1.RelationshipScanEvent.progress:type_name -> kmgr.v1.RelationshipScanProgress
-	26, // 32: kmgr.v1.RelationshipScanEvent.warning:type_name -> kmgr.v1.StructuredError
-	26, // 33: kmgr.v1.RelationshipScanEvent.error:type_name -> kmgr.v1.StructuredError
-	3,  // 34: kmgr.v1.DataEntry.kind:type_name -> kmgr.v1.DataEntryKind
-	21, // 35: kmgr.v1.GetDataRequest.context:type_name -> kmgr.v1.RequestContext
-	22, // 36: kmgr.v1.GetDataRequest.identity:type_name -> kmgr.v1.ResourceIdentity
-	22, // 37: kmgr.v1.GetDataResponse.identity:type_name -> kmgr.v1.ResourceIdentity
-	18, // 38: kmgr.v1.GetDataResponse.entries:type_name -> kmgr.v1.DataEntry
-	26, // 39: kmgr.v1.GetDataResponse.error:type_name -> kmgr.v1.StructuredError
-	5,  // 40: kmgr.v1.ObjectService.GetObject:input_type -> kmgr.v1.GetObjectRequest
-	9,  // 41: kmgr.v1.ObjectService.WatchObject:input_type -> kmgr.v1.WatchObjectRequest
-	11, // 42: kmgr.v1.ObjectService.GetRelationships:input_type -> kmgr.v1.GetRelationshipsRequest
-	14, // 43: kmgr.v1.ObjectService.ScanRelationships:input_type -> kmgr.v1.ScanRelationshipsRequest
-	15, // 44: kmgr.v1.ObjectService.CancelRelationshipScan:input_type -> kmgr.v1.CancelRelationshipScanRequest
-	19, // 45: kmgr.v1.ObjectService.GetData:input_type -> kmgr.v1.GetDataRequest
-	8,  // 46: kmgr.v1.ObjectService.GetObject:output_type -> kmgr.v1.GetObjectResponse
-	10, // 47: kmgr.v1.ObjectService.WatchObject:output_type -> kmgr.v1.ObjectEvent
-	13, // 48: kmgr.v1.ObjectService.GetRelationships:output_type -> kmgr.v1.GetRelationshipsResponse
-	17, // 49: kmgr.v1.ObjectService.ScanRelationships:output_type -> kmgr.v1.RelationshipScanEvent
-	29, // 50: kmgr.v1.ObjectService.CancelRelationshipScan:output_type -> kmgr.v1.Acknowledgement
-	20, // 51: kmgr.v1.ObjectService.GetData:output_type -> kmgr.v1.GetDataResponse
-	46, // [46:52] is the sub-list for method output_type
-	40, // [40:46] is the sub-list for method input_type
-	40, // [40:40] is the sub-list for extension type_name
-	40, // [40:40] is the sub-list for extension extendee
-	0,  // [0:40] is the sub-list for field type_name
+	7,  // 17: kmgr.v1.ObjectEvent.object:type_name -> kmgr.v1.GetObjectResponse
+	18, // 18: kmgr.v1.ObjectEvent.error:type_name -> kmgr.v1.StructuredError
+	2,  // 19: kmgr.v1.DataEntry.kind:type_name -> kmgr.v1.DataEntryKind
+	13, // 20: kmgr.v1.GetDataRequest.context:type_name -> kmgr.v1.RequestContext
+	14, // 21: kmgr.v1.GetDataRequest.identity:type_name -> kmgr.v1.ResourceIdentity
+	14, // 22: kmgr.v1.GetDataResponse.identity:type_name -> kmgr.v1.ResourceIdentity
+	10, // 23: kmgr.v1.GetDataResponse.entries:type_name -> kmgr.v1.DataEntry
+	18, // 24: kmgr.v1.GetDataResponse.error:type_name -> kmgr.v1.StructuredError
+	4,  // 25: kmgr.v1.ObjectService.GetObject:input_type -> kmgr.v1.GetObjectRequest
+	8,  // 26: kmgr.v1.ObjectService.WatchObject:input_type -> kmgr.v1.WatchObjectRequest
+	11, // 27: kmgr.v1.ObjectService.GetData:input_type -> kmgr.v1.GetDataRequest
+	7,  // 28: kmgr.v1.ObjectService.GetObject:output_type -> kmgr.v1.GetObjectResponse
+	9,  // 29: kmgr.v1.ObjectService.WatchObject:output_type -> kmgr.v1.ObjectEvent
+	12, // 30: kmgr.v1.ObjectService.GetData:output_type -> kmgr.v1.GetDataResponse
+	28, // [28:31] is the sub-list for method output_type
+	25, // [25:28] is the sub-list for method input_type
+	25, // [25:25] is the sub-list for extension type_name
+	25, // [25:25] is the sub-list for extension extendee
+	0,  // [0:25] is the sub-list for field type_name
 }
 
 func init() { file_kmgr_v1_object_proto_init() }
@@ -1842,8 +1177,8 @@ func file_kmgr_v1_object_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_kmgr_v1_object_proto_rawDesc), len(file_kmgr_v1_object_proto_rawDesc)),
-			NumEnums:      5,
-			NumMessages:   16,
+			NumEnums:      4,
+			NumMessages:   9,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

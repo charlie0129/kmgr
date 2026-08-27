@@ -121,25 +121,6 @@ private struct LoadedMutationDetailProvider: ObjectDetailProviding {
         AsyncThrowingStream { $0.finish() }
     }
 
-    func getRelationships(
-        identity: ResourceIdentity,
-        includeChildren: Bool
-    ) async throws -> ObjectRelationships {
-        ObjectRelationships(values: [], childrenPotentiallyIncomplete: true)
-    }
-
-    func scanRelationships(
-        identity: ResourceIdentity
-    ) -> AsyncThrowingStream<RelationshipScanMessage, Error> {
-        AsyncThrowingStream { $0.finish() }
-    }
-
-    func cancelRelationshipScan(
-        sessionID: String,
-        scanID: String,
-        generation: UInt64
-    ) async {}
-
     func getData(identity: ResourceIdentity) async throws -> ObjectData {
         throw CancellationError()
     }

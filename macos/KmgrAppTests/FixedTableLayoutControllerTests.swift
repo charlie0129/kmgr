@@ -55,7 +55,7 @@ struct FixedTableLayoutControllerTests {
         expectFixedControllerLayout(containerLayout, in: containerTable)
     }
 
-    @Test("Details Summary and Relationships restore independently")
+    @Test("Details Summary restores its fixed table layout")
     func detailsTables() throws {
         let fixture = try fixedControllerLayoutFixture()
         defer { fixture.defaults.removePersistentDomain(forName: fixture.suite) }
@@ -63,19 +63,9 @@ struct FixedTableLayoutControllerTests {
             .init(id: "value", width: 560),
             .init(id: "field", width: 245),
         ])
-        let relationshipsLayout = TableLayout(columns: [
-            .init(id: "name", width: 315),
-            .init(id: "kind", width: 125),
-            .init(id: "resource", width: 170),
-            .init(id: "namespace", width: 165),
-            .init(id: "state", width: 120),
-        ])
         #expect(fixture.store.set(summaryLayout, for: .objectSummary))
-        #expect(fixture.store.set(
-            relationshipsLayout, for: .objectRelationships
-        ))
 
-        let controller = ObjectDetailViewController(
+        let controller = ObjectSummaryViewController(
             identity: fixedControllerIdentity(resource: "deployments", group: "apps"),
             provider: FixedControllerObjectProvider(),
             tableLayoutStore: fixture.store
@@ -84,15 +74,6 @@ struct FixedTableLayoutControllerTests {
             labeled: "Kubernetes object summary", beneath: controller.view
         )
         expectFixedControllerLayout(summaryLayout, in: summary)
-
-        let segmented = try #require(fixedControllerDescendants(of: controller.view)
-            .compactMap { $0 as? NSSegmentedControl }.first)
-        segmented.selectedSegment = ObjectDetailInitialTab.relationships.segment
-        _ = segmented.sendAction(segmented.action, to: segmented.target)
-        let relationships = try fixedControllerTable(
-            labeled: "Kubernetes object relationships", beneath: controller.view
-        )
-        expectFixedControllerLayout(relationshipsLayout, in: relationships)
     }
 
     @Test("canonical Data editor restores its key table")
@@ -435,25 +416,6 @@ private struct FixedControllerObjectProvider: ObjectDetailProviding {
     ) -> AsyncThrowingStream<ObjectWatchEvent, Error> {
         AsyncThrowingStream { $0.finish() }
     }
-
-    func getRelationships(
-        identity: ResourceIdentity,
-        includeChildren: Bool
-    ) async throws -> ObjectRelationships {
-        ObjectRelationships(values: [], childrenPotentiallyIncomplete: true)
-    }
-
-    func scanRelationships(
-        identity: ResourceIdentity
-    ) -> AsyncThrowingStream<RelationshipScanMessage, Error> {
-        AsyncThrowingStream { $0.finish() }
-    }
-
-    func cancelRelationshipScan(
-        sessionID: String,
-        scanID: String,
-        generation: UInt64
-    ) async {}
 
     func getData(identity: ResourceIdentity) async throws -> ObjectData {
         throw CancellationError()

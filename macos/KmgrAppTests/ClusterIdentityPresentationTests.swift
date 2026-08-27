@@ -190,16 +190,6 @@ struct ClusterIdentityPresentationTests {
         let session = identitySession()
         let identity = deploymentIdentity()
         let expected = ClusterIdentityPresentation(session: session).targetDetails(identity)
-        let detail = ObjectDetailViewController(
-            identity: identity,
-            provider: IdentityNoopObjectDetailProvider(),
-            initialTab: .yaml,
-            session: session
-        )
-
-        #expect(detail.mutationConfirmationIdentityText == expected)
-        #expect(detail.confirmationInformativeText(note: "Delete key settings?") ==
-            "\(expected)\n\nDelete key settings?")
         #expect(ResourceMutationWindowController.confirmationInformativeText(
             session: session,
             identity: identity,
@@ -541,25 +531,6 @@ private struct IdentityNoopObjectDetailProvider: ObjectDetailProviding {
     ) -> AsyncThrowingStream<ObjectWatchEvent, Error> {
         AsyncThrowingStream { $0.finish() }
     }
-
-    func getRelationships(
-        identity: ResourceIdentity,
-        includeChildren: Bool
-    ) async throws -> ObjectRelationships {
-        ObjectRelationships(values: [], childrenPotentiallyIncomplete: true)
-    }
-
-    func scanRelationships(
-        identity: ResourceIdentity
-    ) -> AsyncThrowingStream<RelationshipScanMessage, Error> {
-        AsyncThrowingStream { $0.finish() }
-    }
-
-    func cancelRelationshipScan(
-        sessionID: String,
-        scanID: String,
-        generation: UInt64
-    ) async {}
 
     func getData(identity: ResourceIdentity) async throws -> ObjectData {
         throw CancellationError()

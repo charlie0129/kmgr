@@ -63,7 +63,6 @@ public struct ResourceNavigationState: Hashable, Codable, Sendable {
 
 public enum WorkspaceDestination: Hashable, Codable, Sendable {
     case resource(ResourceNavigationState)
-    case object(ResourceIdentity, returnState: ResourceNavigationState)
     case subresource(ResourceIdentity, returnState: ResourceNavigationState)
 }
 
@@ -165,9 +164,6 @@ public struct WorkspaceNavigationHistory: Hashable, Codable, Sendable {
             switch destination {
             case .resource:
                 return destination
-            case .object(var identity, let returnState):
-                identity.clusterSessionID = sessionID
-                return .object(identity, returnState: returnState)
             case .subresource(var identity, let returnState):
                 identity.clusterSessionID = sessionID
                 return .subresource(identity, returnState: returnState)
