@@ -213,8 +213,43 @@ func TestProjectorFiltersAndSortsTypedValues(t *testing.T) {
 	if rows[0].GetCells()[2].GetIntegerValue() != 9 {
 		t.Fatalf("restart typed value = %v", rows[0].GetCells()[2].GetTypedValue())
 	}
-	if rows[0].GetCells()[4].GetTimestampUnixMs() == 0 {
-		t.Fatal("age has no typed timestamp")
+	if rows[0].GetCells()[4].GetNumberValue() != 7200 {
+		t.Fatalf("age typed value = %v, want 7200 seconds", rows[0].GetCells()[4].GetTypedValue())
+	}
+}
+
+func TestRelativeAgeColumnSortMatchesDisplayedAge(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 8, 13, 10, 0, 0, 0, time.UTC)
+	objects := []*unstructured.Unstructured{
+		pod("uid-old", "team-a", "old", "Running", 0, nil, now.Add(-72*time.Hour)),
+		pod("uid-new", "team-a", "new", "Running", 0, nil, now.Add(-5*time.Minute)),
+	}
+	directions := map[string]bool{"ascending": false, "descending": true}
+	want := map[string][]string{
+		"ascending":  {"uid-new", "uid-old"},
+		"descending": {"uid-old", "uid-new"},
+	}
+	for name, descending := range directions {
+		projector, err := NewProjector(ProjectionSpec{
+			ClusterSessionID: "session-a",
+			Resource:         ResourceType{Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true},
+			NamespaceScope:   NamespaceScope{All: true},
+			ColumnIDs:        []string{"age"},
+			Sort:             []SortDescriptor{{ColumnID: "age", Descending: descending}},
+			Now:              now,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rows := projector.Project(objects)
+		got := []string{rows[0].GetIdentity().GetUid(), rows[1].GetIdentity().GetUid()}
+		if !slices.Equal(got, want[name]) {
+			t.Fatalf("%s age order = %v, want %v", name, got, want[name])
+		}
+		if rows[0].GetCells()[0].GetDisplayText() != "5m" && rows[0].GetCells()[0].GetDisplayText() != "3d" {
+			t.Fatalf("age display text = %q, want a formatted age", rows[0].GetCells()[0].GetDisplayText())
+		}
 	}
 }
 

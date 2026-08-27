@@ -62,10 +62,11 @@ func TestProjectTableCellsUsesTypedServerValues(t *testing.T) {
 	}
 	_, projected := projectTableSchema(columns)
 	updated := "2026-08-18T08:00:00Z"
-	cells := projectTableCells(projected, []any{float64(7), "0.75", true, "1500m", updated}, time.Unix(0, 0))
+	updatedTime := time.Date(2026, 8, 18, 8, 0, 0, 0, time.UTC)
+	cells := projectTableCells(projected, []any{float64(7), "0.75", true, "1500m", updated}, updatedTime.Add(90*time.Second))
 	if len(cells) != 5 || cells[0].GetIntegerValue() != 7 || cells[1].GetNumberValue() != 0.75 ||
 		!cells[2].GetBoolValue() || cells[3].GetQuantityValue().GetExact() != "1500m" ||
-		cells[4].GetTimestampUnixMs() != time.Date(2026, 8, 18, 8, 0, 0, 0, time.UTC).UnixMilli() {
+		cells[4].GetNumberValue() != 90 {
 		t.Fatalf("typed Table cells = %#v", cells)
 	}
 }

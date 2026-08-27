@@ -429,12 +429,17 @@ func setNativeBoolean(cell *kmgrv1.Cell, value bool) {
 }
 
 func setNativeTimestamp(cell *kmgrv1.Cell, value, now time.Time, relative bool) {
+	age := now.Sub(value)
 	if relative {
-		cell.DisplayText = formatAge(now.Sub(value))
+		cell.DisplayText = formatAge(age)
+		// The displayed value is an age, so the sort value must be the age
+		// too: ascending order then matches the displayed text. Sorting by
+		// the raw timestamp would invert the visible direction.
+		cell.TypedValue = &kmgrv1.Cell_NumberValue{NumberValue: age.Seconds()}
 	} else {
 		cell.DisplayText = value.Local().Format("2006-01-02 15:04:05")
+		cell.TypedValue = &kmgrv1.Cell_TimestampUnixMs{TimestampUnixMs: value.UnixMilli()}
 	}
-	cell.TypedValue = &kmgrv1.Cell_TimestampUnixMs{TimestampUnixMs: value.UnixMilli()}
 	cell.Tooltip = value.Format(time.RFC3339)
 }
 
