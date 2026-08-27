@@ -294,6 +294,9 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             try? restorationStore.removeAllOpenWindows()
             workspaceControllers.values.forEach {
                 $0.onRestorationCheckpoint = nil
+                $0.onActivationCheckpoint = nil
+                $0.onFrameCheckpoint = nil
+                $0.onWindowSizeCheckpoint = nil
             }
         }
         return true

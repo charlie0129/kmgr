@@ -707,7 +707,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         let wasKeyWindow = window?.isKeyWindow == true
         isClosing = true
         _ = checkpointWorkspace(
-            activatesContext: wasKeyWindow,
+            activatesContext: wasKeyWindow && !suppressInitialActivation,
             checkpointsSize: wasKeyWindow
         )
         prepareForTermination()
