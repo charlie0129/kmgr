@@ -1566,6 +1566,86 @@ func TestSubscriptionMetricsRevisionRetriesInFlightProjection(t *testing.T) {
 	}
 }
 
+func TestPinnedMetricProjectionRetriesAfterWatchRace(t *testing.T) {
+	projector, err := NewProjector(ProjectionSpec{
+		ClusterSessionID: "session-a",
+		Resource: ResourceType{
+			Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true,
+		},
+		NamespaceScope: NamespaceScope{All: true},
+		ColumnIDs:      []string{"name", PodCPUColumn},
+		Sort:           []SortDescriptor{{ColumnID: PodCPUColumn, Descending: true}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	subscription, scheduled := newControlledProjectionSubscription(projector)
+	entryStore := store.New()
+	base := metricInterestPod(t, "uid-a", "a")
+	entryStore.Upsert(base)
+	subscription.resource = &resourceRuntime{store: entryStore}
+	subscription.stageUntilReconciled = true
+	subscription.snapshotComplete = true
+	subscription.metricPlan = metricViewPlan{
+		dependency: metricDependency{display: true, order: true},
+		strategy:   metricFetchPodObjects,
+	}
+	subscription.metricsReconciling = true
+	subscription.metricCoverageID = 1
+	subscription.metricCoverageCommit = 1
+	subscription.initialMetricEpoch = &initialMetricEpoch{
+		coverageID: 1, objects: []*unstructured.Unstructured{base}, objectsReady: true,
+	}
+	subscription.projector = projector.WithMetrics(metrics.Snapshot{
+		State: metrics.MeasurementCurrent,
+		Samples: map[string]metrics.Sample{
+			"uid-a": metricCPUSample(100_000_000),
+		},
+	})
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int64
+	subscription.projector.now = func() time.Time {
+		if calls.Add(1) == 1 {
+			close(started)
+			<-release
+		}
+		return time.Unix(100, 0)
+	}
+	subscription.mu.Lock()
+	subscription.projectionResnapshot = true
+	subscription.scheduleProjectionLocked()
+	subscription.mu.Unlock()
+	flush := receiveCapturedProjection(t, scheduled)
+	projectionDone := make(chan struct{})
+	go func() {
+		flush()
+		close(projectionDone)
+	}()
+	awaitSignal(t, started, "pinned metric projection start")
+
+	modified := base.DeepCopy()
+	modified.SetResourceVersion("rv-watch")
+	entryStore.Upsert(modified)
+	subscription.applyBatch(watcher.Batch{Upserts: []*unstructured.Unstructured{modified}})
+	close(release)
+	awaitSignal(t, projectionDone, "pinned metric projection retry")
+
+	subscription.mu.Lock()
+	defer subscription.mu.Unlock()
+	if subscription.initialMetricEpoch != nil || subscription.metricsReconciling ||
+		!subscription.pendingReconciliation {
+		t.Fatalf("pinned metric race state: epoch=%#v reconciling=%t pending=%t",
+			subscription.initialMetricEpoch, subscription.metricsReconciling,
+			subscription.pendingReconciliation)
+	}
+	if row := subscription.rows["uid-a"]; row == nil ||
+		cellByID(row, PodCPUColumn).GetUsage().GetUsed() != 0.1 {
+		t.Fatalf("pinned metric row after WATCH race = %#v", row)
+	}
+}
+
 func TestSubscriptionIgnoresStaleScheduledFlushAfterManualFlushAndClose(t *testing.T) {
 	projector := newRuntimeTestProjector(t, "", nil)
 	subscription, scheduled := newControlledProjectionSubscription(projector)

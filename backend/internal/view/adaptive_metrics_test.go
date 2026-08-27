@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/charlie0129/kmgr/backend/internal/metrics"
+	"github.com/charlie0129/kmgr/backend/internal/store"
+	"github.com/charlie0129/kmgr/backend/internal/watcher"
 	kmgrv1 "github.com/charlie0129/kmgr/gen/go/kmgr/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
@@ -566,6 +568,21 @@ func TestStagedDefaultPodKeywordReconcilesDuringWatchChurn(t *testing.T) {
 		t.Fatal("post-barrier metric fetch did not start")
 	}
 
+	// A base-field match is usable before the complete metric snapshot. This is
+	// the path that makes editing one keyword feel immediate while the default
+	// CPU/memory columns are still being refined.
+	provisional := basePod.DeepCopy()
+	provisional.SetUID("uid-provisional")
+	provisional.SetName("mm-later")
+	provisional.SetResourceVersion("rv-provisional")
+	client.lastWatch().channel <- watch.Event{Type: watch.Added, Object: provisional}
+	eventually(t, time.Second, func() bool {
+		subscription.mu.Lock()
+		defer subscription.mu.Unlock()
+		row := subscription.rows["uid-provisional"]
+		return row != nil && !cellByID(row, PodCPUColumn).GetUsage().GetUsageAvailable()
+	})
+
 	// Keep changing the Pod after that metric fetch has started. This used to
 	// advance the completeness timestamp past every result and strand the view
 	// in its staged Resuming state.
@@ -634,6 +651,14 @@ func TestStagedDefaultPodKeywordReconcilesDuringWatchChurn(t *testing.T) {
 		}
 	}
 	stopContinuousChurn()
+	// The provisional WATCH object raced the pinned epoch but was already
+	// projected before the metric response. It must survive the pinned full pass
+	// and remain in the live index rather than disappearing until another event.
+	eventually(t, time.Second, func() bool {
+		subscription.mu.Lock()
+		defer subscription.mu.Unlock()
+		return subscription.rows["uid-provisional"] != nil
+	})
 
 	// Changes newer than the pinned epoch resume normal incremental delivery.
 	later := basePod.DeepCopy()
@@ -654,6 +679,119 @@ func TestStagedDefaultPodKeywordReconcilesDuringWatchChurn(t *testing.T) {
 			client.listCalls.Load(), client.watchCalls.Load(),
 		)
 	}
+}
+
+func TestSeededMetricEpochRecordsEarlyWatchRemoval(t *testing.T) {
+	t.Parallel()
+	projector, err := NewProjector(ProjectionSpec{
+		ClusterSessionID: "session-a",
+		Resource: ResourceType{
+			Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true,
+		},
+		NamespaceScope: NamespaceScope{All: true},
+		ColumnIDs:      []string{"name", PodCPUColumn},
+		Sort:           []SortDescriptor{{ColumnID: PodCPUColumn, Descending: true}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	subscription, scheduled := newControlledProjectionSubscription(projector)
+	resourceStore := store.New()
+	object := metricInterestPod(t, "uid-removed", "removed")
+	resourceStore.Upsert(object)
+	subscription.resource = &resourceRuntime{store: resourceStore}
+	subscription.stageUntilReconciled = true
+	subscription.snapshotComplete = true
+	subscription.metricPlan = metricViewPlan{
+		dependency: metricDependency{display: true, membership: true},
+		strategy:   metricFetchPodObjects,
+	}
+	metricSource := &controlledCompleteMetricSource{
+		started: make(chan []metrics.PodReference, 1),
+		release: make(chan struct{}),
+		samples: map[string]metrics.Sample{
+			"uid-removed": metricCPUSample(100_000_000),
+		},
+	}
+	subscription.podMetricResolver = metricSource
+	subscription.metricsReconciling = true
+	subscription.seedInitialMetricEpochUnlocked([]*unstructured.Unstructured{object}, nil)
+
+	resourceStore.Delete(object.GetUID())
+	subscription.enqueueWatchBatch(0, false, watcher.Batch{
+		RemovedUIDs: []types.UID{object.GetUID()},
+	})
+	references := receiveExactMetricReferences(t, metricSource.started)
+	if len(references) != 1 || references[0].UID != object.GetUID() {
+		t.Fatalf("seeded epoch references = %#v", references)
+	}
+	close(metricSource.release)
+	flushCapturedProjection(t, scheduled)
+
+	subscription.mu.Lock()
+	defer subscription.mu.Unlock()
+	if subscription.initialMetricEpoch != nil || subscription.metricsReconciling {
+		t.Fatalf("seeded epoch remained active: epoch=%#v reconciling=%t",
+			subscription.initialMetricEpoch, subscription.metricsReconciling)
+	}
+	if subscription.rows["uid-removed"] != nil {
+		t.Fatalf("removed UID was resurrected by seeded metric epoch: %#v",
+			subscription.rows["uid-removed"])
+	}
+}
+
+func TestMetricOnlyKeywordAppearsAfterAsyncCoverage(t *testing.T) {
+	t.Parallel()
+	client := newScriptedResource()
+	client.listPages = []*unstructured.UnstructuredList{listPage(
+		"rv-1", "",
+		metricInterestPod(t, "uid-alpha", "alpha"),
+		metricInterestPod(t, "uid-beta", "beta"),
+	)}
+	metricSource := &controlledCompleteMetricSource{
+		started: make(chan []metrics.PodReference, 1),
+		release: make(chan struct{}),
+		samples: map[string]metrics.Sample{
+			"uid-beta": metricCPUSample(500_000_000),
+		},
+	}
+	runtime, err := NewRuntime(RuntimeConfig{
+		Source:  &fakeResourceSource{authority: "cluster-a", client: client},
+		Metrics: metricSource, BatchDelay: time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	request := openView("session", "metric-only", 1)
+	request.StageUntilReconciled = true
+	request.Spec.ColumnIds = []string{"name", PodCPUColumn}
+	request.Spec.FilterExpression = `0.5 fieldSelector:"spec.nodeName=node-a"`
+	subscription, err := runtime.Open(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer subscription.Close()
+	if references := receiveExactMetricReferences(t, metricSource.started); len(references) != 2 {
+		t.Fatalf("complete metric references = %#v", references)
+	}
+	eventually(t, time.Second, func() bool {
+		subscription.mu.Lock()
+		defer subscription.mu.Unlock()
+		return subscription.snapshotComplete && len(subscription.rows) == 0 &&
+			subscription.metricsReconciling
+	})
+
+	// The object list is already complete, but the metric-only predicate has no
+	// provisional match while the metric snapshot is blocked.
+	close(metricSource.release)
+	eventually(t, time.Second, func() bool {
+		subscription.mu.Lock()
+		defer subscription.mu.Unlock()
+		row := subscription.rows["uid-beta"]
+		return row != nil && !subscription.metricsReconciling &&
+			cellByID(row, PodCPUColumn).GetUsage().GetUsageAvailable()
+	})
 }
 
 func TestCompleteSharedMetricsReconcileAfterBaseBarrier(t *testing.T) {

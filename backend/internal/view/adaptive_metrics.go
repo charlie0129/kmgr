@@ -15,11 +15,19 @@ import (
 
 // initialMetricEpoch pins one complete base-object snapshot until its metric
 // projection becomes the staged generation's first client-visible barrier.
-// Newer WATCH state is represented only by bounded deferred work.
+// The normal projection may continue against newer raw state while this
+// snapshot is resolving; the pinned pass is only the exact reconciliation
+// point. Newer WATCH state is represented by bounded coalesced work.
 type initialMetricEpoch struct {
 	coverageID      uint64
 	objects         []*unstructured.Unstructured
 	serverCells     map[string][]*kmgrv1.Cell
+	// changedObjects retains the newest WATCH upsert for each UID that raced
+	// the pinned snapshot. Provisional projection may consume pendingObjects
+	// before the metric result arrives, so the changed set must survive that
+	// consumption until the pinned pass commits. It is bounded by the view's
+	// pending-row limit; overflow falls back to one authoritative resnapshot.
+	changedObjects  map[string]*unstructured.Unstructured
 	objectsReady    bool
 	dirty           bool
 	needsResnapshot bool
@@ -117,11 +125,6 @@ func (s *Subscription) hasCompleteMetricCoverageSourceLocked() bool {
 	}
 }
 
-func (s *Subscription) shouldDeferForInitialMetricEpochLocked() bool {
-	return s.activeInitialMetricEpochLocked() != nil ||
-		s.shouldStartInitialMetricEpochLocked()
-}
-
 func (s *Subscription) activeInitialMetricEpochLocked() *initialMetricEpoch {
 	if s.initialMetricEpoch == nil || s.initialMetricEpoch.coverageID == 0 {
 		return nil
@@ -129,15 +132,10 @@ func (s *Subscription) activeInitialMetricEpochLocked() *initialMetricEpoch {
 	return s.initialMetricEpoch
 }
 
-// initialMetricEpochBlocksProjectionLocked keeps catch-up and WATCH work
-// behind the first complete metric projection. Once the pinned metric snapshot
-// is ready, that one projection is allowed through and commits the barrier.
-func (s *Subscription) initialMetricEpochBlocksProjectionLocked() bool {
+func (s *Subscription) initialMetricEpochReadyLocked() bool {
 	epoch := s.activeInitialMetricEpochLocked()
-	if epoch == nil {
-		return s.shouldStartInitialMetricEpochLocked()
-	}
-	return !epoch.objectsReady || s.metricCoverageCommit != epoch.coverageID
+	return epoch != nil && epoch.objectsReady &&
+		s.metricCoverageCommit == epoch.coverageID
 }
 
 // requireCompleteMetricCoverageLocked marks the current base-resource state as
@@ -147,7 +145,8 @@ func (s *Subscription) initialMetricEpochBlocksProjectionLocked() bool {
 // a relist, or the configured metrics cadence. Ordinary WATCH batches only
 // mark the result dirty; they never turn object churn into candidate scans or
 // Metrics LIST pagination. A staged generation pins its first request so WATCH
-// churn cannot move the ViewReconciled barrier indefinitely.
+// churn cannot move the ViewReconciled barrier indefinitely, while provisional
+// base projections remain available to the client.
 func (s *Subscription) requireCompleteMetricCoverageLocked(immediate bool) {
 	if s.closed || !s.snapshotComplete ||
 		!s.metricPlan.dependency.requiresCompleteCoverage() {
@@ -223,6 +222,7 @@ func (s *Subscription) startInitialMetricEpochLocked(dirty bool) {
 	epoch.coverageID = s.metricCoverageID
 	epoch.dirty = dirty
 	epoch.needsResnapshot = false
+	epoch.changedObjects = nil
 	if epoch.objectsReady {
 		s.startInitialMetricRefreshLocked()
 		return
@@ -442,18 +442,62 @@ func (s *Subscription) completeMetricCoverageLocked() {
 		if epoch.needsResnapshot {
 			clear(s.pendingObjects)
 			s.projectionResnapshot = true
+		} else if len(epoch.changedObjects) != 0 {
+			// A provisional pass may already have consumed these WATCH upserts.
+			// Requeue the newest objects so the pinned full projection cannot erase
+			// them from the live presentation. The next loop applies them with the
+			// now-current metric projector; a bounded overflow uses a full store
+			// snapshot instead.
+			for uid, object := range epoch.changedObjects {
+				if uid == "" || object == nil {
+					continue
+				}
+				s.pendingObjects[uid] = object
+			}
+			if len(s.pendingObjects) > max(1, s.pendingLimit) {
+				clear(s.pendingObjects)
+				s.projectionResnapshot = true
+			}
 		}
 	}
 	s.setMetricsReconcilingLocked(false)
 	s.markReconciledLocked()
 	if completedInitialEpoch && epoch.dirty {
-		// The pinned epoch now owns the client barrier. Re-enter the ordinary
-		// cadence path for coalesced WATCH work without delaying that barrier.
-		s.requireCompleteMetricCoverageLocked(false)
+		// The pinned epoch now owns the client barrier. Keep newer WATCH work
+		// provisional until the provider's normal refresh cadence; immediately
+		// re-entering coverage here would report "updating metrics" again and
+		// make a successfully reconciled table look busy for the whole cadence.
+		// Exact Pod-object coverage has no shared provider timer, so retain its
+		// dirty bit and schedule that bounded scan explicitly.
+		if s.metricPlan.strategy == metricFetchPodObjects {
+			s.metricCoverageDirty = true
+			s.scheduleCompletePodMetricCoverageLocked()
+		}
 		return
 	}
 	if s.metricPlan.strategy == metricFetchPodObjects {
 		s.scheduleCompletePodMetricCoverageLocked()
+	}
+}
+
+// noteInitialMetricEpochUpsertLocked remembers a WATCH object that arrived
+// after the pinned metric snapshot. Holding this separate from pendingObjects
+// is what lets provisional projection publish immediately without losing the
+// object when the exact pinned pass later replaces the full row map.
+func (s *Subscription) noteInitialMetricEpochUpsertLocked(
+	epoch *initialMetricEpoch,
+	object *unstructured.Unstructured,
+) {
+	if epoch == nil || object == nil || object.GetUID() == "" || epoch.needsResnapshot {
+		return
+	}
+	if epoch.changedObjects == nil {
+		epoch.changedObjects = make(map[string]*unstructured.Unstructured)
+	}
+	epoch.changedObjects[string(object.GetUID())] = object
+	if len(epoch.changedObjects) > max(1, s.pendingLimit) {
+		clear(epoch.changedObjects)
+		epoch.needsResnapshot = true
 	}
 }
 

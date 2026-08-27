@@ -121,7 +121,9 @@ message ViewStatus {
   bool from_warm_cache = 5;
   string resource_version_hint = 6;
   // True while metric-backed global order or membership is still being
-  // completed. Display-only viewport metric refreshes do not set this flag.
+  // completed. Base-field rows may already be available while this is true;
+  // clients should keep the table usable and show a small refinement status.
+  // Display-only viewport metric refreshes do not set this flag.
   bool metrics_reconciling = 7;
 }
 

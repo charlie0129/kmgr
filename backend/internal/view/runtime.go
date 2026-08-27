@@ -2520,8 +2520,9 @@ type Subscription struct {
 	metricRefreshPending  bool
 	metricsReconciling    bool
 	// A staged view with metric-dependent membership or ordering reconciles
-	// against one immutable base-object epoch. WATCH churn is coalesced behind
-	// that epoch so it cannot continually move the first ViewReconciled barrier.
+	// against one immutable base-object epoch. WATCH churn may still publish a
+	// provisional projection while that epoch resolves; only the exact pinned
+	// pass owns the first ViewReconciled barrier.
 	initialMetricEpoch *initialMetricEpoch
 	lastStatus         *kmgrv1.ViewStatus
 
@@ -3085,26 +3086,24 @@ func (s *Subscription) applyBatchForRun(
 	}
 	s.applyServerTableBatchLocked(batch)
 	s.optionalResourceHints.observeLocked(observedOptionalResourceKeys)
-	if epoch := s.activeInitialMetricEpochLocked(); epoch != nil {
-		// A relist that races the pinned metric epoch is newer state. The raw
-		// store already contains it, so one post-barrier resnapshot is both
-		// bounded and sufficient; applying progressive pages here could keep
-		// invalidating the older epoch under sustained churn.
+	epoch := s.activeInitialMetricEpochLocked()
+	if epoch == nil && s.shouldStartInitialMetricEpochLocked() {
+		// Open may have seeded an epoch with coverageID == 0 and a WATCH/LIST
+		// callback can arrive before the post-publication metric request starts.
+		// Promote that seed now so the callback is recorded as newer state instead
+		// of allowing the pinned pass to resurrect a deleted or replaced object.
+		s.startInitialMetricEpochLocked(true)
+		epoch = s.activeInitialMetricEpochLocked()
+	}
+	if epoch != nil {
+		// A batch that races the pinned metric epoch is newer state. Keep the
+		// exact metric barrier pinned, but let the ordinary projection publish a
+		// provisional view from the latest raw store. A relist/tombstone needs one
+		// post-barrier resnapshot because pendingObjects has no tombstone form.
 		epoch.dirty = true
-		epoch.needsResnapshot = true
-		clear(s.pendingObjects)
-		if batch.SnapshotComplete {
-			s.snapshotComplete = true
-			s.setStatusLocked(&kmgrv1.ViewStatus{
-				Freshness:              kmgrv1.ViewFreshness_VIEW_FRESHNESS_WATCHING,
-				ObjectsExamined:        uint64(batch.ObjectsListed),
-				RowsVisible:            uint64(len(s.rows)),
-				LastSynchronizedUnixMs: batch.SynchronizedAt.UnixMilli(),
-			})
+		if batch.FromList {
+			epoch.needsResnapshot = true
 		}
-		s.requireCompleteMetricCoverageLocked(false)
-		s.signalLocked(batch.FromList)
-		return
 	}
 	// LIST pages and snapshot-complete batches are projection barriers. An
 	// older WATCH projection may still be running when flushProjection returns;
@@ -3115,7 +3114,14 @@ func (s *Subscription) applyBatchForRun(
 	// than the barrier. Dropping them prevents a later WATCH from causing those
 	// stranded objects to be projected over the LIST state.
 	clear(s.pendingObjects)
-	s.projectionResnapshot = false
+	// Do not erase a full pass that was already queued before this LIST callback:
+	// the callback itself is still projected incrementally, but the queued pass
+	// must run afterward so a racing WATCH/LIST or metric update cannot strand
+	// rows that were not present in this page. An exact pinned metric pass is
+	// additionally mandatory when its coverage is ready.
+	s.projectionResnapshot = s.projectionResnapshot ||
+		(epoch != nil && epoch.objectsReady &&
+			s.metricCoverageCommit == epoch.coverageID)
 	batchProjector := s.projector.beginBatch()
 	presentationChanged := false
 	var previousOrder []string
@@ -3204,39 +3210,29 @@ func (s *Subscription) enqueueWatchBatch(
 	tableDisabled := batch.Table != nil && batch.Table.Disabled && s.serverSchema != nil
 	s.applyServerTableBatchLocked(batch)
 	s.optionalResourceHints.observeLocked(observedOptionalResourceKeys)
-	if s.shouldDeferForInitialMetricEpochLocked() {
-		epoch := s.activeInitialMetricEpochLocked()
-		if epoch == nil {
-			s.startInitialMetricEpochLocked(true)
-			epoch = s.activeInitialMetricEpochLocked()
-		}
-		// Keep only bounded newest-per-UID upserts behind the pinned barrier.
-		// Deletions and table fallback require one latest-store resnapshot because
+	epoch := s.activeInitialMetricEpochLocked()
+	if epoch == nil && s.shouldStartInitialMetricEpochLocked() {
+		// See the LIST path above: a seeded, not-yet-started epoch still owns the
+		// first exact metric barrier, and this WATCH batch must make it dirty.
+		s.startInitialMetricEpochLocked(true)
+		epoch = s.activeInitialMetricEpochLocked()
+	}
+	if epoch != nil {
+		// Keep the first complete metric request pinned, but do not hold WATCH
+		// updates behind it. The ordinary bounded pendingObjects path below
+		// publishes a provisional base projection immediately. Deletions and
+		// table fallback still require one post-barrier resnapshot because
 		// pendingObjects deliberately has no tombstone representation.
 		epoch.dirty = true
 		if tableDisabled || len(batch.RemovedUIDs) != 0 {
 			epoch.needsResnapshot = true
 		}
-		for _, uid := range batch.RemovedUIDs {
-			delete(s.pendingObjects, string(uid))
+		if epoch.objectsReady && s.metricCoverageCommit == epoch.coverageID {
+			// A complete metric result is waiting for its pinned full pass. Keep
+			// that pass scheduled even when this WATCH batch only needs the bounded
+			// incremental path below.
+			s.projectionResnapshot = true
 		}
-		if !epoch.needsResnapshot {
-			for _, object := range batch.Upserts {
-				if object == nil || object.GetUID() == "" {
-					continue
-				}
-				s.pendingObjects[string(object.GetUID())] = object
-			}
-			if len(s.pendingObjects) > s.pendingLimit {
-				clear(s.pendingObjects)
-				epoch.needsResnapshot = true
-			}
-		}
-		s.requireCompleteMetricCoverageLocked(false)
-		if s.pendingSchema != nil {
-			s.signalLocked(true)
-		}
-		return
 	}
 	if tableDisabled {
 		// The raw fallback has no server cells. Rebuild every retained row so a
@@ -3276,6 +3272,9 @@ func (s *Subscription) enqueueWatchBatch(
 			continue
 		}
 		key := string(object.GetUID())
+		if epoch := s.activeInitialMetricEpochLocked(); epoch != nil {
+			s.noteInitialMetricEpochUpsertLocked(epoch, object)
+		}
 		s.pendingObjects[key] = object
 	}
 	if len(s.pendingObjects) > s.pendingLimit {
@@ -3298,8 +3297,7 @@ func (s *Subscription) enqueueWatchBatch(
 }
 
 func (s *Subscription) scheduleProjectionLocked() {
-	if s.closed || s.projectionScheduled || s.projectionRunning ||
-		s.initialMetricEpochBlocksProjectionLocked() {
+	if s.closed || s.projectionScheduled || s.projectionRunning {
 		return
 	}
 	s.projectionScheduled = true
@@ -3331,8 +3329,8 @@ func (s *Subscription) flushScheduledProjection(scheduleID uint64) {
 	}
 	s.projectionScheduled = false
 	s.projectionTimer = nil
-	if s.projectionRunning || s.initialMetricEpochBlocksProjectionLocked() ||
-		(len(s.pendingObjects) == 0 && !s.projectionResnapshot) {
+	if s.projectionRunning || (len(s.pendingObjects) == 0 &&
+		!s.projectionResnapshot && !s.initialMetricEpochReadyLocked()) {
 		s.mu.Unlock()
 		return
 	}
@@ -3347,8 +3345,9 @@ func (s *Subscription) flushScheduledProjection(scheduleID uint64) {
 func (s *Subscription) flushProjection() {
 	s.mu.Lock()
 	s.cancelProjectionScheduleLocked()
-	if s.closed || s.projectionRunning || s.initialMetricEpochBlocksProjectionLocked() ||
-		(len(s.pendingObjects) == 0 && !s.projectionResnapshot) {
+	if s.closed || s.projectionRunning ||
+		(len(s.pendingObjects) == 0 && !s.projectionResnapshot &&
+			!s.initialMetricEpochReadyLocked()) {
 		s.mu.Unlock()
 		return
 	}
@@ -3370,18 +3369,22 @@ func (s *Subscription) runProjection() {
 			s.mu.Unlock()
 			return
 		}
-		if len(s.pendingObjects) == 0 && !s.projectionResnapshot {
+		epoch := s.activeInitialMetricEpochLocked()
+		pinnedMetricEpochReady := s.initialMetricEpochReadyLocked()
+		if len(s.pendingObjects) == 0 && !s.projectionResnapshot && !pinnedMetricEpochReady {
 			s.projectionRunning = false
 			s.mu.Unlock()
 			return
 		}
 		revision := s.projectionRevision
 		projector := s.projector
-		full := s.projectionResnapshot
+		// Once the pinned metric snapshot is available, its exact projection is
+		// mandatory even if a concurrent WATCH pass consumed the ordinary
+		// resnapshot flag. This is the only pass allowed to close the initial
+		// staged barrier.
+		full := s.projectionResnapshot || pinnedMetricEpochReady
 		s.projectionResnapshot = false
-		epoch := s.activeInitialMetricEpochLocked()
-		pinnedMetricEpoch := full && epoch != nil && epoch.objectsReady &&
-			s.metricCoverageCommit == epoch.coverageID
+		pinnedMetricEpoch := full && pinnedMetricEpochReady
 		var objects []*unstructured.Unstructured
 		if pinnedMetricEpoch {
 			objects = epoch.objects
@@ -3527,13 +3530,30 @@ func (s *Subscription) runProjection() {
 			return
 		}
 		if s.projectionRevision != revision {
-			if s.projectionResnapshot || len(s.pendingObjects) != 0 {
+			// The pinned epoch is deliberately an immutable barrier. Accepting
+			// that pass despite newer WATCH revisions prevents continuous churn
+			// from starving ViewReconciled; coalesced upserts and any required
+			// resnapshot are applied by the next loop. A replaced/retired epoch
+			// is still rejected so an old generation can never overwrite a new
+			// resource store.
+			pinnedEpochStillActive := pinnedMetricEpoch &&
+				s.initialMetricEpoch == epoch &&
+				s.metricCoverageCommit == epoch.coverageID
+			if !pinnedEpochStillActive {
+				if s.projectionResnapshot || len(s.pendingObjects) != 0 {
+					s.mu.Unlock()
+					continue
+				}
+				s.projectionRunning = false
 				s.mu.Unlock()
-				continue
+				return
 			}
-			s.projectionRunning = false
-			s.mu.Unlock()
-			return
+			// A newer metric snapshot changes the projector itself. Preserve a
+			// full pass after the pinned commit; ordinary WATCH-only changes stay
+			// bounded in pendingObjects and use the incremental loop.
+			if s.projector != projector {
+				s.projectionResnapshot = true
+			}
 		}
 		if full {
 			previousRows := s.rows

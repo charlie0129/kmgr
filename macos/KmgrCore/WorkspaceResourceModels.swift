@@ -614,11 +614,13 @@ public struct ResourceViewStatus: Hashable, Sendable {
         self.metricsReconciling = metricsReconciling
     }
 
-    /// Whether continuity work is happening in the background. The resource
-    /// table stays usable while this is true; callers should pair the text with
-    /// a small indeterminate progress indicator instead of covering the rows.
+    /// Whether continuity or metric-refinement work is happening in the
+    /// background. The resource table stays usable while this is true; callers
+    /// should pair the text with a small indeterminate progress indicator
+    /// instead of covering the rows.
     public var showsProgress: Bool {
-        switch freshness {
+        if metricsReconciling { return true }
+        return switch freshness {
         case .loading, .resuming, .relisting, .reconnecting:
             true
         case .stale, .watching, .failed, .complete:
@@ -666,28 +668,30 @@ public struct ResourceViewStatus: Hashable, Sendable {
         let age = lastSynchronizedAt.map {
             "\(Self.ageText(since: $0, now: now)) old"
         }
+        let result: String
         switch freshness {
         case .loading:
-            return "Loading…"
+            result = "Loading…"
         case .stale:
-            return age.map { "Cached · \($0)" } ?? "Cached · age unavailable"
+            result = age.map { "Cached · \($0)" } ?? "Cached · age unavailable"
         case .resuming:
-            return age.map { "Resuming… · cached \($0)" } ?? "Resuming…"
+            result = age.map { "Resuming… · cached \($0)" } ?? "Resuming…"
         case .relisting:
             let progress = objectsExamined > 0
                 ? "Relisting… \(objectsExamined.formatted()) loaded"
                 : "Relisting…"
-            return age.map { "\(progress) · cached \($0)" } ?? progress
+            result = age.map { "\(progress) · cached \($0)" } ?? progress
         case .watching:
-            return "Watching"
+            result = "Watching"
         case .reconnecting:
-            return age.map { "Reconnecting… · last synchronized \($0)" }
+            result = age.map { "Reconnecting… · last synchronized \($0)" }
                 ?? "Reconnecting… · last synchronization unknown"
         case .failed:
-            return age.map { "Failed · last synchronized \($0)" } ?? "Failed"
+            result = age.map { "Failed · last synchronized \($0)" } ?? "Failed"
         case .complete:
-            return "Complete"
+            result = "Complete"
         }
+        return metricsReconciling ? "\(result) · Updating metrics…" : result
     }
 
     private static func ageText(since date: Date, now: Date) -> String {

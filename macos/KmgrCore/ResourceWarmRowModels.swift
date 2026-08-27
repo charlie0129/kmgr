@@ -121,4 +121,19 @@ public enum ResourceWarmRowPolicy {
         status.fromWarmCache = true
         return status
     }
+
+    /// A metric-dependent staged generation has a usable base projection before
+    /// its complete metric snapshot arrives. Once that provisional range is
+    /// fetched, it is safe to release the old warm rows: the range is pinned to
+    /// the new generation and the backend status keeps the metric refinement
+    /// visible to the user.
+    public static func shouldPromoteProvisionalMetricRange(
+        isRetainingWarmRows: Bool,
+        hasReachedInitialReconciliation: Bool,
+        backendStatus: ResourceViewStatus?
+    ) -> Bool {
+        isRetainingWarmRows
+            && !hasReachedInitialReconciliation
+            && backendStatus?.metricsReconciling == true
+    }
 }

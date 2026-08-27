@@ -75,7 +75,9 @@ already checked into the repository.
    Resource menu, the table context menu, or the list header if that resource
    remains stuck reconnecting. The action preserves the current scope, filter,
    columns, and sort while discarding the retained resource version and starting
-   a fresh LIST/WATCH lifecycle.
+   a fresh LIST/WATCH lifecycle. Metric-backed filters and sorts publish their
+   base-field result first; the status briefly shows `Updating metrics…` while
+   metric-only matches and the exact metric order are refined.
 4. Use `/` for the current table filter and Command-K for commands, recent or
    cached objects, kinds, namespaces, or a two-stage resource-scoped object
    search. A scoped search checks compatible active/warm engine caches before

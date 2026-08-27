@@ -5938,11 +5938,31 @@ private final class ResourceListViewController: NSViewController,
                     rowsVisible: 0,
                     rows: []
                 )
-                if isRetainingWarmRowsForCurrentStream {
+                let promoteProvisionalMetricRange = ResourceWarmRowPolicy
+                    .shouldPromoteProvisionalMetricRange(
+                        isRetainingWarmRows: isRetainingWarmRowsForCurrentStream,
+                        hasReachedInitialReconciliation: hasReachedInitialReconciliation,
+                        backendStatus: backendResourceViewStatus ?? resourceViewStatus
+                    )
+                if isRetainingWarmRowsForCurrentStream,
+                    !promoteProvisionalMetricRange
+                {
                     pendingInitialRange = emptyRange
                 } else {
+                    if promoteProvisionalMetricRange {
+                        traceResourceCache(
+                            "event=provisional_empty_range_promoted"
+                                + " revision=\(emptyRange.revision.presentation)"
+                                + " index=\(emptyRange.revision.index)",
+                            generation: emptyRange.revision.generation
+                        )
+                        isRetainingWarmRowsForCurrentStream = false
+                    }
                     installFetchedRange(emptyRange, request: nil)
-                    endProjectionRequest(outcome: "range-fetched")
+                    endProjectionRequest(
+                        outcome: promoteProvisionalMetricRange
+                            ? "provisional-metrics-range" : "range-fetched"
+                    )
                 }
                 sendMetricInterestIfNeeded()
                 break
@@ -6554,15 +6574,34 @@ private final class ResourceListViewController: NSViewController,
             clearInlineIssue(scope: .range)
             return
         }
+        let promoteProvisionalMetricRange = ResourceWarmRowPolicy
+            .shouldPromoteProvisionalMetricRange(
+                isRetainingWarmRows: isRetainingWarmRowsForCurrentStream,
+                hasReachedInitialReconciliation: hasReachedInitialReconciliation,
+                backendStatus: backendResourceViewStatus ?? resourceViewStatus
+            )
         if isRetainingWarmRowsForCurrentStream,
             !hasReachedInitialReconciliation,
-            reconciledRevision != range.revision
+            reconciledRevision != range.revision,
+            !promoteProvisionalMetricRange
         {
             pendingInitialRange = range
             return
         }
+        if promoteProvisionalMetricRange {
+            traceResourceCache(
+                "event=provisional_range_promoted"
+                    + " revision=\(range.revision.presentation)"
+                    + " index=\(range.revision.index)"
+                    + " rows=\(range.rowsVisible)",
+                generation: range.revision.generation
+            )
+            isRetainingWarmRowsForCurrentStream = false
+        }
         installFetchedRange(range, request: request)
-        if isRetainingWarmRowsForCurrentStream {
+        if promoteProvisionalMetricRange {
+            endProjectionRequest(outcome: "provisional-metrics-range")
+        } else if isRetainingWarmRowsForCurrentStream {
             isRetainingWarmRowsForCurrentStream = false
             endProjectionRequest(outcome: "reconciled")
             installReconciledStatus(rowCount: range.rowsVisible)

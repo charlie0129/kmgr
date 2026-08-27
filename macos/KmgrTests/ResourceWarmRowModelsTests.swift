@@ -160,3 +160,27 @@ import Testing
     #expect(result.fromWarmCache)
     #expect(result.showsProgress)
 }
+
+@Test func metricRefinementCanPromoteTheFirstUsableRange() {
+    #expect(ResourceWarmRowPolicy.shouldPromoteProvisionalMetricRange(
+        isRetainingWarmRows: true,
+        hasReachedInitialReconciliation: false,
+        backendStatus: ResourceViewStatus(
+            freshness: .watching,
+            metricsReconciling: true
+        )
+    ))
+    #expect(!ResourceWarmRowPolicy.shouldPromoteProvisionalMetricRange(
+        isRetainingWarmRows: true,
+        hasReachedInitialReconciliation: false,
+        backendStatus: ResourceViewStatus(freshness: .watching)
+    ))
+    #expect(!ResourceWarmRowPolicy.shouldPromoteProvisionalMetricRange(
+        isRetainingWarmRows: true,
+        hasReachedInitialReconciliation: true,
+        backendStatus: ResourceViewStatus(
+            freshness: .watching,
+            metricsReconciling: true
+        )
+    ))
+}

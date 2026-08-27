@@ -61,6 +61,13 @@ names. Text-bearing terms (bare text, `name:`/`namespace:`/`status:`, and
 column-qualified values) are emphasized in matching rendered cells; selector
 bodies and local label/field predicates remain unstyled.
 
+Metric-backed columns are refined asynchronously. The engine first publishes
+the rows it can decide from cached object fields and renders metric cells as
+unavailable while the complete Metrics API snapshot is loading. A row that
+matches only a metric value may appear later, and metric-backed sorting or
+membership can move rows when the snapshot arrives. The table remains usable
+through that refinement and reports `Updating metrics…` in its status.
+
 ## Explicit Kubernetes selectors
 
 Native Kubernetes selectors use explicit prefixes. Their contents are parsed

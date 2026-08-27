@@ -27,6 +27,10 @@ import Testing
         lastSynchronizedAt: synchronizedAt
     ).presentation(now: now) == "Reconnecting… · last synchronized 18s old")
     #expect(ResourceViewStatus(freshness: .watching).presentation == "Watching")
+    #expect(ResourceViewStatus(
+        freshness: .watching,
+        metricsReconciling: true
+    ).presentation == "Watching · Updating metrics…")
 }
 
 @Test func resourceStatusProgressAndAgeRefreshPolicyMatchesContinuityWork() {
@@ -41,6 +45,10 @@ import Testing
     ] {
         #expect(!ResourceViewStatus(freshness: freshness).showsProgress)
     }
+    #expect(ResourceViewStatus(
+        freshness: .watching,
+        metricsReconciling: true
+    ).showsProgress)
 
     #expect(ResourceViewStatus(
         freshness: .relisting,
@@ -108,5 +116,5 @@ import Testing
         metricsReconciling: true
     )
     #expect(status.metricsReconciling)
-    #expect(!status.showsProgress)
+    #expect(status.showsProgress)
 }
