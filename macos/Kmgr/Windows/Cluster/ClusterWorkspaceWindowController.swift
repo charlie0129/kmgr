@@ -8742,15 +8742,28 @@ private final class ResourceListViewController: NSViewController,
                 resource: resource.resource
             )
         )
+        startNativeRangeTargetFetch(pending)
+        return true
+    }
+
+    /// Starts (or restarts) the one-row endpoint request while retaining the
+    /// compact drag state. A presentation-only watch update changes the
+    /// request revision but not the numeric ordering, so the drag can be
+    /// retried safely instead of being surfaced as an internal failure.
+    private func startNativeRangeTargetFetch(
+        _ pending: PendingNativeRangeSelection
+    ) {
         pendingNativeRangeSelection = pending
-        pendingUIDSelectionTableIndexes = IndexSet(integersIn: selectedRange)
+        pendingUIDSelectionTableIndexes = IndexSet(
+            integersIn: pending.selectedRange
+        )
         nativeRangeSelectionFetchTicket &+= 1
         let ticket = nativeRangeSelectionFetchTicket
         let request = ResourceViewRangeRequest(
             sessionID: session.sessionID,
             viewID: viewID,
-            revision: viewRevision,
-            startIndex: targetIndex,
+            revision: pending.expectedViewRevision,
+            startIndex: pending.targetIndex,
             length: 1
         )
         let provider = self.provider
@@ -8772,7 +8785,6 @@ private final class ResourceListViewController: NSViewController,
                 )
             }
         }
-        return true
     }
 
     private func receiveNativeRangeTarget(
@@ -8791,6 +8803,32 @@ private final class ResourceListViewController: NSViewController,
             restoreAppKitSelectionFromLoadedModel()
             let error = selectionScopeChangedIssue()
             for fence in selectionFences { fence.resolve(.failure(error)) }
+            return
+        }
+        if let currentViewRevision = rangeCache?.revision,
+            currentViewRevision.generation == pending.revision.generation,
+            currentViewRevision.index == pending.revision.indexRevision,
+            currentViewRevision.presentation != pending.expectedViewRevision.presentation
+        {
+            // Presentation-only updates retain the same UID ordering and
+            // selection revision. Re-pin the endpoint request to the new
+            // presentation, preserving any command waiting on this drag.
+            let selectionFences = pendingNativeRangeSelectionFences
+            pendingNativeRangeSelectionFences.removeAll(keepingCapacity: true)
+            let preservesPendingCommand = pendingCommandForLoadingSelection != nil
+            cancelPendingNativeRangeSelection(
+                preservingPendingCommand: preservesPendingCommand
+            )
+            pendingNativeRangeSelectionFences = selectionFences
+            startNativeRangeTargetFetch(PendingNativeRangeSelection(
+                anchorUID: pending.anchorUID,
+                targetIndex: pending.targetIndex,
+                selectedRange: pending.selectedRange,
+                revision: pending.revision,
+                expectedViewRevision: currentViewRevision,
+                expectedGVR: pending.expectedGVR
+            ))
+            scheduleViewportUpdate(immediate: true)
             return
         }
         guard range.viewID == viewID,
