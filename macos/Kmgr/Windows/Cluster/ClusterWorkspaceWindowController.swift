@@ -986,6 +986,9 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     @objc func focusResourceFilter(_ sender: Any?) {
         workspaceController.focusResourceFilter(sender)
     }
+    @objc func restartResourceStream(_ sender: Any?) {
+        workspaceController.restartResourceStream(sender)
+    }
     @objc func chooseNamespace(_ sender: Any?) {
         workspaceController.chooseNamespace(sender)
     }
@@ -1047,6 +1050,9 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         }
         if menuItem.action == #selector(refreshAPIResources(_:)) {
             return workspaceController.canRefreshAPIResources
+        }
+        if menuItem.action == #selector(restartResourceStream(_:)) {
+            return workspaceController.canRestartResourceStream
         }
         if menuItem.action == #selector(copyResourceCell(_:)) {
             return workspaceController.canCopyResourceCell
@@ -2157,6 +2163,13 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     }
 
     @objc func focusResourceFilter(_ sender: Any?) { contentController.performCommand(.focusFilter) }
+    @objc func restartResourceStream(_ sender: Any?) {
+        guard canRestartResourceStream else {
+            NSSound.beep()
+            return
+        }
+        contentController.restartResourceStream()
+    }
     func isResourceFilter(_ client: Any?) -> Bool {
         (client as AnyObject?) === contentController.resourceFilterControl
     }
@@ -2217,6 +2230,13 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
             && dataController == nil
             && podContainerController == nil
             && contentController.canCopyCapturedCell
+    }
+
+    var canRestartResourceStream: Bool {
+        detailController == nil
+            && dataController == nil
+            && podContainerController == nil
+            && contentController.canRestartResourceStream
     }
 
     func canPerformCommand(_ command: ResourceTableCommand) -> Bool {
@@ -3823,11 +3843,13 @@ private enum ResourceStreamOpenReason: String {
     case restoration = "restoration"
     case historyRestore = "history-restore"
     case sortChange = "sort-change"
+    case manualRestart = "manual-restart"
 }
 
 private struct PendingResourceStreamOpen {
     var reason: ResourceStreamOpenReason
     var preservingOptionalResourceDiscoveryState: Bool
+    var forceRelist: Bool
 }
 
 struct ResourceViewportTiming: Sendable {
@@ -3978,6 +4000,7 @@ private final class ResourceListViewController: NSViewController,
     private let scopeLabel = NSTextField(labelWithString: "All namespaces")
     private let sortLabel = NSTextField(labelWithString: "Unsorted")
     private let filterField = NSSearchField()
+    private let restartStreamButton = NSButton(title: "Restart Stream", target: nil, action: nil)
     private let filterCompletionPopup = ResourceFilterCompletionPopup()
     private let tableView = ResourceTableView()
     private let scrollView = NSScrollView()
@@ -4390,8 +4413,16 @@ private final class ResourceListViewController: NSViewController,
 
         let columnsButton = NSButton(title: "Columns…", target: self, action: #selector(showColumns))
         columnsButton.bezelStyle = .texturedRounded
+        restartStreamButton.target = self
+        restartStreamButton.action = #selector(restartResourceStream(_:))
+        restartStreamButton.bezelStyle = .texturedRounded
+        restartStreamButton.setAccessibilityLabel("Restart resource stream")
+        restartStreamButton.setAccessibilityHelp(
+            "Reload this resource with a fresh Kubernetes LIST and WATCH while preserving the filter."
+        )
         let header = NSStackView(views: [
-            titleLabel, scopeLabel, sortLabel, NSView(), filterField, columnsButton,
+            titleLabel, scopeLabel, sortLabel, NSView(), filterField,
+            restartStreamButton, columnsButton,
         ])
         header.orientation = .horizontal
         header.alignment = .centerY
@@ -4530,6 +4561,22 @@ private final class ResourceListViewController: NSViewController,
         configureColumns(for: resource)
         openStream(reason: reason)
         publishContextualShortcutsIfChanged()
+    }
+
+    var canRestartResourceStream: Bool {
+        isAuthenticated && resourceCatalogValidated && resource != nil
+    }
+
+    func restartResourceStream() {
+        guard canRestartResourceStream else {
+            NSSound.beep()
+            return
+        }
+        openStream(reason: .manualRestart, forceRelist: true)
+    }
+
+    @objc private func restartResourceStream(_ sender: Any?) {
+        restartResourceStream()
     }
 
     func changeNamespaceScope(_ scope: NamespaceSelection) {
@@ -4868,6 +4915,16 @@ private final class ResourceListViewController: NSViewController,
     }
 
     private func addResourceMenuItems(to menu: NSMenu) {
+        let restart = NSMenuItem(
+            title: "Restart Resource Stream",
+            action: #selector(restartResourceStream(_:)),
+            keyEquivalent: ""
+        )
+        restart.target = self
+        restart.isEnabled = canRestartResourceStream
+        menu.addItem(restart)
+        menu.addItem(.separator())
+
         func add(_ title: String, _ command: ResourceTableCommand) {
             let item = NSMenuItem(title: title, action: #selector(performContextMenuCommand(_:)), keyEquivalent: "")
             item.target = self
@@ -5419,7 +5476,8 @@ private final class ResourceListViewController: NSViewController,
 
     private func deferStreamOpenUntilColumnsAreInstalled(
         reason: ResourceStreamOpenReason,
-        preservingOptionalResourceDiscoveryState: Bool
+        preservingOptionalResourceDiscoveryState: Bool,
+        forceRelist: Bool
     ) -> Bool {
         guard pendingColumnInstallation != nil else { return false }
         pendingColumnStreamOpenTask?.cancel()
@@ -5427,7 +5485,8 @@ private final class ResourceListViewController: NSViewController,
         pendingStreamOpenAfterColumnInstallation = PendingResourceStreamOpen(
             reason: reason,
             preservingOptionalResourceDiscoveryState:
-                preservingOptionalResourceDiscoveryState
+                preservingOptionalResourceDiscoveryState,
+            forceRelist: forceRelist
         )
         traceResourceCache(
             "event=open_stream_deferred reason=\(reason.rawValue)"
@@ -5457,14 +5516,16 @@ private final class ResourceListViewController: NSViewController,
             openStream(
                 reason: pending.reason,
                 preservingOptionalResourceDiscoveryState:
-                    pending.preservingOptionalResourceDiscoveryState
+                    pending.preservingOptionalResourceDiscoveryState,
+                forceRelist: pending.forceRelist
             )
         }
     }
 
     private func openStream(
         reason: ResourceStreamOpenReason,
-        preservingOptionalResourceDiscoveryState: Bool = false
+        preservingOptionalResourceDiscoveryState: Bool = false,
+        forceRelist: Bool = false
     ) {
         guard isAuthenticated, resourceCatalogValidated else {
             traceResourceCache(
@@ -5485,7 +5546,8 @@ private final class ResourceListViewController: NSViewController,
         if deferStreamOpenUntilColumnsAreInstalled(
             reason: reason,
             preservingOptionalResourceDiscoveryState:
-                preservingOptionalResourceDiscoveryState
+                preservingOptionalResourceDiscoveryState,
+            forceRelist: forceRelist
         ) {
             return
         }
@@ -5537,7 +5599,8 @@ private final class ResourceListViewController: NSViewController,
         if deferStreamOpenUntilColumnsAreInstalled(
             reason: reason,
             preservingOptionalResourceDiscoveryState:
-                preservingOptionalResourceDiscoveryState
+                preservingOptionalResourceDiscoveryState,
+            forceRelist: forceRelist
         ) {
             return
         }
@@ -5636,7 +5699,8 @@ private final class ResourceListViewController: NSViewController,
                     direction: descriptor.ascending ? .ascending : .descending
                 )
             },
-            stageUntilReconciled: canKeepWarmRows && reason != .resumeAfterDetail
+            stageUntilReconciled: canKeepWarmRows && reason != .resumeAfterDetail,
+            forceRelist: forceRelist
         )
         streamTask = Task { [weak self, provider] in
             do {
@@ -7227,6 +7291,7 @@ private final class ResourceListViewController: NSViewController,
     }
 
     private func updateStatusLine() {
+        restartStreamButton.isEnabled = canRestartResourceStream
         if let descriptor = tableView.sortDescriptors.first, let key = descriptor.key {
             let title = tableView.tableColumns.first(where: { $0.identifier.rawValue == key })?.title
                 ?? key

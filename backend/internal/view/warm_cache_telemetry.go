@@ -181,7 +181,7 @@ func (r *Runtime) addRetainedCacheTelemetryLocked(
 		}
 		addRetainedUsage(&usage, 1, 0, 0)
 		authorities[authorityID] = usage
-		addStore(authorityID, entry.store)
+		addStore(authorityID, entry.currentStore())
 		if projection := entry.warmProjection; projection != nil {
 			addPresentation(
 				authorityID,

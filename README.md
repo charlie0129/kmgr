@@ -71,13 +71,20 @@ already checked into the repository.
 3. Pick a resource from the sidebar. Lists arrive progressively, then continue
    through WATCH. Moving away releases the last view consumer after a debounce;
    returning can display bounded warm rows immediately while the watch resumes
-   or a relist runs in the background.
+   or a relist runs in the background. Use **Restart Resource Stream** in the
+   Resource menu, the table context menu, or the list header if that resource
+   remains stuck reconnecting. The action preserves the current scope, filter,
+   columns, and sort while discarding the retained resource version and starting
+   a fresh LIST/WATCH lifecycle.
 4. Use `/` for the current table filter and Command-K for commands, recent or
    cached objects, kinds, namespaces, or a two-stage resource-scoped object
    search. A scoped search checks compatible active/warm engine caches before
    doing a paginated LIST. When that LIST completes, its exact-scope snapshot
    can be handed once to the resource view, which displays those rows and
    resumes WATCH from the same resource version without repeating the LIST.
+   Ordinary keywords and column expressions remain local table filters; only
+   explicit `labelSelector:` and `fieldSelector:` terms become Kubernetes API
+   selectors.
 
 Each context workspace is a separate native window. Opening the same context
 twice creates independent UI/navigation state while allowing the engine to
@@ -94,6 +101,9 @@ forwards live in one app-wide Port Forwards window.
   and watch updates do not retarget a selection by row index. Clicking a cell
   captures its full value for Command-C or Copy Cell without adding a second
   visible selection or changing the selected rows.
+- Restarting a resource stream affects that compatible shared raw stream, not
+  the entire cluster connection. Other resource kinds, mutations, terminals,
+  logs, and port-forwards continue independently.
 - Details provide a structured Summary table where clicking a cell and pressing
   Command-C (or choosing Copy Cell from its context menu) copies the complete
   value. A Pod Summary reports the reason, exit code, and relative and local
@@ -216,6 +226,7 @@ globally across launches rather than per cluster.
 | Command-K | Open the current workspace's Command Palette |
 | Shift-Command-N | Open the current workspace's namespace picker |
 | `/` | Focus the resource filter |
+| Command-R | Restart the current resource's LIST/WATCH stream |
 | `/` or Command-F in a key/value editor | Search keys and values |
 | Return in a key/value editor | Edit the selected value |
 | Return in Details Summary | Edit the selected label or annotation |
@@ -544,7 +555,11 @@ discoverable listable type.
   closed rather than leaving an apparently connected window.
 - **No rows or a reconnecting banner:** keep the cached table visible and read
   the connection/watch state. A stale resource version can cause a background
-  relist without blanking usable warm rows.
+  relist without blanking usable warm rows. If the current resource remains in
+  Resuming or Reconnecting, choose **Resource → Restart Resource Stream**
+  (Command-R) to discard its checkpoint and perform a fresh LIST/WATCH. You do
+  not need to clear an ordinary search keyword; those filters are evaluated
+  locally and are preserved by the restart.
 - **Metrics show Unavailable:** grant read access to `metrics.k8s.io` or install
   a compatible Metrics Server. Base LIST/WATCH remains independent.
 - **A relationship is missing:** cached results are expected to be potentially

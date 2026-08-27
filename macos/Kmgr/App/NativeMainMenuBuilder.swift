@@ -274,6 +274,13 @@ enum NativeMainMenuBuilder {
             title: "Refresh API Resources",
             action: #selector(ClusterWorkspaceWindowController.refreshAPIResources(_:))
         )
+        addResponderItem(
+            to: menu,
+            title: "Restart Resource Stream",
+            action: #selector(ClusterWorkspaceWindowController.restartResourceStream(_:)),
+            keyEquivalent: "r",
+            modifiers: [.command]
+        )
         menu.addItem(.separator())
         addResponderItem(
             to: menu,

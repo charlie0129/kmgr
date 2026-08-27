@@ -453,6 +453,15 @@ public nonisolated struct Kmgr_V1_OpenViewRequest: @unchecked Sendable {
     set {_uniqueStorage()._stageUntilReconciled = newValue}
   }
 
+  /// Discard any retained resourceVersion and rebuild the raw resource
+  /// snapshot before opening the live watch. This is used by the explicit
+  /// resource-stream restart action and is intentionally scoped to this view's
+  /// generation; compatible subscribers share the resulting raw stream.
+  public var forceRelist: Bool {
+    get {_storage._forceRelist}
+    set {_uniqueStorage()._forceRelist = newValue}
+  }
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -1823,7 +1832,7 @@ nonisolated extension Kmgr_V1_ViewSpec: SwiftProtobuf.Message, SwiftProtobuf._Me
 
 nonisolated extension Kmgr_V1_OpenViewRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".OpenViewRequest"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}context\0\u{3}view_id\0\u{1}generation\0\u{1}spec\0\u{3}stage_until_reconciled\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}context\0\u{3}view_id\0\u{1}generation\0\u{1}spec\0\u{3}stage_until_reconciled\0\u{3}force_relist\0")
 
   fileprivate class _StorageClass {
     var _context: Kmgr_V1_RequestContext? = nil
@@ -1831,6 +1840,7 @@ nonisolated extension Kmgr_V1_OpenViewRequest: SwiftProtobuf.Message, SwiftProto
     var _generation: UInt64 = 0
     var _spec: Kmgr_V1_ViewSpec? = nil
     var _stageUntilReconciled: Bool = false
+    var _forceRelist: Bool = false
 
       // This property is used as the initial default value for new instances of the type.
       // The type itself is protecting the reference to its storage via CoW semantics.
@@ -1846,6 +1856,7 @@ nonisolated extension Kmgr_V1_OpenViewRequest: SwiftProtobuf.Message, SwiftProto
       _generation = source._generation
       _spec = source._spec
       _stageUntilReconciled = source._stageUntilReconciled
+      _forceRelist = source._forceRelist
     }
   }
 
@@ -1869,6 +1880,7 @@ nonisolated extension Kmgr_V1_OpenViewRequest: SwiftProtobuf.Message, SwiftProto
         case 3: try { try decoder.decodeSingularUInt64Field(value: &_storage._generation) }()
         case 4: try { try decoder.decodeSingularMessageField(value: &_storage._spec) }()
         case 5: try { try decoder.decodeSingularBoolField(value: &_storage._stageUntilReconciled) }()
+        case 6: try { try decoder.decodeSingularBoolField(value: &_storage._forceRelist) }()
         default: break
         }
       }
@@ -1896,6 +1908,9 @@ nonisolated extension Kmgr_V1_OpenViewRequest: SwiftProtobuf.Message, SwiftProto
       if _storage._stageUntilReconciled != false {
         try visitor.visitSingularBoolField(value: _storage._stageUntilReconciled, fieldNumber: 5)
       }
+      if _storage._forceRelist != false {
+        try visitor.visitSingularBoolField(value: _storage._forceRelist, fieldNumber: 6)
+      }
     }
     try unknownFields.traverse(visitor: &visitor)
   }
@@ -1910,6 +1925,7 @@ nonisolated extension Kmgr_V1_OpenViewRequest: SwiftProtobuf.Message, SwiftProto
         if _storage._generation != rhs_storage._generation {return false}
         if _storage._spec != rhs_storage._spec {return false}
         if _storage._stageUntilReconciled != rhs_storage._stageUntilReconciled {return false}
+        if _storage._forceRelist != rhs_storage._forceRelist {return false}
         return true
       }
       if !storagesAreEqual {return false}

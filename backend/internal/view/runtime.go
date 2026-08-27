@@ -47,6 +47,8 @@ const (
 	DefaultSearchSnapshotObjectLimit         = 250_000
 	DefaultSearchSnapshotTTL                 = 30 * time.Second
 	DefaultOpenGenerationHistory             = 1024
+	DefaultWatchOpenTimeout                  = 15 * time.Second
+	maxAutomaticWatchOpenRetries             = 3
 	DefaultPipelinePageSize            int64 = 500
 	MaximumPipelinePageSize            int64 = 10_000
 	defaultOpenProjectionLimit               = 4
@@ -264,15 +266,19 @@ type RuntimeConfig struct {
 	WarmCacheAuthorityActive    func(string) bool
 	PipelinePageSize            int64
 	PipelineTimeout             time.Duration
-	SearchSnapshotLimit         int
-	SearchSnapshotObjectLimit   int
-	SearchSnapshotTTL           time.Duration
-	OpenProjectionLimit         int
-	ProjectionWorkerLimit       int
-	OpenGenerationHistory       int
-	openProjectionHook          func()
-	openHandoffHook             func()
-	pipelineRunHook             func(context.Context, func(context.Context) error) error
+	// WatchOpenTimeout bounds the time a resource may remain in the
+	// pre-WATCH Resuming phase. It is separate from PipelineTimeout, which is
+	// the server-side lifetime of an already established watch request.
+	WatchOpenTimeout          time.Duration
+	SearchSnapshotLimit       int
+	SearchSnapshotObjectLimit int
+	SearchSnapshotTTL         time.Duration
+	OpenProjectionLimit       int
+	ProjectionWorkerLimit     int
+	OpenGenerationHistory     int
+	openProjectionHook        func()
+	openHandoffHook           func()
+	pipelineRunHook           func(context.Context, func(context.Context) error) error
 }
 
 // ColumnProgramResolver resolves programs once per opened view. Projection
@@ -297,15 +303,16 @@ type AcceleratorConfigProvider interface {
 type Runtime struct {
 	mu sync.Mutex
 
-	source          ResourceSource
-	metrics         MetricSource
-	columns         ColumnProgramResolver
-	selectionStore  *SelectionStore
-	releaseDelay    time.Duration
-	batchDelay      time.Duration
-	pendingRowLimit int
-	pageSize        int64
-	watchTimeout    time.Duration
+	source           ResourceSource
+	metrics          MetricSource
+	columns          ColumnProgramResolver
+	selectionStore   *SelectionStore
+	releaseDelay     time.Duration
+	batchDelay       time.Duration
+	pendingRowLimit  int
+	pageSize         int64
+	watchTimeout     time.Duration
+	watchOpenTimeout time.Duration
 
 	resources                      map[resourceKey]*resourceRuntime
 	views                          map[viewKey]*Subscription
@@ -406,17 +413,25 @@ type completedSearchSnapshot struct {
 }
 
 type resourceRuntime struct {
-	key          resourceKey
-	store        *store.UIDStore
-	client       watcher.ListerWatcher
-	subscribers  map[*Subscription]struct{}
-	closing      map[*Subscription]struct{}
-	ctx          context.Context
-	cancel       context.CancelFunc
-	state        resourceState
-	runNumber    uint64
-	releaseTimer *time.Timer
-	lastStatus   watcher.Status
+	key resourceKey
+	// store is the immutable initial pointer. Restarts publish later stores
+	// through replacementStore so background projection/metrics readers can
+	// load the current pointer without racing the lifecycle fence, while a
+	// retired Pipeline keeps the exact store it was constructed with.
+	store              *store.UIDStore
+	replacementStore   atomic.Pointer[store.UIDStore]
+	client             watcher.ListerWatcher
+	subscribers        map[*Subscription]struct{}
+	closing            map[*Subscription]struct{}
+	ctx                context.Context
+	cancel             context.CancelFunc
+	state              resourceState
+	runNumber          uint64
+	watchOpenTimer     *time.Timer
+	watchOpenRunNumber uint64
+	watchOpenTimeouts  uint8
+	releaseTimer       *time.Timer
+	lastStatus         watcher.Status
 	// revision advances after every store mutation callback while openers pins
 	// the entry during an off-lock initial projection.
 	revision uint64
@@ -433,6 +448,24 @@ type resourceRuntime struct {
 	warmProjection           *warmProjection
 	tableColumns             []metav1.TableColumnDefinition
 	tableRows                map[string][]any
+	restartRequested         bool
+}
+
+func (entry *resourceRuntime) currentStore() *store.UIDStore {
+	if entry == nil {
+		return nil
+	}
+	if replacement := entry.replacementStore.Load(); replacement != nil {
+		return replacement
+	}
+	return entry.store
+}
+
+func (entry *resourceRuntime) replaceStore(replacement *store.UIDStore) {
+	if entry == nil || replacement == nil {
+		return
+	}
+	entry.replacementStore.Store(replacement)
 }
 
 type resourceState uint8
@@ -441,7 +474,14 @@ const (
 	resourceIdle resourceState = iota
 	resourceRunning
 	resourceStopping
+	resourceRestarting
 )
+
+type resourceRestartPlan struct {
+	entry         *resourceRuntime
+	fenceRun      uint64
+	subscriptions []*Subscription
+}
 
 type openAttempt struct {
 	key        viewKey
@@ -471,7 +511,7 @@ func NewRuntime(config RuntimeConfig) (*Runtime, error) {
 	if err != nil {
 		return nil, fmt.Errorf("configure selection store: %w", err)
 	}
-	if config.ReleaseDelay < 0 || config.BatchDelay < 0 || config.PipelinePageSize < 0 || config.PipelineTimeout < 0 ||
+	if config.ReleaseDelay < 0 || config.BatchDelay < 0 || config.PipelinePageSize < 0 || config.PipelineTimeout < 0 || config.WatchOpenTimeout < 0 ||
 		config.SearchSnapshotLimit < 0 || config.SearchSnapshotObjectLimit < 0 || config.SearchSnapshotTTL < 0 ||
 		config.OpenProjectionLimit < 0 || config.ProjectionWorkerLimit < 0 ||
 		config.OpenGenerationHistory < 0 ||
@@ -491,6 +531,10 @@ func NewRuntime(config RuntimeConfig) (*Runtime, error) {
 	batchDelay := config.BatchDelay
 	if batchDelay == 0 {
 		batchDelay = DefaultViewBatchDelay
+	}
+	watchOpenTimeout := config.WatchOpenTimeout
+	if watchOpenTimeout == 0 {
+		watchOpenTimeout = DefaultWatchOpenTimeout
 	}
 	pendingLimit := config.PendingRowLimit
 	if pendingLimit == 0 {
@@ -587,6 +631,7 @@ func NewRuntime(config RuntimeConfig) (*Runtime, error) {
 		pendingRowLimit:                pendingLimit,
 		pageSize:                       config.PipelinePageSize,
 		watchTimeout:                   config.PipelineTimeout,
+		watchOpenTimeout:               watchOpenTimeout,
 		resources:                      make(map[resourceKey]*resourceRuntime),
 		views:                          make(map[viewKey]*Subscription),
 		warm:                           watcher.NewWarmCache[resourceKey, *resourceRuntime](warmViews, warmObjects, warmBytes),
@@ -757,6 +802,10 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 
 	var entry *resourceRuntime
 	var cachedProjection *warmProjection
+	// Restart is committed only at the publication handoff below. Keeping the
+	// preparation transactional means a cancelled/obsolete Open cannot retire
+	// the currently usable stream for its sibling subscribers.
+	restartPending := request.GetForceRelist()
 	projectionAdmissionHeld := false
 	for {
 		r.mu.Lock()
@@ -786,10 +835,18 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 			entry.warmProjection != nil && entry.warmProjection.key == projector.cacheKey {
 			cachedProjection = entry.warmProjection
 		}
+		// A stopped pipeline cannot be resumed safely by attaching a new
+		// subscriber: its Run may still be blocked inside Watch and therefore
+		// never reach resourceStopped. Defer the in-place lifecycle replacement
+		// until publication so an aborted opener leaves the old stream intact.
+		if entry != nil && entry.transientSearchList == nil &&
+			(entry.state == resourceStopping || entry.restartRequested || restartPending) {
+			restartPending = true
+		}
 		// A compatible immutable presentation needs no synchronous raw-store
 		// projection. Every other path obtains bounded admission before it
 		// consumes a search handoff, creates an entry, or removes a warm entry.
-		if cachedProjection == nil && !projectionAdmissionHeld {
+		if cachedProjection == nil && !restartPending && !projectionAdmissionHeld {
 			r.mu.Unlock()
 			if err := r.acquireOpenProjection(openCtx); err != nil {
 				r.abortOpen(attempt)
@@ -807,7 +864,7 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 
 	var searchSnapshot *completedSearchSnapshot
 	var transientList *transientSearchList
-	if entry == nil && !usesTableStream {
+	if entry == nil && !usesTableStream && !restartPending {
 		handoffResource := key
 		if namespacePlan.exactFanIn {
 			// Explicit resource search uses one all-namespaces scan plus the same
@@ -870,10 +927,19 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 			}
 		}
 		r.resources[key] = entry
+		// A newly allocated entry already has an empty store and no retained
+		// resourceVersion, so a force relist is implicit and needs no extra
+		// lifecycle fence at publication.
+		restartPending = false
 	}
 	attempt.entry = entry
 	entry.openers++
-	usedWarmProjection := cachedProjection != nil
+	// A committed restart replaces this store at publication, so projecting its
+	// full retired contents would perform an avoidable O(n) scan only to discard
+	// the result. The client already retains its last usable rows while the fresh
+	// generation stages; an aborted opener still leaves the old stream intact.
+	skipRetiredProjection := restartPending
+	usedWarmProjection := cachedProjection != nil && !skipRetiredProjection
 	r.removeWarmLocked(key)
 	if entry.releaseTimer != nil {
 		entry.releaseTimer.Stop()
@@ -974,7 +1040,7 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 		projector = subscription.projector
 	}
 	var warmRows []*kmgrv1.ResourceRow
-	if cachedProjection != nil {
+	if usedWarmProjection {
 		// Copy only the immutable slice header. Building the subscription's row
 		// index happens outside Runtime.mu below.
 		warmRows = cachedProjection.rows
@@ -1003,6 +1069,7 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 	}
 	revision := entry.revision
 	snapshotComplete := entry.snapshotComplete
+	projectedStore := entry.currentStore()
 	tableColumns := append([]metav1.TableColumnDefinition(nil), entry.tableColumns...)
 	tableRows := make(map[string][]any, len(entry.tableRows))
 	for uid, cells := range entry.tableRows {
@@ -1012,10 +1079,10 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 	subscription.initializeServerTable(tableColumns, tableRows)
 
 	var objects []*unstructured.Unstructured
-	if !usedWarmProjection {
+	if !usedWarmProjection && !skipRetiredProjection {
 		// UIDStore has its own lock. Taking this potentially large deterministic
 		// snapshot outside Runtime.mu keeps all lifecycle operations responsive.
-		objects, err = entry.store.SnapshotContext(openCtx)
+		objects, err = projectedStore.SnapshotContext(openCtx)
 		if err != nil {
 			r.abortOpen(attempt)
 			return nil, err
@@ -1053,7 +1120,7 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 		initialStatus = statusForWarmEntry(entry)
 		initialStatus.Freshness = kmgrv1.ViewFreshness_VIEW_FRESHNESS_STALE
 		initialStatus.FromWarmCache = true
-	} else if entry.store.ResourceVersion() != "" || entry.store.Len() != 0 || entry.state != resourceIdle || entry.transientSearchList != nil {
+	} else if projectedStore.ResourceVersion() != "" || projectedStore.Len() != 0 || entry.state != resourceIdle || entry.transientSearchList != nil {
 		initialStatus = statusForWarmEntry(entry)
 	} else {
 		initialStatus = &kmgrv1.ViewStatus{Freshness: kmgrv1.ViewFreshness_VIEW_FRESHNESS_LOADING}
@@ -1098,6 +1165,31 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 			return nil, err
 		}
 		return nil, ErrStaleViewOpen
+	}
+	var restartPlan *resourceRestartPlan
+	if entry.transientSearchList != nil && restartPending {
+		// The command-palette LIST owns the shared store until its final page is
+		// delivered. Preserve the explicit restart intent and fence that store
+		// before the normal pipeline starts, rather than cancelling an unrelated
+		// search or silently treating its snapshot as the requested fresh LIST.
+		entry.restartRequested = true
+		subscription.suppressInitialReconciliationUnlocked()
+	} else if entry.transientSearchList == nil &&
+		(restartPending || entry.restartRequested || entry.state == resourceStopping) {
+		// Fence the previous run only after the replacement generation has
+		// passed all off-lock projection and publication checks. The fresh
+		// pipeline emits its own Listing/Resuming statuses to every subscriber.
+		restartPlan = r.prepareResourceRestartLocked(entry, true)
+	}
+	storeChanged := entry.currentStore() != projectedStore
+	if restartPlan != nil {
+		subscription.prepareForResourceRestartUnlocked(restartPlan.fenceRun)
+	} else if entry.state == resourceRestarting || storeChanged {
+		// A concurrent shared restart may have swapped the raw store while this
+		// opener projected outside Runtime.mu. This private subscription was not
+		// necessarily captured by that restart plan, so align it with the same
+		// run fence before publication.
+		subscription.prepareForResourceRestartUnlocked(entry.runNumber)
 	}
 	// Runtime.mu linearizes publication with pipeline callbacks. Work applied
 	// before this point advances revision and needs one authoritative catch-up;
@@ -1175,13 +1267,23 @@ func (r *Runtime) OpenContext(ctx context.Context, request *kmgrv1.OpenViewReque
 		subscription.scheduleAuthoritativeResnapshot()
 	}
 	deliverSubscriptionError(startSubscribers, startError)
+	if restartPlan != nil {
+		r.completeResourceRestart(restartPlan, true)
+	}
 	// Enqueue the base projection before metrics can publish. Starting this
 	// goroutine after releasing the runtime lock also keeps a very fast metrics
 	// response from contending with the base LIST/WATCH setup.
 	if len(metricProviderLeases) != 0 {
 		subscription.attachMetrics(subscribeMetricProviders(metricProviderScopes, metricProviderLeases))
 	}
-	if snapshotComplete && subscription.metricPlan.dependency.requiresCompleteCoverage() {
+	// The pipeline may have crossed the initial LIST barrier while the open
+	// handoff was being published. Read the subscription-owned completeness bit
+	// under its mutex instead of consulting it concurrently with callbacks.
+	subscription.mu.Lock()
+	requestCompleteMetrics := subscription.snapshotComplete &&
+		subscription.metricPlan.dependency.requiresCompleteCoverage()
+	subscription.mu.Unlock()
+	if requestCompleteMetrics {
 		subscription.requestCompleteMetricCoverage()
 	}
 	return subscription, nil
@@ -1286,7 +1388,7 @@ func (r *Runtime) startResourceLocked(entry *resourceRuntime) ([]*Subscription, 
 	entry.state = resourceRunning
 	pipeline, err := watcher.NewPipeline(watcher.PipelineConfig{
 		Client:                  entry.client,
-		Store:                   entry.store,
+		Store:                   entry.currentStore(),
 		PageSize:                r.pageSize,
 		WatchTimeout:            r.watchTimeout,
 		ForceRelist:             !entry.snapshotComplete,
@@ -1295,8 +1397,10 @@ func (r *Runtime) startResourceLocked(entry *resourceRuntime) ([]*Subscription, 
 			LabelSelector: entry.key.labels,
 			FieldSelector: entry.key.fields,
 		},
-		OnStatus: func(status watcher.Status) { r.receiveStatus(entry, runNumber, status) },
-		OnBatch:  func(batch watcher.Batch) { r.receiveBatch(entry, runNumber, batch) },
+		OnWatchOpenComplete: func() { r.watchOpened(entry, runNumber) },
+		OnWatchOpen:         func() { r.watchOpening(entry, runNumber) },
+		OnStatus:            func(status watcher.Status) { r.receiveStatus(entry, runNumber, status) },
+		OnBatch:             func(batch watcher.Batch) { r.receiveBatch(entry, runNumber, batch) },
 	})
 	if err != nil {
 		entry.state = resourceIdle
@@ -1322,6 +1426,224 @@ func (r *Runtime) startResourceLocked(entry *resourceRuntime) ([]*Subscription, 
 	return nil, nil
 }
 
+// watchOpening is invoked by watcher.Pipeline immediately before it enters a
+// client Watch call. Dynamic clients normally return quickly, but a broken
+// transport/proxy can block there while ignoring context cancellation. Keep a
+// bounded timer at the runtime lifecycle layer so a replacement run can be
+// fenced and started without waiting for that goroutine to unwind.
+func (r *Runtime) watchOpening(entry *resourceRuntime, runNumber uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed || r.resources[entry.key] != entry || entry.runNumber != runNumber ||
+		entry.state != resourceRunning {
+		return
+	}
+	r.armWatchOpenTimerLocked(entry, runNumber)
+}
+
+// watchOpened ends the pre-open watchdog window as soon as the client Watch
+// method returns. WatchList may still take time to deliver its initial events,
+// so waiting for a later Watching status would misclassify a healthy but large
+// stream as a blocked Watch call.
+func (r *Runtime) watchOpened(entry *resourceRuntime, runNumber uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed || r.resources[entry.key] != entry || entry.runNumber != runNumber ||
+		entry.state != resourceRunning {
+		return
+	}
+	r.stopWatchOpenTimerLocked(entry)
+}
+
+func (r *Runtime) armWatchOpenTimerLocked(entry *resourceRuntime, runNumber uint64) {
+	if entry == nil || r.watchOpenTimeout <= 0 {
+		return
+	}
+	if entry.watchOpenTimer != nil && entry.watchOpenRunNumber == runNumber {
+		return
+	}
+	if entry.watchOpenTimer != nil {
+		entry.watchOpenTimer.Stop()
+	}
+	entry.watchOpenRunNumber = runNumber
+	entry.watchOpenTimer = time.AfterFunc(r.watchOpenTimeout, func() {
+		r.watchOpenTimedOut(entry, runNumber)
+	})
+}
+
+func (r *Runtime) stopWatchOpenTimerLocked(entry *resourceRuntime) {
+	if entry == nil {
+		return
+	}
+	if entry.watchOpenTimer != nil {
+		entry.watchOpenTimer.Stop()
+		entry.watchOpenTimer = nil
+	}
+	entry.watchOpenRunNumber = 0
+}
+
+func (r *Runtime) watchOpenTimedOut(entry *resourceRuntime, runNumber uint64) {
+	var (
+		plan          *resourceRestartPlan
+		failure       *kmgrv1.StructuredError
+		failureStatus *kmgrv1.ViewStatus
+	)
+	r.mu.Lock()
+	if r.closed || r.resources[entry.key] != entry || entry.runNumber != runNumber ||
+		entry.state != resourceRunning || entry.watchOpenRunNumber != runNumber {
+		r.mu.Unlock()
+		return
+	}
+	r.stopWatchOpenTimerLocked(entry)
+	entry.watchOpenTimeouts++
+	plan = r.prepareResourceRestartLocked(
+		entry,
+		false,
+	)
+	if plan == nil {
+		r.mu.Unlock()
+		return
+	}
+	if entry.watchOpenTimeouts > maxAutomaticWatchOpenRetries {
+		// Keep the failure bounded. A cancellation-resistant client can leave
+		// each retired goroutine blocked forever; after a small number of
+		// attempts, stop spawning replacements and require the user action.
+		entry.lastStatus = watcher.Status{
+			Phase:            watcher.PhaseReconnecting,
+			Stale:            len(plan.subscriptions) != 0,
+			LastSynchronized: entry.lastStatus.LastSynchronized,
+			Error: fmt.Errorf(
+				"watch open exceeded %s after %d attempts",
+				r.watchOpenTimeout, entry.watchOpenTimeouts,
+			),
+		}
+		failure = structuredViewError("watch resource", entry.lastStatus.Error, true)
+		failure.Reason = "WatchOpenTimeout"
+		failure.Message = "The Kubernetes resource stream did not open in time. Use Restart Resource Stream to try again."
+		failureStatus = statusFromPipeline(entry.lastStatus)
+	}
+	r.mu.Unlock()
+	subscriptions, committed := r.completeResourceRestart(plan, failure == nil)
+	if committed && failure != nil {
+		deliverSubscriptionStatus(subscriptions, failureStatus)
+		deliverSubscriptionError(subscriptions, failure)
+	}
+}
+
+// prepareResourceRestartLocked retires the current raw run without waiting
+// for its client Watch call to return. Runtime.mu must be held. The old run
+// keeps its own store pointer and is fenced as soon as runNumber advances;
+// the replacement therefore cannot be contaminated by a late event from a
+// cancellation-resistant client. A user/open lifecycle restart resets the
+// bounded automatic-timeout counter; watchdog retries pass false so repeated
+// failures remain bounded and eventually require an explicit restart.
+func (r *Runtime) prepareResourceRestartLocked(
+	entry *resourceRuntime,
+	resetWatchOpenFailures bool,
+) *resourceRestartPlan {
+	if entry == nil {
+		return nil
+	}
+	if entry.transientSearchList != nil {
+		entry.restartRequested = true
+		return nil
+	}
+	if entry.watchOpenTimer != nil {
+		entry.watchOpenTimer.Stop()
+		entry.watchOpenTimer = nil
+	}
+	entry.watchOpenRunNumber = 0
+	if resetWatchOpenFailures {
+		entry.watchOpenTimeouts = 0
+	}
+	if entry.releaseTimer != nil {
+		entry.releaseTimer.Stop()
+		entry.releaseTimer = nil
+	}
+	if entry.cancel != nil {
+		entry.cancel()
+	}
+	// Advance the fence before publishing the replacement state. Even if the
+	// opener is cancelled before startResourceLocked runs, callbacks from the
+	// retired pipeline are ignored.
+	entry.runNumber++
+	fenceRun := entry.runNumber
+	previousStore := entry.currentStore()
+	hadData := previousStore != nil &&
+		(previousStore.Len() != 0 || previousStore.ResourceVersion() != "")
+	lastSynchronized := entry.lastStatus.LastSynchronized
+	entry.ctx = nil
+	entry.cancel = nil
+	entry.replaceStore(store.New())
+	entry.snapshotComplete = false
+	entry.revision++
+	entry.tableColumns = nil
+	entry.tableRows = nil
+	entry.warmProjection = nil
+	entry.restartRequested = false
+	entry.lastStatus = watcher.Status{
+		Phase:            watcher.PhaseListing,
+		Stale:            hadData,
+		LastSynchronized: lastSynchronized,
+	}
+	// Do not start the replacement until every captured subscriber has crossed
+	// the same fence. This leaves no window where a batch from the new run can
+	// overtake presentation reset, and avoids Runtime/Subscription lock
+	// inversion because the reset happens after Runtime.mu is released.
+	entry.state = resourceRestarting
+
+	subscriptions := make([]*Subscription, 0, len(entry.subscribers))
+	for subscription := range entry.subscribers {
+		subscriptions = append(subscriptions, subscription)
+	}
+	return &resourceRestartPlan{
+		entry: entry, fenceRun: fenceRun, subscriptions: subscriptions,
+	}
+}
+
+// completeResourceRestart moves every already-published presentation across
+// the raw-run fence before the replacement pipeline can start. Subscribers
+// published while the plan is in resourceRestarting state perform the same
+// private reset in OpenContext, so they need not be present in plan.
+func (r *Runtime) completeResourceRestart(
+	plan *resourceRestartPlan,
+	start bool,
+) ([]*Subscription, bool) {
+	if plan == nil || plan.entry == nil {
+		return nil, false
+	}
+	for _, subscription := range plan.subscriptions {
+		subscription.prepareForResourceRestart(plan.fenceRun)
+	}
+
+	var (
+		startSubscribers []*Subscription
+		startError       *kmgrv1.StructuredError
+	)
+	r.mu.Lock()
+	entry := plan.entry
+	if r.closed || r.resources[entry.key] != entry ||
+		entry.runNumber != plan.fenceRun || entry.state != resourceRestarting {
+		r.mu.Unlock()
+		return nil, false
+	}
+	entry.state = resourceIdle
+	subscriptions := make([]*Subscription, 0, len(entry.subscribers))
+	for subscription := range entry.subscribers {
+		subscriptions = append(subscriptions, subscription)
+	}
+	if start && len(subscriptions) != 0 {
+		startSubscribers, startError = r.startResourceLocked(entry)
+	} else if len(subscriptions) == 0 {
+		// No consumer remains. The reset still fences the blocked run, but does
+		// not create another unobserved network stream.
+		r.scheduleReleaseLocked(entry)
+	}
+	r.mu.Unlock()
+	deliverSubscriptionError(startSubscribers, startError)
+	return subscriptions, true
+}
+
 func deliverSubscriptionError(subscriptions []*Subscription, value *kmgrv1.StructuredError) {
 	if value == nil {
 		return
@@ -1331,11 +1653,32 @@ func deliverSubscriptionError(subscriptions []*Subscription, value *kmgrv1.Struc
 	}
 }
 
+func deliverSubscriptionStatus(subscriptions []*Subscription, value *kmgrv1.ViewStatus) {
+	if value == nil {
+		return
+	}
+	for _, subscription := range subscriptions {
+		subscription.setStatus(value)
+	}
+}
+
 func (r *Runtime) receiveStatus(entry *resourceRuntime, runNumber uint64, status watcher.Status) {
 	r.mu.Lock()
 	if entry.runNumber != runNumber || entry.state != resourceRunning {
 		r.mu.Unlock()
 		return
+	}
+	switch status.Phase {
+	case watcher.PhaseResuming:
+		// OnWatchOpen normally arms this first. Keeping the status path as a
+		// fallback also protects custom Pipeline hooks that emit Resuming
+		// without invoking the lifecycle callback.
+		r.armWatchOpenTimerLocked(entry, runNumber)
+	case watcher.PhaseListing, watcher.PhaseWatching, watcher.PhaseReconnecting:
+		r.stopWatchOpenTimerLocked(entry)
+	}
+	if status.Phase == watcher.PhaseWatching {
+		entry.watchOpenTimeouts = 0
 	}
 	if status.LastSynchronized.Before(entry.lastStatus.LastSynchronized) {
 		status.LastSynchronized = entry.lastStatus.LastSynchronized
@@ -1354,7 +1697,7 @@ func (r *Runtime) receiveStatus(entry *resourceRuntime, runNumber uint64, status
 	}
 	r.mu.Unlock()
 	for _, subscription := range subscriptions {
-		subscription.setStatus(translated)
+		subscription.setResourceStatus(runNumber, translated)
 	}
 }
 
@@ -1369,7 +1712,7 @@ func (r *Runtime) receiveBatch(entry *resourceRuntime, runNumber uint64, batch w
 	r.mu.Unlock()
 
 	for _, subscription := range subscriptions {
-		subscription.applyBatch(batch)
+		subscription.applyResourceBatch(runNumber, batch)
 	}
 }
 
@@ -1444,6 +1787,7 @@ func (r *Runtime) resourceStopped(entry *resourceRuntime, runNumber uint64, err 
 		return
 	}
 	wasStopping := entry.state == resourceStopping
+	r.stopWatchOpenTimerLocked(entry)
 	entry.state = resourceIdle
 	entry.cancel = nil
 	entry.ctx = nil
@@ -1471,7 +1815,10 @@ func (r *Runtime) resourceStopped(entry *resourceRuntime, runNumber uint64, err 
 		subscriptions = append(subscriptions, subscription)
 	}
 	r.mu.Unlock()
-	deliverSubscriptionError(subscriptions, structuredViewError("watch resource", err, true))
+	failure := structuredViewError("watch resource", err, true)
+	for _, subscription := range subscriptions {
+		subscription.setResourceError(runNumber, failure)
+	}
 }
 
 func (r *Runtime) Cancel(sessionID, viewID string, generation uint64) bool {
@@ -1604,11 +1951,12 @@ func (r *Runtime) cancelSubscriptionCloseLocked(subscription *Subscription) {
 // UIDStore maintains both values incrementally, so this remains O(1) while
 // Runtime.mu is held. Aggregate LRU pressure is still handled at admission.
 func (r *Runtime) canRetainWarmProjectionLocked(entry *resourceRuntime) bool {
-	if entry == nil || entry.store == nil || entry.store.Len() > r.warmObjectLimit ||
-		entry.store.Len() > r.warmObjectLimitPerAuthority {
+	store := entry.currentStore()
+	if store == nil || store.Len() > r.warmObjectLimit ||
+		store.Len() > r.warmObjectLimitPerAuthority {
 		return false
 	}
-	rawBytes := entry.store.RetainedBytes()
+	rawBytes := store.RetainedBytes()
 	return rawBytes < r.warmByteLimit && rawBytes < r.warmByteLimitPerAuthority
 }
 
@@ -1616,7 +1964,9 @@ func (r *Runtime) retainWarmProjectionLocked(entry *resourceRuntime, projection 
 	if entry == nil || projection == nil || projection.retainedBytes < 0 {
 		return
 	}
-	retainedBytes := saturatingProjectionBytes(entry.store.RetainedBytes(), projection.retainedBytes)
+	retainedBytes := saturatingProjectionBytes(
+		entry.currentStore().RetainedBytes(), projection.retainedBytes,
+	)
 	if retainedBytes > r.warmByteLimit || retainedBytes > r.warmByteLimitPerAuthority {
 		entry.warmProjection = nil
 		return
@@ -1634,7 +1984,7 @@ func (r *Runtime) cleanupUnusedEntryLocked(entry *resourceRuntime) {
 		// the entry and coordinator association until that delivery gate opens;
 		// a same-key Open can then reuse the complete store instead of starting a
 		// duplicate LIST, and the reusable search offer remains truthful.
-		if transient.terminal && entry.store.ResourceVersion() != "" {
+		if transient.terminal && entry.currentStore().ResourceVersion() != "" {
 			r.scheduleReleaseLocked(entry)
 		} else {
 			transient.view = nil
@@ -1665,7 +2015,8 @@ func (r *Runtime) cleanupUnusedEntryLocked(entry *resourceRuntime) {
 }
 func (r *Runtime) scheduleReleaseLocked(entry *resourceRuntime) {
 	if entry == nil || entry.transientSearchList != nil ||
-		entry.state == resourceStopping || entry.openers != 0 ||
+		entry.state == resourceStopping || entry.state == resourceRestarting ||
+		entry.openers != 0 ||
 		len(entry.subscribers) != 0 || entry.releaseTimer != nil {
 		return
 	}
@@ -1689,6 +2040,7 @@ func (r *Runtime) releaseResource(key resourceKey, entry *resourceRuntime, runNu
 		if entry.cancel == nil {
 			return
 		}
+		r.stopWatchOpenTimerLocked(entry)
 		entry.cancel()
 		entry.state = resourceStopping
 	case resourceStopping:
@@ -1822,7 +2174,8 @@ func (r *Runtime) finalizeWarmLocked(entry *resourceRuntime) bool {
 		return false
 	}
 	key := entry.key
-	rawBytes := entry.store.RetainedBytes()
+	currentStore := entry.currentStore()
+	rawBytes := currentStore.RetainedBytes()
 	retainedBytes := rawBytes
 	if entry.warmProjection != nil {
 		retainedBytes = saturatingProjectionBytes(retainedBytes, entry.warmProjection.retainedBytes)
@@ -1836,11 +2189,11 @@ func (r *Runtime) finalizeWarmLocked(entry *resourceRuntime) bool {
 	}
 	evicted, admitted := r.putWarmLocked(key, watcher.WarmEntry[*resourceRuntime]{
 		Value:            entry,
-		ObjectCount:      entry.store.Len(),
+		ObjectCount:      currentStore.Len(),
 		ByteCount:        retainedBytes,
-		ResourceVersion:  entry.store.ResourceVersion(),
+		ResourceVersion:  currentStore.ResourceVersion(),
 		LastSynchronized: entry.lastStatus.LastSynchronized,
-		Complete:         entry.snapshotComplete && entry.store.ResourceVersion() != "",
+		Complete:         entry.snapshotComplete && currentStore.ResourceVersion() != "",
 	})
 	if !admitted && r.resources[key] == entry {
 		entry.warmProjection = nil
@@ -1917,6 +2270,7 @@ func (r *Runtime) Close() {
 	}
 	clear(r.views)
 	for key, entry := range r.resources {
+		r.stopWatchOpenTimerLocked(entry)
 		if entry.releaseTimer != nil {
 			entry.releaseTimer.Stop()
 		}
@@ -2072,12 +2426,13 @@ func (r *Runtime) DiscoverOptionalResources(ctx context.Context, sessionID strin
 	}
 	entries := make([]cachedStore, 0, len(r.resources))
 	for key, entry := range r.resources {
+		currentStore := entry.currentStore()
 		if key.authorityID != authorityID || key.group != "" || key.version != "v1" ||
-			(key.resource != "nodes" && key.resource != "pods") || entry == nil || entry.store == nil {
+			(key.resource != "nodes" && key.resource != "pods") || currentStore == nil {
 			continue
 		}
 		entries = append(entries, cachedStore{
-			key: key, store: entry.store, complete: entry.snapshotComplete,
+			key: key, store: currentStore, complete: entry.snapshotComplete,
 		})
 	}
 	acceleratorProvider, _ := r.columns.(AcceleratorConfigProvider)
@@ -2168,10 +2523,11 @@ func (r *Runtime) CachedChildren(sessionID, ownerUID string) []CachedChild {
 	seen := make(map[string]struct{})
 	result := make([]CachedChild, 0)
 	for key, entry := range r.resources {
-		if key.authorityID != authorityID || entry == nil || entry.store == nil {
+		currentStore := entry.currentStore()
+		if key.authorityID != authorityID || currentStore == nil {
 			continue
 		}
-		for _, object := range entry.store.Children(types.UID(ownerUID)) {
+		for _, object := range currentStore.Children(types.UID(ownerUID)) {
 			if object == nil || object.GetUID() == "" {
 				continue
 			}
@@ -2272,6 +2628,11 @@ type Subscription struct {
 	// initial LIST/WatchList barrier. It gates staged reconciliation and warm
 	// catch-up status; it is not client row-delivery state.
 	snapshotComplete bool
+	// minimumResourceRun rejects a batch that was captured from a retired raw
+	// pipeline before its runtime callback released Runtime.mu. Zero is the
+	// initial transient/LIST generation; a restart advances this floor before
+	// the replacement pipeline is allowed to start.
+	minimumResourceRun uint64
 	// warmCatchupRunNumber identifies an already-running pipeline whose compact
 	// cached rows were sealed as a stale first paint. Once the mandatory full
 	// reprojection commits, the subscription republishes that run's current
@@ -2619,6 +2980,103 @@ func (s *Subscription) sealInitialUnlocked(
 	s.signalLocked(true)
 }
 
+// suppressInitialReconciliationUnlocked removes a sealed marker that was
+// prepared from the old raw store when publication subsequently decides to
+// restart that store. A fresh LIST must own the first reconciliation barrier;
+// otherwise a warm client can promote stale rows before the replacement
+// snapshot has arrived and then never receive another marker.
+func (s *Subscription) suppressInitialReconciliationUnlocked() {
+	if !s.reconciliationDelivered && !s.stageUntilReconciled {
+		return
+	}
+	filtered := s.sealedInitial[:0]
+	for _, event := range s.sealedInitial {
+		if event == nil || event.GetReconciled() == nil {
+			filtered = append(filtered, event)
+		}
+	}
+	s.sealedInitial = filtered
+	s.reconciliationDelivered = false
+	s.pendingReconciliation = false
+}
+
+func (s *Subscription) prepareForResourceRestart(fenceRun uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.prepareForResourceRestartUnlocked(fenceRun)
+}
+
+// prepareForResourceRestartUnlocked invalidates presentation state derived
+// from the retired UIDStore. It is used without the mutex only while a new
+// subscription is still private; published subscriptions enter through the
+// locking wrapper above. Clearing projected rows is necessary because the
+// replacement store intentionally starts empty, so its final LIST cannot
+// produce tombstones for objects that existed only in the retired store.
+func (s *Subscription) prepareForResourceRestartUnlocked(fenceRun uint64) {
+	minimumRun := fenceRun + 1
+	if minimumRun == 0 {
+		minimumRun = fenceRun
+	}
+	if s.closed || minimumRun <= s.minimumResourceRun {
+		return
+	}
+	s.minimumResourceRun = minimumRun
+	s.cancelProjectionScheduleLocked()
+	s.projectionRevision++
+	clear(s.pendingObjects)
+	s.projectionResnapshot = false
+	s.snapshotComplete = false
+	s.warmCatchupRunNumber = 0
+	s.serverCells = nil
+	s.pendingStatuses = nil
+	s.pendingError = nil
+	s.metricCoverageID++
+	s.metricCoverageCommit = 0
+	s.metricCoverageDirty = false
+	s.stopCompletePodMetricCoverageTimerLocked()
+
+	clear(s.rows)
+	s.order = s.order[:0]
+	clear(s.presentationRowBytes)
+	s.presentationRowBytesTotal = 0
+	s.presentationUIDBytesTotal = 0
+	s.publishPresentationRetentionLocked()
+	s.advancePresentationLocked(true)
+	s.pendingReconciliation = false
+	s.reconciliationDelivered = false
+
+	// A just-published Open may still own a sealed first delivery constructed
+	// from the retired store. Keep its status/schema ordering but rewrite the
+	// range contract to the empty replacement presentation and remove the stale
+	// reconciliation marker.
+	hadSealedInitial := len(s.sealedInitial) != 0
+	filtered := s.sealedInitial[:0]
+	for _, event := range s.sealedInitial {
+		if event == nil || event.GetReconciled() != nil {
+			continue
+		}
+		if status := event.GetStatus(); status != nil {
+			status.RowsVisible = 0
+		}
+		if invalidation := event.GetInvalidation(); invalidation != nil {
+			invalidation.PresentationRevision = s.presentationRevision
+			invalidation.IndexRevision = s.indexRevision
+			invalidation.RowsVisible = 0
+			invalidation.MaxRangeLength = DefaultViewRangeLength
+		}
+		filtered = append(filtered, event)
+	}
+	s.sealedInitial = filtered
+	if s.lastStatus != nil {
+		s.lastStatus.RowsVisible = 0
+	}
+	if hadSealedInitial {
+		// The rewritten sealed invalidation already carries this revision.
+		s.pendingInvalidation = false
+	}
+	s.signalLocked(true)
+}
+
 // markReconciledLocked queues a generation-local commit barrier behind all
 // row payloads already present in the mailbox. The marker is emitted exactly
 // once because a retained client needs only the first complete replacement;
@@ -2646,15 +3104,27 @@ func (s *Subscription) scheduleAuthoritativeResnapshot() {
 }
 
 func (s *Subscription) applyBatch(batch watcher.Batch) {
+	s.applyBatchForRun(0, false, batch)
+}
+
+func (s *Subscription) applyResourceBatch(runNumber uint64, batch watcher.Batch) {
+	s.applyBatchForRun(runNumber, true, batch)
+}
+
+func (s *Subscription) applyBatchForRun(
+	runNumber uint64,
+	enforceRunFence bool,
+	batch watcher.Batch,
+) {
 	if !batch.FromList && !batch.SnapshotComplete {
-		s.enqueueWatchBatch(batch)
+		s.enqueueWatchBatch(runNumber, enforceRunFence, batch)
 		return
 	}
 	observedOptionalResourceKeys := s.optionalResourceHints.extract(batch.Upserts)
 	s.flushProjection()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed {
+	if s.closed || enforceRunFence && runNumber < s.minimumResourceRun {
 		return
 	}
 	s.applyServerTableBatchLocked(batch)
@@ -2743,11 +3213,15 @@ func (s *Subscription) applyBatch(batch watcher.Batch) {
 // projected newest-per-UID after one short coalescing window; removals are
 // applied and signaled immediately so deleted rows never linger behind CEL or
 // a full-table sort.
-func (s *Subscription) enqueueWatchBatch(batch watcher.Batch) {
+func (s *Subscription) enqueueWatchBatch(
+	runNumber uint64,
+	enforceRunFence bool,
+	batch watcher.Batch,
+) {
 	observedOptionalResourceKeys := s.optionalResourceHints.extract(batch.Upserts)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed {
+	if s.closed || enforceRunFence && runNumber < s.minimumResourceRun {
 		return
 	}
 	tableDisabled := batch.Table != nil && batch.Table.Disabled && s.serverSchema != nil
@@ -2912,6 +3386,10 @@ func (s *Subscription) runProjection() {
 			}
 		}
 		resource := s.resource
+		var resourceStore *store.UIDStore
+		if resource != nil {
+			resourceStore = resource.currentStore()
+		}
 		projectionContext := s.projectionContext
 		if projectionContext == nil {
 			projectionContext = context.Background()
@@ -2930,7 +3408,7 @@ func (s *Subscription) runProjection() {
 				}
 				fullAdmissionHeld = true
 			}
-			objects, projectionErr = resource.store.SnapshotContext(projectionContext)
+			objects, projectionErr = resourceStore.SnapshotContext(projectionContext)
 		}
 		var projectedRows map[string]*kmgrv1.ResourceRow
 		if !full {
@@ -3334,6 +3812,18 @@ func (s *Subscription) setStatus(status *kmgrv1.ViewStatus) {
 	s.setStatusLocked(status)
 }
 
+func (s *Subscription) setResourceStatus(
+	runNumber uint64,
+	status *kmgrv1.ViewStatus,
+) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if runNumber < s.minimumResourceRun {
+		return
+	}
+	s.setStatusLocked(status)
+}
+
 func (s *Subscription) setStatusLocked(status *kmgrv1.ViewStatus) {
 	if s.closed {
 		return
@@ -3356,6 +3846,19 @@ func (s *Subscription) setError(value *kmgrv1.StructuredError) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
+		return
+	}
+	s.pendingError = value
+	s.signalLocked(true)
+}
+
+func (s *Subscription) setResourceError(
+	runNumber uint64,
+	value *kmgrv1.StructuredError,
+) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || runNumber < s.minimumResourceRun {
 		return
 	}
 	s.pendingError = value
@@ -3582,12 +4085,13 @@ func projectorFromProto(
 
 func statusForWarmEntry(entry *resourceRuntime) *kmgrv1.ViewStatus {
 	status := statusFromPipeline(entry.lastStatus)
-	if entry.state != resourceRunning && (entry.store.ResourceVersion() != "" || entry.store.Len() != 0) {
+	currentStore := entry.currentStore()
+	if entry.state != resourceRunning && (currentStore.ResourceVersion() != "" || currentStore.Len() != 0) {
 		status.Freshness = kmgrv1.ViewFreshness_VIEW_FRESHNESS_STALE
 		status.FromWarmCache = true
 	}
 	if status.ResourceVersionHint == "" {
-		status.ResourceVersionHint = entry.store.ResourceVersion()
+		status.ResourceVersionHint = currentStore.ResourceVersion()
 	}
 	return status
 }

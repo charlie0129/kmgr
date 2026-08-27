@@ -126,6 +126,7 @@ func (s *Subscription) resolveCompletePodMetrics() {
 	s.metricCoverageDirty = false
 	coverageID := s.metricCoverageID
 	resource := s.resource
+	resourceStore := resource.currentStore()
 	resolver := s.podMetricResolver
 	sessionID := s.metricSessionID
 	authorityID := s.metricAuthorityID
@@ -135,7 +136,7 @@ func (s *Subscription) resolveCompletePodMetrics() {
 	}
 	s.mu.Unlock()
 
-	objects, err := resource.store.SnapshotContext(ctx)
+	objects, err := resourceStore.SnapshotContext(ctx)
 	if err != nil {
 		if ctx.Err() != nil {
 			s.mu.Lock()
@@ -256,7 +257,8 @@ func (s *Subscription) resolveMetricInterest(
 	resource *resourceRuntime,
 	uids []types.UID,
 ) {
-	objects := resource.store.GetMany(uids)
+	resourceStore := resource.currentStore()
+	objects := resourceStore.GetMany(uids)
 	references, resolvedUIDs := podMetricReferences(objects)
 	if len(references) == 0 {
 		return
@@ -277,7 +279,7 @@ func (s *Subscription) resolveMetricInterest(
 	// Re-read the raw objects after the network wait. A deleted UID is skipped,
 	// while a recreated same-name Pod has a different UID and can never inherit
 	// the old sample.
-	currentObjects := resource.store.GetMany(resolvedUIDs)
+	currentObjects := resourceStore.GetMany(resolvedUIDs)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed || s.metricInterestID != interestID ||

@@ -127,7 +127,8 @@ struct EngineWorkspaceResourceProviderTests {
                     nullsFirst: true
                 ),
             ],
-            stageUntilReconciled: true
+            stageUntilReconciled: true,
+            forceRelist: true
         )
 
         var messages: [ResourceViewMessage] = []
@@ -136,6 +137,9 @@ struct EngineWorkspaceResourceProviderTests {
         }
 
         #expect(messages.count == 4)
+        let streamRequest = await rpc.capturedStreamRequest()
+        #expect(streamRequest?.forceRelist == true)
+        #expect(streamRequest?.stageUntilReconciled == true)
         guard case .status(let statusCursor, let status) = messages[0] else {
             Issue.record("Expected status event")
             return

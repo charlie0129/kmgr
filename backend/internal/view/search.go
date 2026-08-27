@@ -122,8 +122,10 @@ func (r *Runtime) SearchCached(ctx context.Context, query CachedSearchQuery) (Ca
 	}
 	entries := make([]cachedSearchEntry, 0, len(r.resources))
 	for key, entry := range r.resources {
-		if key.authorityID == authorityID && entry != nil && entry.store != nil {
-			entries = append(entries, cachedSearchEntry{key: key, store: entry.store})
+		if key.authorityID == authorityID && entry != nil {
+			if currentStore := entry.currentStore(); currentStore != nil {
+				entries = append(entries, cachedSearchEntry{key: key, store: currentStore})
+			}
 		}
 	}
 	r.mu.Unlock()
@@ -364,10 +366,15 @@ func (r *Runtime) Search(
 	}
 
 	r.mu.Lock()
-	var cachedEntries []*resourceRuntime
+	type cachedSearchEntry struct {
+		store *store.UIDStore
+	}
+	var cachedEntries []cachedSearchEntry
 	for key, entry := range r.resources {
 		if compatibleSearchKey(keyPrefix, key) {
-			cachedEntries = append(cachedEntries, entry)
+			if currentStore := entry.currentStore(); currentStore != nil {
+				cachedEntries = append(cachedEntries, cachedSearchEntry{store: currentStore})
+			}
 		}
 	}
 	r.mu.Unlock()

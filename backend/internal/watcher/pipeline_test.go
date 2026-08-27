@@ -83,6 +83,8 @@ func TestPipelineWatchListStreamsSnapshotAndContinuesSameWatch(t *testing.T) {
 	completed := make(chan Batch, 1)
 	liveModified := make(chan Batch, 1)
 	liveBookmark := make(chan Batch, 1)
+	watchOpenStarted := make(chan struct{}, 1)
+	watchOpenCompleted := make(chan struct{}, 1)
 	var statusesMu sync.Mutex
 	var statuses []Status
 	pipeline := mustPipeline(t, PipelineConfig{
@@ -97,6 +99,12 @@ func TestPipelineWatchListStreamsSnapshotAndContinuesSameWatch(t *testing.T) {
 			FieldSelector: "spec.nodeName=worker-a",
 		},
 		RetryDelay: noDelay,
+		OnWatchOpen: func() {
+			watchOpenStarted <- struct{}{}
+		},
+		OnWatchOpenComplete: func() {
+			watchOpenCompleted <- struct{}{}
+		},
 		OnStatus: func(status Status) {
 			statusesMu.Lock()
 			statuses = append(statuses, status)
@@ -119,6 +127,8 @@ func TestPipelineWatchListStreamsSnapshotAndContinuesSameWatch(t *testing.T) {
 	done := runPipeline(ctx, pipeline)
 
 	receiveSignal(t, initialEventsWritten, "initial WatchList events")
+	receiveSignal(t, watchOpenStarted, "WatchList open start callback")
+	receiveSignal(t, watchOpenCompleted, "WatchList open completion before the initial bookmark")
 	page := receiveBatch(t, firstPage, "first WatchList batch")
 	if page.ListPage != 1 || page.ObjectsListed != 2 || len(page.Upserts) != 2 ||
 		page.SnapshotComplete || page.ResourceVersion != "" {
@@ -162,10 +172,11 @@ func TestPipelineWatchListStreamsSnapshotAndContinuesSameWatch(t *testing.T) {
 	statusesMu.Lock()
 	gotStatuses := slices.Clone(statuses)
 	statusesMu.Unlock()
-	if len(gotStatuses) < 2 || gotStatuses[0].Phase != PhaseListing {
-		t.Fatalf("statuses = %#v, want Listing first", gotStatuses)
+	if len(gotStatuses) < 3 || gotStatuses[0].Phase != PhaseListing ||
+		gotStatuses[1].Phase != PhaseResuming {
+		t.Fatalf("statuses = %#v, want Listing, Resuming first", gotStatuses)
 	}
-	watching := gotStatuses[1]
+	watching := gotStatuses[2]
 	if watching.Phase != PhaseWatching || watching.ResourceVersion != "100" ||
 		watching.PagesListed != 2 || watching.ObjectsListed != 3 || watching.Stale {
 		t.Fatalf("Watching status = %#v", watching)

@@ -265,6 +265,12 @@ struct NativeMainMenuBuilderTests {
                 NSEvent.ModifierFlags.command
             ),
             (
+                "Restart Resource Stream",
+                #selector(ClusterWorkspaceWindowController.restartResourceStream(_:)),
+                "r",
+                NSEvent.ModifierFlags.command
+            ),
+            (
                 "Move Selection Up",
                 #selector(ClusterWorkspaceWindowController.moveResourceSelectionUp(_:)),
                 "k",

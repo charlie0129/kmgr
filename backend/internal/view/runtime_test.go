@@ -176,7 +176,7 @@ func TestRuntimeReturnsWarmSnapshotBeforeResumeAndAvoidsRelist(t *testing.T) {
 	}
 }
 
-func TestRuntimeReopenWaitsForStoppedPipelineBeforeRestart(t *testing.T) {
+func TestRuntimeReopenStartsBeforeStoppedPipelineAcknowledgesExit(t *testing.T) {
 	t.Parallel()
 	client := newScriptedResource()
 	firstCanceled := make(chan struct{})
@@ -223,21 +223,14 @@ func TestRuntimeReopenWaitsForStoppedPipelineBeforeRestart(t *testing.T) {
 	defer second.Close()
 	select {
 	case <-secondStarted:
-		close(releaseFirstExit)
-		t.Fatal("replacement pipeline started before old Run exited")
-	case <-time.After(50 * time.Millisecond):
-	}
-	if got := runs.Load(); got != 1 {
-		close(releaseFirstExit)
-		t.Fatalf("pipeline runs while stopping = %d, want 1", got)
-	}
-	close(releaseFirstExit)
-	select {
-	case <-secondStarted:
+		// The old Run is still held below its cancellation acknowledgement;
+		// reopening the same raw resource must not wait for it.
 	case <-time.After(time.Second):
-		t.Fatal("replacement pipeline did not start after old Run exited")
+		close(releaseFirstExit)
+		t.Fatal("replacement pipeline did not start while old Run was still held")
 	}
 	eventually(t, time.Second, func() bool { return client.watchCalls.Load() == 2 })
+	close(releaseFirstExit)
 }
 
 func TestRuntimeDefersWarmAdmissionUntilPipelineExitAcknowledged(t *testing.T) {
@@ -290,6 +283,374 @@ func TestRuntimeDefersWarmAdmissionUntilPipelineExitAcknowledged(t *testing.T) {
 		cached, warm := runtime.warm.Get(key)
 		return warm && cached.Value == subscription.resource && subscription.resource.state == resourceIdle
 	})
+}
+
+func TestRuntimeReopensCancellationResistantWatch(t *testing.T) {
+	t.Parallel()
+	base := newScriptedResource()
+	base.listPages = []*unstructured.UnstructuredList{
+		listPage("rv-1", "", pod("uid-first", "ns", "first", "Running", 0, nil, time.Time{})),
+	}
+	client := &cancellationResistantResource{
+		base:         base,
+		firstStarted: make(chan struct{}),
+		releaseFirst: make(chan struct{}),
+	}
+	runtime, err := NewRuntime(RuntimeConfig{
+		Source:           &fakeResourceSource{authority: "cluster-a", client: client},
+		ReleaseDelay:     5 * time.Millisecond,
+		BatchDelay:       time.Millisecond,
+		WatchOpenTimeout: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		close(client.releaseFirst)
+		runtime.Close()
+	}()
+
+	first, err := runtime.Open(openView("session", "view", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-client.firstStarted:
+	case <-time.After(time.Second):
+		first.Close()
+		t.Fatal("first Watch call did not block")
+	}
+	key := first.resource.key
+	runtime.mu.Lock()
+	oldRun := runtime.resources[key].runNumber
+	runtime.mu.Unlock()
+	first.Close()
+	eventually(t, time.Second, func() bool {
+		runtime.mu.Lock()
+		defer runtime.mu.Unlock()
+		entry := runtime.resources[key]
+		return entry != nil && entry.state == resourceStopping
+	})
+
+	second, err := runtime.Open(openView("session", "view", 2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	eventually(t, time.Second, func() bool { return client.watchCalls.Load() == 2 })
+	eventually(t, time.Second, func() bool {
+		runtime.mu.Lock()
+		defer runtime.mu.Unlock()
+		entry := runtime.resources[key]
+		return entry != nil && entry.state == resourceRunning &&
+			entry.lastStatus.Phase == watcher.PhaseWatching && entry.runNumber > oldRun
+	})
+
+	// A late callback from the blocked first run must not mutate the fresh
+	// store or replace its status after the run-number fence advances.
+	late := pod("uid-late-old-run", "ns", "late", "Running", 0, nil, time.Time{})
+	runtime.receiveBatch(first.resource, oldRun, watcher.Batch{
+		Upserts: []*unstructured.Unstructured{late},
+	})
+	runtime.receiveStatus(first.resource, oldRun, watcher.Status{
+		Phase:           watcher.PhaseWatching,
+		ResourceVersion: "rv-old-run",
+	})
+	// Also model the narrower race where receiveBatch validated and captured a
+	// subscriber just before the restart, then reached that subscription only
+	// after the run fence advanced.
+	second.applyResourceBatch(oldRun, watcher.Batch{
+		Upserts: []*unstructured.Unstructured{late},
+	})
+	second.setResourceStatus(oldRun, &kmgrv1.ViewStatus{
+		Freshness:           kmgrv1.ViewFreshness_VIEW_FRESHNESS_WATCHING,
+		ResourceVersionHint: "rv-old-run",
+	})
+	second.flushProjection()
+	runtime.mu.Lock()
+	entry := runtime.resources[key]
+	statusRV := entry.lastStatus.ResourceVersion
+	runtime.mu.Unlock()
+	if objects := entry.currentStore().GetMany([]types.UID{types.UID("uid-late-old-run")}); len(objects) != 1 || objects[0] != nil {
+		t.Fatal("late callback from retired run contaminated replacement store")
+	}
+	if statusRV == "rv-old-run" {
+		t.Fatal("late status from retired run replaced replacement status")
+	}
+	second.mu.Lock()
+	_, projected := second.rows["uid-late-old-run"]
+	presentationStatusRV := second.lastStatus.GetResourceVersionHint()
+	second.mu.Unlock()
+	if projected {
+		t.Fatal("captured batch from retired run contaminated replacement presentation")
+	}
+	if presentationStatusRV == "rv-old-run" {
+		t.Fatal("captured status from retired run replaced replacement presentation status")
+	}
+}
+
+func TestRuntimeReopensPodsAfterCrossResourceSwitchWithLocalKeyword(t *testing.T) {
+	t.Parallel()
+	podBase := newScriptedResource()
+	podBase.listPages = []*unstructured.UnstructuredList{
+		listPage("rv-pods", "", pod("uid-api", "ns", "api", "Running", 0, nil, time.Time{})),
+	}
+	pods := &cancellationResistantResource{
+		base:         podBase,
+		firstStarted: make(chan struct{}),
+		releaseFirst: make(chan struct{}),
+	}
+	nodes := newScriptedResource()
+	nodes.listPages = []*unstructured.UnstructuredList{
+		listPage("rv-nodes", "", nodeObject("node-uid", "node-a", corev1.ResourceList{}, corev1.ResourceList{})),
+	}
+	source := &gvrResourceSource{
+		authority: "cluster-a",
+		clients:   map[string]watcher.ListerWatcher{"pods": pods, "nodes": nodes},
+	}
+	runtime, err := NewRuntime(RuntimeConfig{
+		Source:           source,
+		ReleaseDelay:     5 * time.Millisecond,
+		BatchDelay:       time.Millisecond,
+		WatchOpenTimeout: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		close(pods.releaseFirst)
+		runtime.Close()
+	}()
+
+	firstRequest := openView("session", "resource", 1)
+	firstRequest.Spec.FilterExpression = "api"
+	firstRequest.Spec.FilterRevision = 1
+	first, err := runtime.Open(firstRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-pods.firstStarted:
+	case <-time.After(time.Second):
+		first.Close()
+		t.Fatal("Pods Watch call did not start")
+	}
+	key := first.resource.key
+	first.Close()
+	eventually(t, time.Second, func() bool {
+		runtime.mu.Lock()
+		defer runtime.mu.Unlock()
+		entry := runtime.resources[key]
+		return entry != nil && entry.state == resourceStopping
+	})
+
+	nodeRequest := openNodeView("session", "resource", 2)
+	nodeRequest.Spec.FilterRevision = 1
+	node, err := runtime.Open(nodeRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, time.Second, func() bool { return nodes.watchCalls.Load() == 1 })
+	node.Close()
+
+	secondRequest := openView("session", "resource", 3)
+	secondRequest.Spec.FilterExpression = "api"
+	secondRequest.Spec.FilterRevision = 1
+	second, err := runtime.Open(secondRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	eventually(t, time.Second, func() bool { return pods.watchCalls.Load() == 2 })
+	eventually(t, time.Second, func() bool {
+		runtime.mu.Lock()
+		defer runtime.mu.Unlock()
+		entry := runtime.resources[key]
+		return entry != nil && entry.lastStatus.Phase == watcher.PhaseWatching
+	})
+	if key.labels != "" || key.fields != "" {
+		t.Fatalf("local keyword became Kubernetes selector: labels=%q fields=%q", key.labels, key.fields)
+	}
+}
+
+func TestRuntimeWatchOpenWatchdogRestartsBlockedRun(t *testing.T) {
+	t.Parallel()
+	base := newScriptedResource()
+	base.listPages = []*unstructured.UnstructuredList{
+		listPage("rv-watchdog", "", pod("uid-watchdog", "ns", "watchdog", "Running", 0, nil, time.Time{})),
+	}
+	client := &cancellationResistantResource{
+		base:         base,
+		firstStarted: make(chan struct{}),
+		releaseFirst: make(chan struct{}),
+	}
+	runtime, err := NewRuntime(RuntimeConfig{
+		Source:           &fakeResourceSource{authority: "cluster-a", client: client},
+		BatchDelay:       time.Millisecond,
+		WatchOpenTimeout: 10 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		close(client.releaseFirst)
+		runtime.Close()
+	}()
+	subscription, err := runtime.Open(openView("session", "watchdog", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer subscription.Close()
+	select {
+	case <-client.firstStarted:
+	case <-time.After(time.Second):
+		t.Fatal("blocked Watch call did not start")
+	}
+	eventually(t, time.Second, func() bool { return client.watchCalls.Load() >= 2 })
+	eventually(t, time.Second, func() bool {
+		runtime.mu.Lock()
+		defer runtime.mu.Unlock()
+		entry := subscription.resource
+		return entry.state == resourceRunning && entry.lastStatus.Phase == watcher.PhaseWatching
+	})
+}
+
+func TestRuntimeWatchOpenWatchdogStopsAfterBoundedAttempts(t *testing.T) {
+	t.Parallel()
+	base := newScriptedResource()
+	base.listPages = []*unstructured.UnstructuredList{
+		listPage("rv-watchdog-bounded", "", pod("uid-watchdog", "ns", "watchdog", "Running", 0, nil, time.Time{})),
+	}
+	client := &cancellationResistantResource{
+		base:         base,
+		firstStarted: make(chan struct{}),
+		releaseFirst: make(chan struct{}),
+		blockEvery:   true,
+	}
+	runtime, err := NewRuntime(RuntimeConfig{
+		Source:           &fakeResourceSource{authority: "cluster-a", client: client},
+		BatchDelay:       time.Millisecond,
+		WatchOpenTimeout: 10 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		close(client.releaseFirst)
+		runtime.Close()
+	}()
+	subscription, err := runtime.Open(openView("session", "bounded-watchdog", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer subscription.Close()
+	select {
+	case <-client.firstStarted:
+	case <-time.After(time.Second):
+		t.Fatal("blocked Watch call did not start")
+	}
+
+	wantCalls := int64(maxAutomaticWatchOpenRetries + 1)
+	eventually(t, time.Second, func() bool { return client.watchCalls.Load() == wantCalls })
+	eventually(t, time.Second, func() bool {
+		runtime.mu.Lock()
+		defer runtime.mu.Unlock()
+		entry := subscription.resource
+		return entry.state == resourceIdle &&
+			entry.watchOpenTimeouts == maxAutomaticWatchOpenRetries+1
+	})
+	time.Sleep(4 * runtime.watchOpenTimeout)
+	if got := client.watchCalls.Load(); got != wantCalls {
+		t.Fatalf("watchdog opened %d watches after its retry bound, want %d", got, wantCalls)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		events, nextErr := subscription.Next(ctx)
+		cancel()
+		if nextErr != nil {
+			if errors.Is(nextErr, context.DeadlineExceeded) {
+				continue
+			}
+			t.Fatal(nextErr)
+		}
+		if err := subscription.AcknowledgeDelivery(events); err != nil {
+			t.Fatal(err)
+		}
+		for _, event := range events {
+			if failure := event.GetError(); failure != nil && failure.GetReason() == "WatchOpenTimeout" {
+				return
+			}
+		}
+	}
+	t.Fatal("watchdog exhaustion did not publish WatchOpenTimeout")
+}
+
+func TestRuntimeForceRelistDropsRetainedResourceVersion(t *testing.T) {
+	t.Parallel()
+	client := newScriptedResource()
+	client.listPages = []*unstructured.UnstructuredList{
+		listPage("rv-first", "", pod("uid-first", "ns", "first", "Running", 0, nil, time.Time{})),
+	}
+	runtime, err := NewRuntime(RuntimeConfig{
+		Source:          &fakeResourceSource{authority: "cluster-a", client: client},
+		BatchDelay:      time.Millisecond,
+		PipelineTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+
+	first, err := runtime.Open(openView("session", "view", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForSnapshotUID(t, first, "uid-first")
+	sibling, err := runtime.Open(openView("session", "sibling", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sibling.Close()
+	waitForSnapshotUID(t, sibling, "uid-first")
+	if got := client.watchCalls.Load(); got != 1 {
+		t.Fatalf("compatible subscriber opened %d watches, want one shared watch", got)
+	}
+	client.mu.Lock()
+	client.listPages[0] = listPage(
+		"rv-second", "", pod("uid-second", "ns", "second", "Running", 0, nil, time.Time{}),
+	)
+	client.mu.Unlock()
+
+	request := openView("session", "view", 2)
+	request.ForceRelist = true
+	second, err := runtime.Open(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	eventually(t, time.Second, func() bool { return client.listCalls.Load() == 2 })
+	eventually(t, time.Second, func() bool { return client.watchCalls.Load() == 2 })
+	eventually(t, time.Second, func() bool {
+		return client.lastWatchResourceVersion() == "rv-second"
+	})
+	waitForSnapshotUID(t, second, "uid-second")
+	waitForSnapshotUID(t, sibling, "uid-second")
+	if objects := second.resource.currentStore().GetMany([]types.UID{types.UID("uid-first")}); objects[0] != nil {
+		t.Fatal("force relist retained an object from the previous snapshot")
+	}
+	for name, subscription := range map[string]*Subscription{
+		"restarted view": second,
+		"shared sibling": sibling,
+	} {
+		subscription.mu.Lock()
+		_, retained := subscription.rows["uid-first"]
+		subscription.mu.Unlock()
+		if retained {
+			t.Fatalf("%s retained a projected row from the retired raw store", name)
+		}
+	}
 }
 
 func TestRuntimeAcceptsMatchingLateBatchWhilePipelineStopping(t *testing.T) {
@@ -2314,6 +2675,55 @@ func (c *scriptedResource) lastWatchResourceVersion() string {
 		return ""
 	}
 	return c.watchRVs[len(c.watchRVs)-1]
+}
+
+// cancellationResistantResource models a proxy/client whose first Watch call
+// does not return after its context is cancelled. The runtime must fence that
+// run and open the replacement independently; the test releases the blocked
+// call at the end so the fixture does not leak a goroutine.
+type cancellationResistantResource struct {
+	base         *scriptedResource
+	firstStarted chan struct{}
+	releaseFirst chan struct{}
+	blockEvery   bool
+	startedOnce  sync.Once
+	mu           sync.Mutex
+	watches      []*controllableWatch
+	watchRVs     []string
+	watchCalls   atomic.Int64
+}
+
+func (c *cancellationResistantResource) List(
+	ctx context.Context,
+	options metav1.ListOptions,
+) (*unstructured.UnstructuredList, error) {
+	return c.base.List(ctx, options)
+}
+
+func (c *cancellationResistantResource) Watch(
+	_ context.Context,
+	options metav1.ListOptions,
+) (watch.Interface, error) {
+	call := c.watchCalls.Add(1)
+	stream := newControllableWatch()
+	c.mu.Lock()
+	c.watches = append(c.watches, stream)
+	c.watchRVs = append(c.watchRVs, options.ResourceVersion)
+	c.mu.Unlock()
+	if call == 1 || c.blockEvery {
+		c.startedOnce.Do(func() { close(c.firstStarted) })
+		<-c.releaseFirst
+	}
+	return stream, nil
+}
+
+func (c *cancellationResistantResource) watch(index int) *controllableWatch {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if index < 0 || index >= len(c.watches) {
+		return nil
+	}
+	return c.watches[index]
 }
 
 type controllableWatch struct {

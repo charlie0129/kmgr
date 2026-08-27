@@ -88,6 +88,11 @@ message OpenViewRequest {
   // ViewReconciled only after an authoritative replacement invalidation is
   // available through FetchViewRange.
   bool stage_until_reconciled = 5;
+  // Discard any retained resourceVersion and rebuild the raw resource
+  // snapshot before opening the live watch. This is used by the explicit
+  // resource-stream restart action and is intentionally scoped to this view's
+  // generation; compatible subscribers share the resulting raw stream.
+  bool force_relist = 6;
 }
 
 message CancelViewRequest {

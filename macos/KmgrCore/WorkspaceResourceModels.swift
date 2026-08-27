@@ -128,6 +128,9 @@ public struct ResourceViewRequest: Hashable, Sendable {
     /// its replacement. The stream will emit `.reconciled` after all payloads
     /// needed for one complete replacement have arrived.
     public var stageUntilReconciled: Bool
+    /// Discard the retained resourceVersion and perform a fresh LIST/WATCH.
+    /// This is used by the resource-local Restart Resource Stream action.
+    public var forceRelist: Bool
 
     public init(
         sessionID: String,
@@ -141,7 +144,8 @@ public struct ResourceViewRequest: Hashable, Sendable {
         columnIDs: [String] = [],
         columnConfigurationVersion: String = "",
         sort: [ResourceSortDescriptor] = [],
-        stageUntilReconciled: Bool = false
+        stageUntilReconciled: Bool = false,
+        forceRelist: Bool = false
     ) {
         self.sessionID = sessionID
         self.viewID = viewID
@@ -155,6 +159,7 @@ public struct ResourceViewRequest: Hashable, Sendable {
         self.columnConfigurationVersion = columnConfigurationVersion
         self.sort = sort
         self.stageUntilReconciled = stageUntilReconciled
+        self.forceRelist = forceRelist
     }
 }
 

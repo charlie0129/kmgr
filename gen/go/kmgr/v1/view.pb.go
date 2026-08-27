@@ -663,8 +663,13 @@ type OpenViewRequest struct {
 	// ViewReconciled only after an authoritative replacement invalidation is
 	// available through FetchViewRange.
 	StageUntilReconciled bool `protobuf:"varint,5,opt,name=stage_until_reconciled,json=stageUntilReconciled,proto3" json:"stage_until_reconciled,omitempty"`
-	unknownFields        protoimpl.UnknownFields
-	sizeCache            protoimpl.SizeCache
+	// Discard any retained resourceVersion and rebuild the raw resource
+	// snapshot before opening the live watch. This is used by the explicit
+	// resource-stream restart action and is intentionally scoped to this view's
+	// generation; compatible subscribers share the resulting raw stream.
+	ForceRelist   bool `protobuf:"varint,6,opt,name=force_relist,json=forceRelist,proto3" json:"force_relist,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *OpenViewRequest) Reset() {
@@ -728,6 +733,13 @@ func (x *OpenViewRequest) GetSpec() *ViewSpec {
 func (x *OpenViewRequest) GetStageUntilReconciled() bool {
 	if x != nil {
 		return x.StageUntilReconciled
+	}
+	return false
+}
+
+func (x *OpenViewRequest) GetForceRelist() bool {
+	if x != nil {
+		return x.ForceRelist
 	}
 	return false
 }
@@ -3272,7 +3284,7 @@ const file_kmgr_v1_view_proto_rawDesc = "" +
 	"\n" +
 	"column_ids\x18\a \x03(\tR\tcolumnIds\x12@\n" +
 	"\x1ccolumn_configuration_version\x18\b \x01(\tR\x1acolumnConfigurationVersion\x12+\n" +
-	"\x04sort\x18\t \x03(\v2\x17.kmgr.v1.SortDescriptorR\x04sortJ\x04\b\x03\x10\x04J\x04\b\x04\x10\x05R\x0elabel_selectorR\x0efield_selector\"\xda\x01\n" +
+	"\x04sort\x18\t \x03(\v2\x17.kmgr.v1.SortDescriptorR\x04sortJ\x04\b\x03\x10\x04J\x04\b\x04\x10\x05R\x0elabel_selectorR\x0efield_selector\"\xfd\x01\n" +
 	"\x0fOpenViewRequest\x121\n" +
 	"\acontext\x18\x01 \x01(\v2\x17.kmgr.v1.RequestContextR\acontext\x12\x17\n" +
 	"\aview_id\x18\x02 \x01(\tR\x06viewId\x12\x1e\n" +
@@ -3280,7 +3292,8 @@ const file_kmgr_v1_view_proto_rawDesc = "" +
 	"generation\x18\x03 \x01(\x04R\n" +
 	"generation\x12%\n" +
 	"\x04spec\x18\x04 \x01(\v2\x11.kmgr.v1.ViewSpecR\x04spec\x124\n" +
-	"\x16stage_until_reconciled\x18\x05 \x01(\bR\x14stageUntilReconciled\"\x7f\n" +
+	"\x16stage_until_reconciled\x18\x05 \x01(\bR\x14stageUntilReconciled\x12!\n" +
+	"\fforce_relist\x18\x06 \x01(\bR\vforceRelist\"\x7f\n" +
 	"\x11CancelViewRequest\x121\n" +
 	"\acontext\x18\x01 \x01(\v2\x17.kmgr.v1.RequestContextR\acontext\x12\x17\n" +
 	"\aview_id\x18\x02 \x01(\tR\x06viewId\x12\x1e\n" +

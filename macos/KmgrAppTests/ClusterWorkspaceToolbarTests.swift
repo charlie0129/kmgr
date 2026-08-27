@@ -708,6 +708,54 @@ struct ClusterWorkspaceToolbarTests {
         #expect(forwards.title.contains("Forwards"))
     }
 
+    @Test("resource stream restart is local, accessible, and preserves the view query")
+    func resourceStreamRestartPreservesViewQuery() async throws {
+        let provider = FilterValidationWorkspaceResourceProvider()
+        let controller = makeWorkspace(
+            provider: provider,
+            restoration: ClusterWindowRestorationRecord(
+                id: "restart-resource-stream",
+                state: ClusterWindowRestorationState(
+                    contextName: "test-context",
+                    gvr: GVR(group: "", version: "v1", resource: "pods"),
+                    namespaceScope: .namespace("default"),
+                    filter: "api"
+                )
+            )
+        )
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let root = try #require(controller.window?.contentView)
+        let restart = try #require(descendants(of: root).compactMap { $0 as? NSButton }
+            .first { $0.accessibilityLabel() == "Restart resource stream" })
+        let menuItem = NSMenuItem(
+            title: "Restart Resource Stream",
+            action: #selector(ClusterWorkspaceWindowController.restartResourceStream(_:)),
+            keyEquivalent: ""
+        )
+
+        try await waitUntil {
+            provider.streamRequests.count == 1 && restart.isEnabled
+        }
+        #expect(restart.title == "Restart Stream")
+        #expect(restart.accessibilityHelp()?.contains("fresh Kubernetes LIST and WATCH") == true)
+        #expect(controller.validateMenuItem(menuItem))
+        let original = try #require(provider.streamRequests.first)
+
+        restart.performClick(nil)
+        try await waitUntil { provider.streamRequests.count == 2 }
+        let replacement = try #require(provider.streamRequests.last)
+        #expect(replacement.forceRelist)
+        #expect(replacement.generation > original.generation)
+        #expect(replacement.resource == original.resource)
+        #expect(replacement.allNamespaces == original.allNamespaces)
+        #expect(replacement.namespaces == original.namespaces)
+        #expect(replacement.filterExpression == "api")
+        #expect(replacement.filterRevision == original.filterRevision)
+        #expect(replacement.columnIDs == original.columnIDs)
+        #expect(replacement.sort == original.sort)
+    }
+
     @Test("unmodified table shortcuts are disabled while editing filter text")
     func tableMenuCommandsRespectTextInputFocus() async throws {
         let controller = makeWorkspace(provider: FilterValidationWorkspaceResourceProvider())

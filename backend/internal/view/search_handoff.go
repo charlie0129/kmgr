@@ -274,7 +274,7 @@ func (r *Runtime) closeTransientSearchListLocked(
 	if view != nil && view.transientSearchList == transient {
 		view.transientSearchList = nil
 		view.transientSearchUsesStore = false
-		view.store.SetResourceVersion("")
+		view.currentStore().SetResourceVersion("")
 	}
 	for attachment := range transient.searches {
 		// Preserve an already-published terminal success. Close may race after
@@ -443,6 +443,10 @@ func (r *Runtime) publishTransientSearchPage(
 		r.mu.Lock()
 	}
 	view := transient.view
+	var viewStore *store.UIDStore
+	if view != nil {
+		viewStore = view.currentStore()
+	}
 	transient.examined = page.examined
 	if transient.storeBounded && transient.store != nil &&
 		len(page.items) > r.searchSnapshotObjectLimit-transient.store.Len() {
@@ -463,7 +467,7 @@ func (r *Runtime) publishTransientSearchPage(
 	}
 	if view != nil && !usesStore {
 		for _, object := range page.items {
-			if change := view.store.Upsert(object); change.ReplacedUID != "" {
+			if change := viewStore.Upsert(object); change.ReplacedUID != "" {
 				removed = append(removed, change.ReplacedUID)
 			}
 		}
@@ -477,7 +481,7 @@ func (r *Runtime) publishTransientSearchPage(
 			transient.store.SetResourceVersion(page.resourceVersion)
 		}
 		if view != nil && !usesStore {
-			view.store.SetResourceVersion(page.resourceVersion)
+			viewStore.SetResourceVersion(page.resourceVersion)
 		}
 		// Mark terminal for producers/search joiners, but retain the map entry
 		// as an Open gate until the final page reaches every captured view.
@@ -502,7 +506,9 @@ func (r *Runtime) publishTransientSearchPage(
 		batch.SynchronizedAt = time.Now()
 	}
 	var subscriptions []*Subscription
+	var batchRunNumber uint64
 	if view != nil {
+		batchRunNumber = view.runNumber
 		subscriptions = r.prepareEntryBatchLocked(view, batch)
 	}
 	for attachment := range transient.searches {
@@ -522,7 +528,7 @@ func (r *Runtime) publishTransientSearchPage(
 	r.mu.Unlock()
 
 	for _, subscription := range subscriptions {
-		subscription.applyBatch(batch)
+		subscription.applyResourceBatch(batchRunNumber, batch)
 	}
 	if page.complete {
 		// Keep the transient gate set until every older LIST row has reached the
@@ -607,9 +613,15 @@ func (r *Runtime) finishTransientView(
 	}
 	var startSubscribers []*Subscription
 	var startError *kmgrv1.StructuredError
-	if view.state == resourceIdle {
+	var restartPlan *resourceRestartPlan
+	if view.restartRequested {
+		restartPlan = r.prepareResourceRestartLocked(view, true)
+	} else if view.state == resourceIdle {
 		startSubscribers, startError = r.startResourceLocked(view)
 	}
 	r.mu.Unlock()
 	deliverSubscriptionError(startSubscribers, startError)
+	if restartPlan != nil {
+		r.completeResourceRestart(restartPlan, true)
+	}
 }

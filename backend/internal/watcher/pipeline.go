@@ -124,27 +124,38 @@ type PipelineConfig struct {
 	ForceRelist             bool
 	InitialLastSynchronized time.Time
 	RetryDelay              RetryDelay
-	OnStatus                func(Status)
-	OnBatch                 func(Batch)
+	// OnWatchOpenComplete is called immediately after the client Watch method
+	// returns. It closes the bounded open window even when a WatchList stream
+	// takes time to deliver its initial bookmark.
+	OnWatchOpenComplete func()
+	// OnWatchOpen is called immediately before a LIST/WATCH client Watch call.
+	// It is intentionally separate from OnStatus: a client implementation may
+	// block before returning a watch.Interface, so lifecycle owners need a
+	// bounded-open signal even when no status callback can follow.
+	OnWatchOpen func()
+	OnStatus    func(Status)
+	OnBatch     func(Batch)
 }
 
 // Pipeline maintains a UIDStore without clearing it during reconnects or
 // relists. A Pipeline may be run again after Run returns, but not concurrently.
 type Pipeline struct {
-	client             ListerWatcher
-	store              *store.UIDStore
-	listOptions        metav1.ListOptions
-	pageSize           int64
-	watchListBatchSize int
-	watchTimeout       time.Duration
-	forceRelist        bool
-	lastSynchronized   time.Time
-	retryDelay         RetryDelay
-	onStatus           func(Status)
-	onBatch            func(Batch)
-	tableColumns       []metav1.TableColumnDefinition
-	watchListDisabled  bool
-	running            atomic.Bool
+	client              ListerWatcher
+	store               *store.UIDStore
+	listOptions         metav1.ListOptions
+	pageSize            int64
+	watchListBatchSize  int
+	watchTimeout        time.Duration
+	forceRelist         bool
+	lastSynchronized    time.Time
+	retryDelay          RetryDelay
+	onWatchOpenComplete func()
+	onWatchOpen         func()
+	onStatus            func(Status)
+	onBatch             func(Batch)
+	tableColumns        []metav1.TableColumnDefinition
+	watchListDisabled   bool
+	running             atomic.Bool
 }
 
 var ErrAlreadyRunning = errors.New("watcher: pipeline is already running")
@@ -187,17 +198,19 @@ func NewPipeline(config PipelineConfig) (*Pipeline, error) {
 	}
 
 	return &Pipeline{
-		client:             config.Client,
-		store:              config.Store,
-		listOptions:        config.ListOptions,
-		pageSize:           pageSize,
-		watchListBatchSize: watchListBatchSize,
-		watchTimeout:       watchTimeout,
-		forceRelist:        config.ForceRelist,
-		lastSynchronized:   config.InitialLastSynchronized,
-		retryDelay:         retryDelay,
-		onStatus:           config.OnStatus,
-		onBatch:            config.OnBatch,
+		client:              config.Client,
+		store:               config.Store,
+		listOptions:         config.ListOptions,
+		pageSize:            pageSize,
+		watchListBatchSize:  watchListBatchSize,
+		watchTimeout:        watchTimeout,
+		forceRelist:         config.ForceRelist,
+		lastSynchronized:    config.InitialLastSynchronized,
+		retryDelay:          retryDelay,
+		onWatchOpenComplete: config.OnWatchOpenComplete,
+		onWatchOpen:         config.OnWatchOpen,
+		onStatus:            config.OnStatus,
+		onBatch:             config.OnBatch,
 	}, nil
 }
 
@@ -211,7 +224,6 @@ func (p *Pipeline) Run(ctx context.Context) error {
 
 	resourceVersion := p.store.ResourceVersion()
 	needsSnapshot := p.forceRelist || resourceVersion == ""
-	firstWatch := !needsSnapshot
 	retryAttempt := 0
 	var listedPages, listedObjects int
 	lastSynchronized := p.lastSynchronized
@@ -260,7 +272,6 @@ func (p *Pipeline) Run(ctx context.Context) error {
 					listedObjects = watchList.list.objects
 					lastSynchronized = watchList.list.synchronizedAt
 					needsSnapshot = false
-					firstWatch = false
 					retryAttempt = 0
 					result = watchList.watch
 					haveWatchResult = true
@@ -315,20 +326,19 @@ func (p *Pipeline) Run(ctx context.Context) error {
 				listedObjects = list.objects
 				lastSynchronized = list.synchronizedAt
 				needsSnapshot = false
-				firstWatch = false
 				retryAttempt = 0
 			}
-		} else if firstWatch {
-			p.emitStatus(Status{
-				Phase:            PhaseResuming,
-				Stale:            true,
-				ResourceVersion:  resourceVersion,
-				LastSynchronized: lastSynchronized,
-			})
-			firstWatch = false
 		}
 
 		if !haveWatchResult {
+			p.beginWatchOpen(Status{
+				Phase:            PhaseResuming,
+				Stale:            p.store.Len() != 0,
+				ResourceVersion:  resourceVersion,
+				LastSynchronized: lastSynchronized,
+				PagesListed:      listedPages,
+				ObjectsListed:    listedObjects,
+			})
 			result = p.watch(ctx, resourceVersion, Status{
 				Phase:            PhaseWatching,
 				Stale:            false,
@@ -388,6 +398,16 @@ type watchListResult struct {
 	watch            watchResult
 }
 
+// beginWatchOpen publishes the pre-open phase before invoking a client Watch
+// method. Some client implementations can block before returning a stream;
+// the lifecycle callback therefore must run before the network call as well.
+func (p *Pipeline) beginWatchOpen(status Status) {
+	if p.onWatchOpen != nil {
+		p.onWatchOpen()
+	}
+	p.emitStatus(status)
+}
+
 func (p *Pipeline) watchListEligible() bool {
 	if p.watchListDisabled {
 		return false
@@ -423,8 +443,14 @@ func (p *Pipeline) watchList(ctx context.Context) watchListResult {
 	}
 	options.TimeoutSeconds = &timeoutSeconds
 
+	p.beginWatchOpen(Status{
+		Phase:            PhaseResuming,
+		Stale:            p.store.Len() != 0,
+		LastSynchronized: p.lastSynchronized,
+	})
 	watchContext, watchErrors := apioperation.WithWatchErrorObserver(ctx)
 	stream, err := p.client.Watch(watchContext, options)
+	p.watchOpened()
 	if err != nil {
 		capabilityFailure := isWatchListCapabilityError(err)
 		return watchListResult{
@@ -820,6 +846,7 @@ func (p *Pipeline) watch(ctx context.Context, resourceVersion string, watching S
 	} else {
 		stream, err = p.client.Watch(watchContext, options)
 	}
+	p.watchOpened()
 	if err != nil {
 		return watchResult{err: err, expired: isExpired(err)}
 	}
@@ -852,6 +879,17 @@ func (p *Pipeline) watch(ctx context.Context, resourceVersion string, watching S
 				return result
 			}
 		}
+	}
+}
+
+// watchOpened marks the end of the client Watch call, including error and nil
+// results. A WatchList stream may still spend substantial time delivering its
+// initial events before the Watching status is emitted, so lifecycle
+// watchdogs must stop measuring the open boundary here rather than at that
+// later reconciliation point.
+func (p *Pipeline) watchOpened() {
+	if p.onWatchOpenComplete != nil {
+		p.onWatchOpenComplete()
 	}
 }
 

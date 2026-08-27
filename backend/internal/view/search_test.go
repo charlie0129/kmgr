@@ -812,6 +812,79 @@ func TestViewJoinsSearchMidListAndReceivesExistingAndProgressiveRows(t *testing.
 	}
 }
 
+func TestForceRelistDuringTransientSearchRunsFreshLifecycleAfterHandoff(t *testing.T) {
+	t.Parallel()
+	client := newSearchClient()
+	client.pages = []*unstructured.UnstructuredList{
+		listPage("rv-search", "next", pod("one", "ns", "api-one", "Running", 0, nil, time.Time{})),
+		listPage("rv-search", "", pod("two", "ns", "api-two", "Running", 0, nil, time.Time{})),
+	}
+	client.secondPageGate = make(chan struct{})
+	firstEmitted := make(chan struct{})
+	var firstOnce sync.Once
+	searchDone := make(chan error, 1)
+	runtime, err := NewRuntime(RuntimeConfig{
+		Source: &fakeResourceSource{authority: "cluster", client: client},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	go func() {
+		searchDone <- runtime.Search(
+			context.Background(), inProgressSearchQuery("api"),
+			func(batch SearchBatch) error {
+				if batch.Examined >= 1 {
+					firstOnce.Do(func() { close(firstEmitted) })
+				}
+				return nil
+			},
+		)
+	}()
+	<-firstEmitted
+	first, err := runtime.Open(openView("session", "view", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForSnapshotUID(t, first, "one")
+	eventually(t, time.Second, func() bool { return client.listCalls.Load() == 2 })
+
+	restart := openView("session", "view", 2)
+	restart.ForceRelist = true
+	second, err := runtime.Open(restart)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	runtime.mu.Lock()
+	restartDeferred := second.resource.transientSearchList != nil &&
+		second.resource.restartRequested
+	runtime.mu.Unlock()
+	if !restartDeferred {
+		t.Fatal("force relist was not retained while the transient search owned the store")
+	}
+
+	client.setPages(listPage(
+		"rv-fresh", "", pod("fresh", "ns", "fresh", "Running", 0, nil, time.Time{}),
+	))
+	close(client.secondPageGate)
+	if err := <-searchDone; err != nil {
+		t.Fatal(err)
+	}
+	waitForSnapshotUID(t, second, "fresh")
+	eventually(t, time.Second, func() bool {
+		return client.listCalls.Load() == 3 && client.watchCalls.Load() == 1 &&
+			client.lastWatchResourceVersion() == "rv-fresh"
+	})
+	second.mu.Lock()
+	_, retainedOne := second.rows["one"]
+	_, retainedTwo := second.rows["two"]
+	second.mu.Unlock()
+	if retainedOne || retainedTwo {
+		t.Fatal("fresh lifecycle retained rows from the transient search snapshot")
+	}
+}
+
 func TestSearchCancellationAfterViewJoinsDoesNotCancelSharedList(t *testing.T) {
 	t.Parallel()
 	client := newSearchClient()
