@@ -58,8 +58,10 @@ final class PortForwardConfigurationWindowController: NSWindowController,
     private var hasStartAttempted = false
     private var isStarting = false
     private var didFinish = false
+    private var didStartSuccessfully = false
 
     var onDismiss: (() -> Void)?
+    var onStartSucceeded: (() -> Void)?
 
     init(
         session: OpenedClusterSession,
@@ -477,6 +479,7 @@ final class PortForwardConfigurationWindowController: NSWindowController,
                 _ = try await coordinator.start(request)
                 guard !Task.isCancelled, let self else { return }
                 startTask = nil
+                didStartSuccessfully = true
                 dismiss(returnCode: .OK)
             } catch is CancellationError {
                 guard let self, !didFinish else { return }
@@ -545,8 +548,11 @@ final class PortForwardConfigurationWindowController: NSWindowController,
             startTask = nil
         }
         progressIndicator.stopAnimation(nil)
+        let startSucceeded = didStartSuccessfully ? onStartSucceeded : nil
+        onStartSucceeded = nil
         onDismiss?()
         onDismiss = nil
+        startSucceeded?()
     }
 
     private static func bindAddressKind(_ value: String) -> BindAddressKind {

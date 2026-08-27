@@ -302,7 +302,97 @@ struct ClusterIdentityPresentationTests {
         #expect(PortForwardsWindowController.clusterContextText(for: record) ==
             "cluster-a — production/admin@corp")
     }
+
+    @Test("Port Forwards callback runs only after a successful start dismissal")
+    func portForwardStartCompletionCallback() async throws {
+        let successCoordinator = PortForwardCoordinator(
+            provider: IdentityNoopPortForwardProvider()
+        )
+        defer { successCoordinator.stopWatching() }
+        let success = PortForwardConfigurationWindowController(
+            session: identitySession(),
+            targetIdentity: podIdentity(),
+            objectDetailProvider: IdentityNoopObjectDetailProvider(),
+            coordinator: successCoordinator
+        )
+        var successEvents: [String] = []
+        success.onDismiss = { successEvents.append("dismiss") }
+        success.onStartSucceeded = { successEvents.append("success") }
+        try startIdentityPortForward(success)
+        for _ in 0..<100 where successEvents.count < 2 {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(successEvents == ["dismiss", "success"])
+
+        let cancelled = PortForwardConfigurationWindowController(
+            session: identitySession(),
+            targetIdentity: podIdentity(),
+            objectDetailProvider: IdentityNoopObjectDetailProvider(),
+            coordinator: PortForwardCoordinator(provider: IdentityNoopPortForwardProvider())
+        )
+        var cancelEvents: [String] = []
+        cancelled.onDismiss = { cancelEvents.append("dismiss") }
+        cancelled.onStartSucceeded = { cancelEvents.append("success") }
+        try identityButton("Cancel", in: cancelled).performClick(nil)
+        #expect(cancelEvents == ["dismiss"])
+
+        let failureCoordinator = PortForwardCoordinator(
+            provider: IdentityFailingPortForwardProvider()
+        )
+        defer { failureCoordinator.stopWatching() }
+        let failed = PortForwardConfigurationWindowController(
+            session: identitySession(),
+            targetIdentity: podIdentity(),
+            objectDetailProvider: IdentityNoopObjectDetailProvider(),
+            coordinator: failureCoordinator
+        )
+        var failureEvents: [String] = []
+        failed.onDismiss = { failureEvents.append("dismiss") }
+        failed.onStartSucceeded = { failureEvents.append("success") }
+        try startIdentityPortForward(failed)
+        for _ in 0..<100 where !identityText(in: failed).contains("Port-forward failed") {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(failureEvents.isEmpty)
+        try identityButton("Cancel", in: failed).performClick(nil)
+        #expect(failureEvents == ["dismiss"])
+    }
 }
+}
+
+@MainActor
+private func startIdentityPortForward(
+    _ controller: PortForwardConfigurationWindowController
+) throws {
+    let root = try #require(controller.window?.contentView)
+    let remotePort = try #require(identityDescendants(of: root)
+        .compactMap { $0 as? NSTextField }
+        .first { $0.accessibilityLabel() == "Remote port" })
+    remotePort.stringValue = "8080"
+    controller.controlTextDidChange(Notification(
+        name: NSControl.textDidChangeNotification,
+        object: remotePort
+    ))
+    try identityButton("Start", in: controller).performClick(nil)
+}
+
+@MainActor
+private func identityButton(
+    _ title: String,
+    in controller: NSWindowController
+) throws -> NSButton {
+    let root = try #require(controller.window?.contentView)
+    return try #require(identityDescendants(of: root)
+        .compactMap { $0 as? NSButton }
+        .first { $0.title == title })
+}
+
+@MainActor
+private func identityText(in controller: NSWindowController) -> String {
+    guard let root = controller.window?.contentView else { return "" }
+    return identityDescendants(of: root)
+        .compactMap { ($0 as? NSTextField)?.stringValue }
+        .joined(separator: "\n")
 }
 
 private func identitySession() -> OpenedClusterSession {
@@ -388,6 +478,30 @@ private struct IdentityNoopPortForwardProvider: PortForwardProviding {
 
     func startPortForward(_ request: StartPortForwardRequest) async throws -> String {
         request.id
+    }
+
+    func stopPortForward(id: String, sessionID: String) async throws {}
+    func restartPortForward(id: String, sessionID: String) async throws {}
+}
+
+private struct IdentityFailingPortForwardProvider: PortForwardProviding {
+    func listPortForwards(
+        sessionID: String,
+        includeStopped: Bool
+    ) async throws -> [PortForwardRecord] { [] }
+
+    func watchPortForwards(
+        request: PortForwardWatchRequest
+    ) -> AsyncThrowingStream<PortForwardWatchEvent, Error> {
+        AsyncThrowingStream { $0.finish() }
+    }
+
+    func startPortForward(_ request: StartPortForwardRequest) async throws -> String {
+        throw ClusterManagerIssue(
+            category: .unavailable,
+            reason: "TestStartFailed",
+            message: "The test forward could not start."
+        )
     }
 
     func stopPortForward(id: String, sessionID: String) async throws {}

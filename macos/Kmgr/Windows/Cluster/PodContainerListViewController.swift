@@ -7,6 +7,7 @@ enum PodContainerNetworkAction: Equatable {
     case openAutomaticExec
     case configureExec
     case startPortForward
+    case startPortForwardAndShow
 }
 
 @MainActor
@@ -18,6 +19,7 @@ final class PodContainerListViewController: NSViewController,
     var onOpenExec: ((PodExecTarget) -> Void)?
     var onConfigureExec: ((PodExecTarget) -> Void)?
     var onStartPortForward: ((ResourceIdentity) -> Void)?
+    var onStartPortForwardAndShow: ((ResourceIdentity) -> Void)?
     var onContextualShortcutsChanged: (() -> Void)?
     private(set) var workspaceStatus: WorkspaceStatus
     var onWorkspaceStatusChanged: ((WorkspaceStatus) -> Void)?
@@ -350,8 +352,14 @@ final class PodContainerListViewController: NSViewController,
 
     func canPerform(_ action: PodContainerNetworkAction) -> Bool {
         guard networkActionsEnabled else { return false }
-        if action == .startPortForward { return true }
+        if action == .startPortForward || action == .startPortForwardAndShow {
+            return true
+        }
         return selectedContainerTarget() != nil
+    }
+
+    var tableHasFocus: Bool {
+        view.window?.firstResponder === tableView
     }
 
     @discardableResult
@@ -375,6 +383,8 @@ final class PodContainerListViewController: NSViewController,
             onConfigureExec?(target)
         case .startPortForward:
             onStartPortForward?(pod)
+        case .startPortForwardAndShow:
+            onStartPortForwardAndShow?(pod)
         }
         return true
     }
@@ -426,6 +436,7 @@ private final class PodContainerTableView: NSTableView {
             .command, .control, .option,
         ]).isEmpty
         let shifted = modifiers.contains(.shift)
+        let commandOnly = modifiers == .command
         switch (event.charactersIgnoringModifiers?.lowercased(), event.keyCode) {
         case ("l", _) where !hasUnsupportedModifier && !shifted,
             (_, 36) where modifiers.isEmpty:
@@ -434,8 +445,10 @@ private final class PodContainerTableView: NSTableView {
             onNetworkAction?(.openPreviousLogs)
         case ("s", _) where !hasUnsupportedModifier:
             onNetworkAction?(shifted ? .configureExec : .openAutomaticExec)
-        case ("p", _) where !hasUnsupportedModifier && !shifted:
+        case ("f", _) where modifiers.isEmpty:
             onNetworkAction?(.startPortForward)
+        case ("f", _) where commandOnly:
+            onNetworkAction?(.startPortForwardAndShow)
         case (_, 53) where modifiers.isEmpty:
             onBack?()
         default: super.keyDown(with: event)

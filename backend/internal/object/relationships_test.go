@@ -132,7 +132,7 @@ func TestRelationshipsVerifiesOwnerWithMetadataGet(t *testing.T) {
 		t.Fatal(err)
 	}
 	if incomplete || len(values) != 1 || values[0].Kind != RelationshipOwner ||
-		values[0].Identity.UID != "owner-uid" || values[0].Stale {
+		values[0].Identity.UID != "owner-uid" || values[0].Stale || !values[0].Controller {
 		t.Fatalf("owner relationships = %#v, incomplete=%t", values, incomplete)
 	}
 	if resolver.calls != 1 || resolver.requested != (schema.GroupVersionKind{

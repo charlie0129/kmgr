@@ -117,19 +117,22 @@ public struct ObjectRelationship: Hashable, Sendable, Identifiable {
     public var label: String
     public var stale: Bool
     public var potentiallyIncomplete: Bool
+    public var controller: Bool
 
     public init(
         kind: ObjectRelationshipKind,
         identity: ResourceIdentity,
         label: String,
         stale: Bool = false,
-        potentiallyIncomplete: Bool = false
+        potentiallyIncomplete: Bool = false,
+        controller: Bool = false
     ) {
         self.kind = kind
         self.identity = identity
         self.label = label
         self.stale = stale
         self.potentiallyIncomplete = potentiallyIncomplete
+        self.controller = controller
     }
 
     public var id: ResourceUID { identity.uid }

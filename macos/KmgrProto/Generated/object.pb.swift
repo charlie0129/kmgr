@@ -515,6 +515,10 @@ public nonisolated struct Kmgr_V1_ResourceRelationship: Sendable {
   /// did not provide complete coverage of every Kubernetes resource type.
   public var potentiallyIncomplete: Bool = false
 
+  /// True when this owner reference is the Kubernetes controlling owner.
+  /// Non-owner relationships always leave this false.
+  public var controller: Bool = false
+
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public init() {}
@@ -1283,7 +1287,7 @@ nonisolated extension Kmgr_V1_GetRelationshipsRequest: SwiftProtobuf.Message, Sw
 
 nonisolated extension Kmgr_V1_ResourceRelationship: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".ResourceRelationship"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}kind\0\u{1}identity\0\u{1}label\0\u{1}stale\0\u{3}potentially_incomplete\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}kind\0\u{1}identity\0\u{1}label\0\u{1}stale\0\u{3}potentially_incomplete\0\u{1}controller\0")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -1296,6 +1300,7 @@ nonisolated extension Kmgr_V1_ResourceRelationship: SwiftProtobuf.Message, Swift
       case 3: try { try decoder.decodeSingularStringField(value: &self.label) }()
       case 4: try { try decoder.decodeSingularBoolField(value: &self.stale) }()
       case 5: try { try decoder.decodeSingularBoolField(value: &self.potentiallyIncomplete) }()
+      case 6: try { try decoder.decodeSingularBoolField(value: &self.controller) }()
       default: break
       }
     }
@@ -1321,6 +1326,9 @@ nonisolated extension Kmgr_V1_ResourceRelationship: SwiftProtobuf.Message, Swift
     if self.potentiallyIncomplete != false {
       try visitor.visitSingularBoolField(value: self.potentiallyIncomplete, fieldNumber: 5)
     }
+    if self.controller != false {
+      try visitor.visitSingularBoolField(value: self.controller, fieldNumber: 6)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -1330,6 +1338,7 @@ nonisolated extension Kmgr_V1_ResourceRelationship: SwiftProtobuf.Message, Swift
     if lhs.label != rhs.label {return false}
     if lhs.stale != rhs.stale {return false}
     if lhs.potentiallyIncomplete != rhs.potentiallyIncomplete {return false}
+    if lhs.controller != rhs.controller {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

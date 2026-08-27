@@ -229,6 +229,18 @@ struct NativeMainMenuBuilderTests {
                 NSEvent.ModifierFlags.command
             ),
             (
+                "Go to Parent",
+                #selector(ClusterWorkspaceWindowController.showResourceParent(_:)),
+                "p",
+                NSEvent.ModifierFlags()
+            ),
+            (
+                "Go to Parent in New Workspace",
+                #selector(ClusterWorkspaceWindowController.showResourceParentInNewWorkspace(_:)),
+                "p",
+                NSEvent.ModifierFlags.command
+            ),
+            (
                 "Show Node",
                 #selector(ClusterWorkspaceWindowController.showPodNode(_:)),
                 "o",
@@ -317,6 +329,18 @@ struct NativeMainMenuBuilderTests {
                 #selector(ClusterWorkspaceWindowController.openResourceEvents(_:)),
                 "",
                 NSEvent.ModifierFlags()
+            ),
+            (
+                "Start Port Forward…",
+                #selector(ClusterWorkspaceWindowController.startResourcePortForward(_:)),
+                "f",
+                NSEvent.ModifierFlags()
+            ),
+            (
+                "Start Port Forward and Show Port Forwards…",
+                #selector(ClusterWorkspaceWindowController.startResourcePortForwardAndShow(_:)),
+                "f",
+                NSEvent.ModifierFlags.command
             ),
             (
                 "Rollout Restart…",

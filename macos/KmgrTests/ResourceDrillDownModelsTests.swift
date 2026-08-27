@@ -149,6 +149,81 @@ import Testing
     )) == nil)
 }
 
+@Test func parentNavigationPrefersTheUniqueControllingOwner() {
+    let deployment = drillDownIdentity(
+        group: "apps", resource: "deployments", name: "api"
+    )
+    let configuration = drillDownIdentity(
+        resource: "configmaps", name: "api-settings"
+    )
+    let relationships = ObjectRelationships(
+        values: [
+            parentRelationship(configuration),
+            parentRelationship(deployment, controller: true),
+            ObjectRelationship(
+                kind: .child,
+                identity: drillDownIdentity(resource: "pods", name: "api-child"),
+                label: "Pod"
+            ),
+        ],
+        childrenPotentiallyIncomplete: true
+    )
+
+    #expect(ResourceParentNavigationPlanner.resolve(relationships) == .parent(deployment))
+}
+
+@Test func parentNavigationFallsBackToTheSoleLiveOwner() {
+    let live = drillDownIdentity(resource: "configmaps", name: "live")
+    let stale = drillDownIdentity(resource: "secrets", name: "stale")
+    let relationships = ObjectRelationships(
+        values: [
+            parentRelationship(stale, stale: true),
+            parentRelationship(live),
+        ],
+        childrenPotentiallyIncomplete: false
+    )
+
+    #expect(ResourceParentNavigationPlanner.resolve(relationships) == .parent(live))
+}
+
+@Test func parentNavigationReportsAmbiguousStaleAndMissingOwners() {
+    let first = drillDownIdentity(resource: "configmaps", name: "first")
+    let second = drillDownIdentity(resource: "secrets", name: "second")
+    #expect(ResourceParentNavigationPlanner.resolve(ObjectRelationships(
+        values: [parentRelationship(first), parentRelationship(second)],
+        childrenPotentiallyIncomplete: false
+    )) == .ambiguous)
+    #expect(ResourceParentNavigationPlanner.resolve(ObjectRelationships(
+        values: [parentRelationship(first, stale: true)],
+        childrenPotentiallyIncomplete: false
+    )) == .stale(first))
+    #expect(ResourceParentNavigationPlanner.resolve(ObjectRelationships(
+        values: [],
+        childrenPotentiallyIncomplete: false
+    )) == .noParent)
+}
+
+@Test func parentNavigationBuildsExactServerSideQueryAndUIDSelection() {
+    let namespaced = drillDownIdentity(
+        group: "apps", resource: "deployments", namespace: "payments",
+        name: #"api\blue,primary=v1"#
+    )
+    #expect(ResourceParentNavigationPlanner.query(for: namespaced) == ResourceDrillDownQuery(
+        group: "apps",
+        version: "v1",
+        resource: "deployments",
+        namespaceScope: .namespace("payments"),
+        filterExpression: #"fieldSelector:"metadata.name=api\\blue\,primary\=v1""#,
+        selectionUID: namespaced.uid
+    ))
+
+    let clusterScoped = drillDownIdentity(
+        resource: "nodes", namespace: "", name: "worker-a"
+    )
+    #expect(ResourceParentNavigationPlanner.query(for: clusterScoped).namespaceScope
+        == NamespaceSelection())
+}
+
 @Test func unsupportedAndEmptyResourcesHaveNoDrillDown() {
     let pvc = drillDownIdentity(resource: "persistentvolumeclaims")
     #expect(!ResourceDrillDownPlanner.hasPotentialTarget(pvc))
@@ -183,6 +258,20 @@ import Testing
     #expect(ResourceDrillDownPlanner.plan(for: ObjectDetail(
         identity: configMap, resourceVersion: "rv-1"
     )) == nil)
+}
+
+private func parentRelationship(
+    _ identity: ResourceIdentity,
+    stale: Bool = false,
+    controller: Bool = false
+) -> ObjectRelationship {
+    ObjectRelationship(
+        kind: .owner,
+        identity: identity,
+        label: identity.resource,
+        stale: stale,
+        controller: controller
+    )
 }
 
 private func drillDownIdentity(

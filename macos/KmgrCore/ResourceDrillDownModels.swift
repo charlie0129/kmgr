@@ -6,19 +6,24 @@ public struct ResourceDrillDownQuery: Hashable, Sendable {
     public var resource: String
     public var namespaceScope: NamespaceSelection
     public var filterExpression: String
+    /// When present, automatic navigation selection must match this exact
+    /// Kubernetes UID rather than merely selecting a same-name row.
+    public var selectionUID: ResourceUID?
 
     public init(
         group: String,
         version: String,
         resource: String,
         namespaceScope: NamespaceSelection,
-        filterExpression: String
+        filterExpression: String,
+        selectionUID: ResourceUID? = nil
     ) {
         self.group = group
         self.version = version
         self.resource = resource
         self.namespaceScope = namespaceScope
         self.filterExpression = filterExpression
+        self.selectionUID = selectionUID
     }
 }
 
@@ -79,6 +84,53 @@ public enum PodNodeNavigationPlanner {
                 path: "metadata.name",
                 equals: nodeName
             )
+        )
+    }
+}
+
+public enum ResourceParentNavigationResolution: Hashable, Sendable {
+    case parent(ResourceIdentity)
+    case noParent
+    case stale(ResourceIdentity)
+    case ambiguous
+}
+
+/// Chooses one immediate Kubernetes owner without scanning children or
+/// guessing among equally valid references. A unique controlling owner wins;
+/// resources that omit the controller bit may still use their sole live owner.
+public enum ResourceParentNavigationPlanner {
+    public static func resolve(
+        _ relationships: ObjectRelationships
+    ) -> ResourceParentNavigationResolution {
+        let owners = relationships.values.filter { $0.kind == .owner }
+        let controllers = owners.filter(\.controller)
+        if controllers.count == 1, let controller = controllers.first {
+            return controller.stale
+                ? .stale(controller.identity) : .parent(controller.identity)
+        }
+        if controllers.count > 1 { return .ambiguous }
+
+        let liveOwners = owners.filter { !$0.stale }
+        if liveOwners.count == 1, let owner = liveOwners.first {
+            return .parent(owner.identity)
+        }
+        if liveOwners.count > 1 { return .ambiguous }
+        if let stale = owners.first { return .stale(stale.identity) }
+        return .noParent
+    }
+
+    public static func query(for parent: ResourceIdentity) -> ResourceDrillDownQuery {
+        ResourceDrillDownQuery(
+            group: parent.group,
+            version: parent.version,
+            resource: parent.resource,
+            namespaceScope: parent.namespace.isEmpty
+                ? NamespaceSelection() : .namespace(parent.namespace),
+            filterExpression: ResourceQueryExpression.nativeFieldSelector(
+                path: "metadata.name",
+                equals: parent.name
+            ),
+            selectionUID: parent.uid
         )
     }
 }

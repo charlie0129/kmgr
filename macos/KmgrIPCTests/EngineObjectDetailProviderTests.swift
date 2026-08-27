@@ -419,6 +419,7 @@ private actor ObjectDetailRPCCapture: ObjectDetailRPC {
     owner.identity = protoIdentity(resource: "deployments", name: "api", uid: "deploy-1")
     owner.label = "Deployment/api"
     owner.potentiallyIncomplete = false
+    owner.controller = true
     relationshipResponse.relationships = [owner]
     relationshipResponse.childrenPotentiallyIncomplete = true
     await rpc.installRelationships(relationshipResponse)
@@ -432,6 +433,7 @@ private actor ObjectDetailRPCCapture: ObjectDetailRPC {
 
     #expect(relationships.values.first?.kind == .owner)
     #expect(relationships.values.first?.identity.uid == "deploy-1")
+    #expect(relationships.values.first?.controller == true)
     #expect(relationships.childrenPotentiallyIncomplete)
 }
 

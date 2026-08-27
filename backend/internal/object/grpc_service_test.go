@@ -83,6 +83,20 @@ func TestGRPCGetObjectReturnsStructuredRecreationConflict(t *testing.T) {
 	}
 }
 
+func TestRelationshipToProtoCarriesControllerFlag(t *testing.T) {
+	t.Parallel()
+	value := relationshipToProto(Relationship{
+		Kind:       RelationshipOwner,
+		Identity:   Identity{SessionID: "session", Version: "v1", Resource: "pods", Namespace: "ns", Name: "api", UID: "uid"},
+		Label:      "Pod",
+		Controller: true,
+	})
+	if value.GetKind() != kmgrv1.RelationshipKind_RELATIONSHIP_KIND_OWNER ||
+		!value.GetController() {
+		t.Fatalf("relationship proto = %#v", value)
+	}
+}
+
 func TestGRPCRelationshipScanCursorAndExplicitCancellation(t *testing.T) {
 	target := kubernetesObject("apps/v1", "Deployment", "deployments", "ns", "api", "owner-uid")
 	metadataScheme := metadatafake.NewTestScheme()

@@ -30,6 +30,7 @@ type Relationship struct {
 	Label                 string
 	Stale                 bool
 	PotentiallyIncomplete bool
+	Controller            bool
 }
 
 type CachedChild struct {
@@ -152,6 +153,7 @@ func (r *Reader) ownerRelationships(
 		}
 		result = append(result, Relationship{
 			Kind: RelationshipOwner, Identity: ownerIdentity, Label: owner.Kind, Stale: stale,
+			Controller: owner.Controller != nil && *owner.Controller,
 		})
 	}
 	return result, nil

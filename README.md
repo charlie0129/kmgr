@@ -194,6 +194,14 @@ engine already has; it never wakes stopped watches or lists every resource
 kind. The UI labels these child results **Cached children · potentially
 incomplete**, including when no cached children were found.
 
+Press `P` on a selected resource to follow its immediate Kubernetes owner in
+the current workspace, or Command-P to open that parent in a new workspace.
+Kmgr prefers the unique controlling owner, otherwise follows the sole live
+owner, and warns instead of guessing when references are absent, stale, or
+ambiguous. The destination list uses a visible exact
+`fieldSelector:"metadata.name=…"` server-side query and auto-selects only the
+referenced UID, never a same-name replacement.
+
 Choose **Scan All Resources…** only when fuller coverage is worth the API cost.
 After confirmation, Kmgr performs cancellable, paginated metadata LISTs across
 discovered listable resource types and reports progress. The result can still
@@ -240,6 +248,8 @@ globally across launches rather than per cluster.
 | Command-D | Open or focus Details in an auxiliary window |
 | Return | Enter a useful subresource in the current workspace |
 | Command-Return | Enter the selected subresource in a new full workspace |
+| `P` | Go to the selected object's immediate Kubernetes owner |
+| Command-P | Go to the selected object's owner in a new full workspace |
 | Command-click in the sidebar | Open the selected resource in a new full workspace |
 | Command-[ / Command-] | Back / Forward |
 | Escape | Clear selection or return focus to the table |
@@ -252,7 +262,8 @@ globally across launches rather than per cluster.
 | Shift-L | Show logs from the previous container instance for compatible selected Pods or workloads |
 | `S` | Open a terminal for one Pod using automatic container and shell defaults |
 | Shift-S | Configure the container, shell, or executable for one Pod |
-| `P` | Configure a port-forward for one Pod or Service |
+| `F` | Configure a port-forward for one Pod or Service |
+| Command-F in a resource or Pod-container table | Configure a port-forward, then show Port Forwards after it starts |
 | Command-Backspace | Confirm deletion of selected resources |
 | Command-S | Save the active YAML or key/value edit |
 
@@ -265,8 +276,9 @@ provide find, copy, paste, undo, redo, and save.
 
 In a Pod's Containers subresource, `L`/Return opens the selected container's
 current logs, Shift-L opens its previous container instance's logs, `S` opens
-its terminal, Shift-S configures its terminal, and `P` starts a port-forward
-for the UID-pinned parent Pod.
+its terminal, Shift-S configures its terminal, `F` starts a port-forward for
+the UID-pinned parent Pod, and Command-F shows Port Forwards after a successful
+start. `P` is reserved for resource-list parent navigation and is unbound here.
 
 New Pod terminals and Node shells open at 120 columns by 35 rows by default.
 Settings can choose an initial size from 80–300 columns and 20–100 rows;

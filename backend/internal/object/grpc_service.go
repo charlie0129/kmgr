@@ -636,6 +636,7 @@ func relationshipToProto(value Relationship) *kmgrv1.ResourceRelationship {
 	return &kmgrv1.ResourceRelationship{
 		Kind: kind, Identity: identityToProto(value.Identity), Label: value.Label,
 		Stale: value.Stale, PotentiallyIncomplete: value.PotentiallyIncomplete,
+		Controller: value.Controller,
 	}
 }
 

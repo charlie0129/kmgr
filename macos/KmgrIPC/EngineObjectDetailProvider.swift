@@ -717,7 +717,8 @@ public struct EngineObjectDetailProvider: ObjectDetailProviding {
             identity: identity(value.identity),
             label: value.label,
             stale: value.stale,
-            potentiallyIncomplete: value.potentiallyIncomplete
+            potentiallyIncomplete: value.potentiallyIncomplete,
+            controller: value.controller
         )
     }
 

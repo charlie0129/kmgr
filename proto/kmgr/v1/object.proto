@@ -123,6 +123,9 @@ message ResourceRelationship {
   // The relationship itself matched the requested owner UID, but the source
   // did not provide complete coverage of every Kubernetes resource type.
   bool potentially_incomplete = 5;
+  // True when this owner reference is the Kubernetes controlling owner.
+  // Non-owner relationships always leave this false.
+  bool controller = 6;
 }
 
 message GetRelationshipsResponse {

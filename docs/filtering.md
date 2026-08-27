@@ -88,14 +88,22 @@ dropped or replaced with a broader query.
 
 ## Relationship drill-downs
 
-Opening a workload's Pods, a node's Pods, a Pod's assigned Node with `O`, or an
-object's Events writes its complete native selector into the search field, for
-example:
+Opening a workload's Pods, a node's Pods, a Pod's assigned Node with `O`, an
+object's immediate owner with `P`, or an object's Events writes its complete
+native selector into the search field, for example:
 
 ```text
 labelSelector:"app=api,track in (canary,stable)"
 fieldSelector:"metadata.name=worker-a"
 ```
+
+Parent navigation resolves owner references with metadata-only Kubernetes
+reads. A unique `controller: true` owner wins; otherwise Kmgr follows only a
+sole live owner and warns for missing, stale, or ambiguous references. Its
+exact `metadata.name` selector is sent to the API server, while the referenced
+UID is kept separately only to auto-select the intended row. A same-name
+replacement can therefore remain visible without being selected. Command-P
+uses the same query and UID rule in a new workspace.
 
 Editing or replacing that text edits the one query and therefore immediately
 removes or changes the relationship constraint. History and window restoration

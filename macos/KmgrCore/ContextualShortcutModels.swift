@@ -38,6 +38,7 @@ public struct ContextualShortcutSnapshot: Hashable, Sendable {
 /// prevents it from growing a second, subtly different command validator.
 public struct ResourceListShortcutAvailability: Hashable, Sendable {
     public var canEnterSubresource: Bool
+    public var canShowParent: Bool
     public var canShowNode: Bool
     public var canOpenDetails: Bool
     public var canOpenYAML: Bool
@@ -49,6 +50,7 @@ public struct ResourceListShortcutAvailability: Hashable, Sendable {
 
     public init(
         canEnterSubresource: Bool = false,
+        canShowParent: Bool = false,
         canShowNode: Bool = false,
         canOpenDetails: Bool = false,
         canOpenYAML: Bool = false,
@@ -59,6 +61,7 @@ public struct ResourceListShortcutAvailability: Hashable, Sendable {
         canDelete: Bool = false
     ) {
         self.canEnterSubresource = canEnterSubresource
+        self.canShowParent = canShowParent
         self.canShowNode = canShowNode
         self.canOpenDetails = canOpenDetails
         self.canOpenYAML = canOpenYAML
@@ -107,6 +110,14 @@ public enum ContextualShortcutCatalog {
                 "Enter selected subresource in a new workspace"
             ))
         }
+        if availability.canShowParent {
+            items.append(item("resource.parent", "P", "Go to selected object's parent"))
+            items.append(item(
+                "resource.parent.window",
+                "\u{2318}P",
+                "Go to selected object's parent in a new workspace"
+            ))
+        }
         if availability.canShowNode {
             items.append(item("resource.node", "O", "Show selected Pod's Node"))
         }
@@ -152,7 +163,12 @@ public enum ContextualShortcutCatalog {
             ))
         }
         if availability.canStartPortForward {
-            items.append(item("resource.port-forward", "P", "Start port-forward"))
+            items.append(item("resource.port-forward", "F", "Start port-forward"))
+            items.append(item(
+                "resource.port-forward.window",
+                "\u{2318}F",
+                "Start port-forward and show Port Forwards"
+            ))
         }
         if availability.canRestart {
             items.append(item("resource.restart", "R", "Rollout restart"))
@@ -211,8 +227,13 @@ public enum ContextualShortcutCatalog {
         if canStartPortForward {
             items.append(item(
                 "container.port-forward",
-                "P",
+                "F",
                 "Start parent Pod port-forward"
+            ))
+            items.append(item(
+                "container.port-forward.window",
+                "\u{2318}F",
+                "Start parent Pod port-forward and show Port Forwards"
             ))
         }
         items.append(namespaceItem)

@@ -327,6 +327,22 @@ enum NativeMainMenuBuilder {
         )
         addResponderItem(
             to: menu,
+            title: "Go to Parent",
+            action: #selector(ClusterWorkspaceWindowController.showResourceParent(_:)),
+            keyEquivalent: "p",
+            modifiers: []
+        )
+        addResponderItem(
+            to: menu,
+            title: "Go to Parent in New Workspace",
+            action: #selector(
+                ClusterWorkspaceWindowController.showResourceParentInNewWorkspace(_:)
+            ),
+            keyEquivalent: "p",
+            modifiers: [.command]
+        )
+        addResponderItem(
+            to: menu,
             title: "Show Node",
             action: #selector(ClusterWorkspaceWindowController.showPodNode(_:)),
             keyEquivalent: "o",
@@ -399,8 +415,17 @@ enum NativeMainMenuBuilder {
             to: menu,
             title: "Start Port Forward…",
             action: #selector(ClusterWorkspaceWindowController.startResourcePortForward(_:)),
-            keyEquivalent: "p",
+            keyEquivalent: "f",
             modifiers: []
+        )
+        addResponderItem(
+            to: menu,
+            title: "Start Port Forward and Show Port Forwards…",
+            action: #selector(
+                ClusterWorkspaceWindowController.startResourcePortForwardAndShow(_:)
+            ),
+            keyEquivalent: "f",
+            modifiers: [.command]
         )
         menu.addItem(.separator())
         addResponderItem(

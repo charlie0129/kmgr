@@ -46,17 +46,19 @@ struct PodContainerListViewControllerTests {
         var automaticExec: PodExecTarget?
         var configuredExec: PodExecTarget?
         var forwarded: ResourceIdentity?
+        var forwardedAndShown: ResourceIdentity?
         controller.onOpenLogs = { opened = $0 }
         controller.onOpenExec = { automaticExec = $0 }
         controller.onConfigureExec = { configuredExec = $0 }
         controller.onStartPortForward = { forwarded = $0 }
+        controller.onStartPortForwardAndShow = { forwardedAndShown = $0 }
         let table = try #require(subresourceDescendants(of: controller.view)
             .compactMap { $0 as? NSTableView }
             .first { $0.accessibilityLabel() == "Pod containers" })
         table.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
         #expect(controller.contextualShortcutSnapshot.items.map(\.keys)
             == [
-                "L / Return", "\u{21E7}L", "S", "\u{21E7}S", "P",
+                "L / Return", "\u{21E7}L", "S", "\u{21E7}S", "F", "\u{2318}F",
                 "\u{21E7}\u{2318}N", "Escape",
             ])
         let button = try #require(subresourceDescendants(of: controller.view)
@@ -86,6 +88,9 @@ struct PodContainerListViewControllerTests {
         table.keyDown(with: try subresourceKey("s"))
         table.keyDown(with: try subresourceKey("s", modifiers: [.shift]))
         table.keyDown(with: try subresourceKey("p"))
+        #expect(forwarded == nil)
+        table.keyDown(with: try subresourceKey("f"))
+        table.keyDown(with: try subresourceKey("f", modifiers: [.command]))
         let expectedTarget = PodExecTarget(
             pod: pod,
             preferredContainer: "migrate"
@@ -93,6 +98,7 @@ struct PodContainerListViewControllerTests {
         #expect(automaticExec == expectedTarget)
         #expect(configuredExec == expectedTarget)
         #expect(forwarded == pod)
+        #expect(forwardedAndShown == pod)
 
         opened = nil
         controller.setNetworkActionsEnabled(false)
@@ -102,6 +108,7 @@ struct PodContainerListViewControllerTests {
         automaticExec = nil
         configuredExec = nil
         forwarded = nil
+        forwardedAndShown = nil
         button.performClick(nil)
         let returnEvent = try #require(NSEvent.keyEvent(
             with: .keyDown,
@@ -119,11 +126,13 @@ struct PodContainerListViewControllerTests {
         #expect(opened == nil)
         table.keyDown(with: try subresourceKey("s"))
         table.keyDown(with: try subresourceKey("s", modifiers: [.shift]))
-        table.keyDown(with: try subresourceKey("p"))
+        table.keyDown(with: try subresourceKey("f"))
+        table.keyDown(with: try subresourceKey("f", modifiers: [.command]))
         table.keyDown(with: try subresourceKey("l", modifiers: [.shift]))
         #expect(automaticExec == nil)
         #expect(configuredExec == nil)
         #expect(forwarded == nil)
+        #expect(forwardedAndShown == nil)
         #expect(opened == nil)
     }
 

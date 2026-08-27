@@ -906,8 +906,11 @@ type ResourceRelationship struct {
 	// The relationship itself matched the requested owner UID, but the source
 	// did not provide complete coverage of every Kubernetes resource type.
 	PotentiallyIncomplete bool `protobuf:"varint,5,opt,name=potentially_incomplete,json=potentiallyIncomplete,proto3" json:"potentially_incomplete,omitempty"`
-	unknownFields         protoimpl.UnknownFields
-	sizeCache             protoimpl.SizeCache
+	// True when this owner reference is the Kubernetes controlling owner.
+	// Non-owner relationships always leave this false.
+	Controller    bool `protobuf:"varint,6,opt,name=controller,proto3" json:"controller,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ResourceRelationship) Reset() {
@@ -971,6 +974,13 @@ func (x *ResourceRelationship) GetStale() bool {
 func (x *ResourceRelationship) GetPotentiallyIncomplete() bool {
 	if x != nil {
 		return x.PotentiallyIncomplete
+	}
+	return false
+}
+
+func (x *ResourceRelationship) GetController() bool {
+	if x != nil {
+		return x.Controller
 	}
 	return false
 }
@@ -1624,13 +1634,16 @@ const file_kmgr_v1_object_proto_rawDesc = "" +
 	"\acontext\x18\x01 \x01(\v2\x17.kmgr.v1.RequestContextR\acontext\x125\n" +
 	"\bidentity\x18\x02 \x01(\v2\x19.kmgr.v1.ResourceIdentityR\bidentity\x12%\n" +
 	"\x0einclude_owners\x18\x03 \x01(\bR\rincludeOwners\x12)\n" +
-	"\x10include_children\x18\x04 \x01(\bR\x0fincludeChildren\"\xdf\x01\n" +
+	"\x10include_children\x18\x04 \x01(\bR\x0fincludeChildren\"\xff\x01\n" +
 	"\x14ResourceRelationship\x12-\n" +
 	"\x04kind\x18\x01 \x01(\x0e2\x19.kmgr.v1.RelationshipKindR\x04kind\x125\n" +
 	"\bidentity\x18\x02 \x01(\v2\x19.kmgr.v1.ResourceIdentityR\bidentity\x12\x14\n" +
 	"\x05label\x18\x03 \x01(\tR\x05label\x12\x14\n" +
 	"\x05stale\x18\x04 \x01(\bR\x05stale\x125\n" +
-	"\x16potentially_incomplete\x18\x05 \x01(\bR\x15potentiallyIncomplete\"\xf6\x01\n" +
+	"\x16potentially_incomplete\x18\x05 \x01(\bR\x15potentiallyIncomplete\x12\x1e\n" +
+	"\n" +
+	"controller\x18\x06 \x01(\bR\n" +
+	"controller\"\xf6\x01\n" +
 	"\x18GetRelationshipsResponse\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12C\n" +

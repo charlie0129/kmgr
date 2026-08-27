@@ -9,6 +9,7 @@ struct ContextualShortcutModelsTests {
             title: "Pods",
             availability: ResourceListShortcutAvailability(
                 canEnterSubresource: true,
+                canShowParent: true,
                 canShowNode: true,
                 canOpenDetails: true,
                 canOpenYAML: true,
@@ -36,6 +37,11 @@ struct ContextualShortcutModelsTests {
         #expect(snapshot.items.map(\.keys).contains("S"))
         #expect(snapshot.items.map(\.keys).contains("\u{21E7}S"))
         #expect(snapshot.items.map(\.keys).contains("P"))
+        #expect(snapshot.items.map(\.keys).contains("\u{2318}P"))
+        #expect(snapshot.items.map(\.keys).contains("F"))
+        #expect(snapshot.items.map(\.keys).contains("\u{2318}F"))
+        #expect(snapshot.items.first { $0.id == "resource.parent" }?.keys == "P")
+        #expect(snapshot.items.first { $0.id == "resource.port-forward" }?.keys == "F")
         #expect(snapshot.items.map(\.keys).contains("R"))
         #expect(snapshot.items.map(\.keys).contains("\u{2318}\u{232B}"))
         #expect(snapshot.items.map(\.keys).contains("\u{21E7}\u{2318}N"))
@@ -71,7 +77,7 @@ struct ContextualShortcutModelsTests {
             canOpenTerminal: true,
             canStartPortForward: true
         ).items.map(\.keys) == [
-            "L / Return", "\u{21E7}L", "S", "\u{21E7}S", "P",
+            "L / Return", "\u{21E7}L", "S", "\u{21E7}S", "F", "\u{2318}F",
             "\u{21E7}\u{2318}N", "Escape",
         ])
         #expect(ContextualShortcutCatalog.containerList(

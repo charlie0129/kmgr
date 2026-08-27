@@ -524,6 +524,12 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         controller.onStartPortForward = { [weak controller] identity in
             controller?.showPortForwardConfiguration(identity)
         }
+        controller.onStartPortForwardAndShow = { [weak controller] identity in
+            controller?.showPortForwardConfiguration(
+                identity,
+                showPortForwardsAfterStart: true
+            )
+        }
         controller.onOpenNewWorkspace = { [weak self, weak controller] request in
             self?.openSiblingWorkspace(request, source: controller)
         }
