@@ -216,6 +216,7 @@ struct LogViewportProjection: Sendable {
     var style: LogViewportTextStyle
     private var chunkStorage: LogHeadBuffer<String>
     private var chunkStartStorage: LogHeadBuffer<Int>
+    /// Always contains at least the empty final line for an empty projection.
     private var lineStorage: LogHeadBuffer<LogViewportLine>
     private var textOrigin: Int
     var textUTF16Length: Int
@@ -232,6 +233,16 @@ struct LogViewportProjection: Sendable {
         Double(maximumCellCount) * style.cellWidth
     }
 
+    private static func emptyLine(at location: Int) -> LogViewportLine {
+        LogViewportLine(
+            textRange: NSRange(location: location, length: 0),
+            cellCount: 0,
+            isASCII: true,
+            hasJSONObjectBoundaries: false,
+            variableBoundaries: []
+        )
+    }
+
     static func empty(
         style: LogViewportTextStyle,
         highlightedText: String = ""
@@ -240,13 +251,7 @@ struct LogViewportProjection: Sendable {
             style: style,
             chunkStorage: LogHeadBuffer(),
             chunkStartStorage: LogHeadBuffer(),
-            lineStorage: LogHeadBuffer([LogViewportLine(
-                textRange: NSRange(location: 0, length: 0),
-                cellCount: 0,
-                isASCII: true,
-                hasJSONObjectBoundaries: false,
-                variableBoundaries: []
-            )]),
+            lineStorage: LogHeadBuffer([Self.emptyLine(at: 0)]),
             textOrigin: 0,
             textUTF16Length: 0,
             maximumCellCount: 0,
@@ -281,13 +286,8 @@ struct LogViewportProjection: Sendable {
                 return replacement
             }
 
-            let finalLine = previous.lines.last ?? LogViewportLine(
-                textRange: NSRange(location: previous.textUTF16Length, length: 0),
-                cellCount: 0,
-                isASCII: true,
-                hasJSONObjectBoundaries: false,
-                variableBoundaries: []
-            )
+            let finalLine = previous.lines.last
+                ?? Self.emptyLine(at: previous.textUTF16Length)
             let rebuildStart = finalLine.textRange.location
             var suffix = [previous.substring(in: NSRange(
                 location: rebuildStart,
@@ -358,6 +358,21 @@ struct LogViewportProjection: Sendable {
         textOrigin = replacementOrigin
         textUTF16Length -= removedUTF16Length
 
+        // Keep the projection's line collection non-empty even when prefix
+        // eviction removes the final unterminated line. Geometry deliberately
+        // exposes one drawable row for an empty document, so it needs a real
+        // empty line rather than an empty collection. This also gives the
+        // append path below a final line to replace when the buffer was fully
+        // evicted and new text arrives in the same update.
+        if lineStorage.isEmpty {
+            lineStorage.append(Self.emptyLine(
+                at: textOrigin + textUTF16Length
+            ))
+        }
+        if chunkStorage.isEmpty {
+            maximumCellCount = 0
+        }
+
         guard !appendChunks.isEmpty else {
             return LogViewportProjectionEditResult(
                 removedLineCount: removedLineCount,
@@ -365,13 +380,7 @@ struct LogViewportProjection: Sendable {
             )
         }
 
-        let finalLine = lines.last ?? LogViewportLine(
-            textRange: NSRange(location: textUTF16Length, length: 0),
-            cellCount: 0,
-            isASCII: true,
-            hasJSONObjectBoundaries: false,
-            variableBoundaries: []
-        )
+        let finalLine = lines.last ?? Self.emptyLine(at: textUTF16Length)
         let rebuildStart = textOrigin + finalLine.textRange.location
         let retainedOpenSuffix = substring(in: finalLine.textRange)
         let precedingTerminatorWasCarriageReturn = codeUnitBeforeEnd == 0x000d
@@ -921,11 +930,30 @@ private struct LogViewportGeometry {
         if edit.removedLineCount > 0 {
             lineRowStarts.discardFirst(edit.removedLineCount)
         }
-        guard edit.rebuiltTailLineCount > 0 else { return }
+        let newLineCount = projection.lines.count
+        guard edit.rebuiltTailLineCount > 0 else {
+            // Prefix eviction can replace every old line with the single
+            // empty sentinel above. The retained endpoint is then also the
+            // new line's start; append its endpoint so later edits continue
+            // to have the usual lineCount + 1 geometry entries.
+            if newLineCount > 0,
+                lineRowStarts.count == newLineCount,
+                let lastLine = projection.lines.last
+            {
+                let total = lineRowStarts.last ?? 0
+                lineRowStarts.append(total + rows(for: lastLine))
+            }
+            return
+        }
 
         // The old open final line contributed the last endpoint. Retain its
         // start and append endpoints for only the rebuilt tail.
         lineRowStarts.discardLast()
+        if lineRowStarts.isEmpty {
+            // Every old line was removed. There is no retained start to anchor
+            // the rebuilt suffix, so begin its row endpoints at zero.
+            lineRowStarts.append(0)
+        }
         var total = lineRowStarts.last ?? 0
         for line in projection.lines.suffix(edit.rebuiltTailLineCount) {
             total += rows(for: line)

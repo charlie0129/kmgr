@@ -102,6 +102,63 @@ struct LogWindowControllerTests {
         #expect(logView.string.hasSuffix("appended-9999\n"))
     }
 
+    @Test("incremental eviction keeps an empty wrapped viewport drawable")
+    func incrementalEvictionLeavesEmptyLineForDrawing() throws {
+        let (logView, scrollView) = makeLogViewport(frame: NSRect(
+            x: 0, y: 0, width: 500, height: 300
+        ))
+        let projection = try LogViewportProjection.make(
+            chunks: ["unterminated"],
+            previous: nil,
+            retainedChunkCount: 0,
+            style: logView.projection.style
+        )
+        logView.install(projection, viewportSize: scrollView.contentSize)
+        logView.setWrapsLines(true, viewportSize: scrollView.contentSize)
+
+        try logView.applyLineAlignedEdit(
+            removePrefixChunkCount: 1,
+            appendChunks: [],
+            viewportSize: scrollView.contentSize
+        )
+        #expect(logView.string.isEmpty)
+        #expect(logView.projection.lines.count == 1)
+        #expect(logView.visualRowCount == 1)
+        #expect(logView.visualRowText(at: 0).isEmpty)
+
+        let emptyBitmap = try #require(
+            logView.bitmapImageRepForCachingDisplay(in: logView.bounds)
+        )
+        logView.cacheDisplay(in: logView.bounds, to: emptyBitmap)
+        #expect(logView.lastDrawnCellCount == 0)
+
+        try logView.applyLineAlignedEdit(
+            removePrefixChunkCount: 0,
+            appendChunks: ["replacement\n"],
+            viewportSize: scrollView.contentSize
+        )
+        #expect(logView.string == "replacement\n")
+        #expect(logView.projection.lines.count == 2)
+        #expect(logView.visualRowCount == 2)
+        #expect((0..<2).map { logView.visualRowText(at: $0) } == [
+            "replacement", "",
+        ])
+
+        // Exercise the same-update path where eviction removes the old line
+        // and a replacement suffix is appended before geometry is updated.
+        logView.install(projection, viewportSize: scrollView.contentSize)
+        try logView.applyLineAlignedEdit(
+            removePrefixChunkCount: 1,
+            appendChunks: ["combined\n"],
+            viewportSize: scrollView.contentSize
+        )
+        #expect(logView.string == "combined\n")
+        #expect(logView.visualRowCount == 2)
+        #expect((0..<2).map { logView.visualRowText(at: $0) } == [
+            "combined", "",
+        ])
+    }
+
     @Test("newline controls never share one virtual row")
     func virtualRowsSegmentCRLFAcrossStreamingChunks() throws {
         let (logView, _) = makeLogViewport(frame: NSRect(
