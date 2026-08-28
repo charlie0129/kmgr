@@ -71,13 +71,13 @@ already checked into the repository.
 3. Pick a resource from the sidebar. Lists arrive progressively, then continue
    through WATCH. Moving away releases the last view consumer after a debounce;
    returning can display bounded warm rows immediately while the watch resumes
-   or a relist runs in the background. Use **Restart Resource Stream** in the
-   Resource menu, the table context menu, or the list header if that resource
-   remains stuck reconnecting. The action preserves the current scope, filter,
-   columns, and sort while discarding the retained resource version and starting
-   a fresh LIST/WATCH lifecycle. Metric-backed filters and sorts publish their
-   base-field result first; the status briefly shows `Updating metrics…` while
-   metric-only matches and the exact metric order are refined.
+   or a relist runs in the background. If that resource remains stuck
+   reconnecting, choose **Resource → Restart Resource Stream** or press
+   Command-R. The action preserves the current scope, filter, columns, and sort
+   while discarding the retained resource version and starting a fresh
+   LIST/WATCH lifecycle. Metric-backed filters and sorts publish their base-field
+   result first; the status briefly shows `Updating metrics…` while metric-only
+   matches and the exact metric order are refined.
 4. Use `/` for the current table filter and Command-K for commands, recent or
    cached objects, kinds, namespaces, or a two-stage resource-scoped object
    search. A scoped search checks compatible active/warm engine caches before

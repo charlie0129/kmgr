@@ -4189,7 +4189,6 @@ private final class ResourceListViewController: NSViewController,
     private let scopeLabel = NSTextField(labelWithString: "All namespaces")
     private let sortLabel = NSTextField(labelWithString: "Unsorted")
     private let filterField = NSSearchField()
-    private let restartStreamButton = NSButton(title: "Restart Stream", target: nil, action: nil)
     private let filterCompletionPopup = ResourceFilterCompletionPopup()
     private let tableView = ResourceTableView()
     private let scrollView = NSScrollView()
@@ -4614,16 +4613,8 @@ private final class ResourceListViewController: NSViewController,
 
         let columnsButton = NSButton(title: "Columns…", target: self, action: #selector(showColumns))
         columnsButton.bezelStyle = .texturedRounded
-        restartStreamButton.target = self
-        restartStreamButton.action = #selector(restartResourceStream(_:))
-        restartStreamButton.bezelStyle = .texturedRounded
-        restartStreamButton.setAccessibilityLabel("Restart resource stream")
-        restartStreamButton.setAccessibilityHelp(
-            "Reload this resource with a fresh Kubernetes LIST and WATCH while preserving the filter."
-        )
         let header = NSStackView(views: [
-            titleLabel, scopeLabel, sortLabel, NSView(), filterField,
-            restartStreamButton, columnsButton,
+            titleLabel, scopeLabel, sortLabel, NSView(), filterField, columnsButton,
         ])
         header.orientation = .horizontal
         header.alignment = .centerY
@@ -7596,7 +7587,6 @@ private final class ResourceListViewController: NSViewController,
     }
 
     private func updateStatusLine() {
-        restartStreamButton.isEnabled = canRestartResourceStream
         if let descriptor = tableView.sortDescriptors.first, let key = descriptor.key {
             let title = tableView.tableColumns.first(where: { $0.identifier.rawValue == key })?.title
                 ?? key

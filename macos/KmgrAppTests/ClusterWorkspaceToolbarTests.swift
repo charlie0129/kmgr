@@ -708,8 +708,8 @@ struct ClusterWorkspaceToolbarTests {
         #expect(forwards.title.contains("Forwards"))
     }
 
-    @Test("resource stream restart is local, accessible, and preserves the view query")
-    func resourceStreamRestartPreservesViewQuery() async throws {
+    @Test("Command-R restarts the resource stream and preserves the view query")
+    func commandRRestartsResourceStreamPreservingViewQuery() async throws {
         let provider = FilterValidationWorkspaceResourceProvider()
         let controller = makeWorkspace(
             provider: provider,
@@ -725,24 +725,19 @@ struct ClusterWorkspaceToolbarTests {
         )
         controller.showWindow(nil)
         defer { controller.close() }
-        let root = try #require(controller.window?.contentView)
-        let restart = try #require(descendants(of: root).compactMap { $0 as? NSButton }
-            .first { $0.accessibilityLabel() == "Restart resource stream" })
         let menuItem = NSMenuItem(
             title: "Restart Resource Stream",
             action: #selector(ClusterWorkspaceWindowController.restartResourceStream(_:)),
-            keyEquivalent: ""
+            keyEquivalent: "r"
         )
+        menuItem.keyEquivalentModifierMask = [.command]
 
         try await waitUntil {
-            provider.streamRequests.count == 1 && restart.isEnabled
+            provider.streamRequests.count == 1 && controller.validateMenuItem(menuItem)
         }
-        #expect(restart.title == "Restart Stream")
-        #expect(restart.accessibilityHelp()?.contains("fresh Kubernetes LIST and WATCH") == true)
-        #expect(controller.validateMenuItem(menuItem))
         let original = try #require(provider.streamRequests.first)
 
-        restart.performClick(nil)
+        #expect(NSApp.sendAction(menuItem.action!, to: controller, from: menuItem))
         try await waitUntil { provider.streamRequests.count == 2 }
         let replacement = try #require(provider.streamRequests.last)
         #expect(replacement.forceRelist)
