@@ -158,6 +158,7 @@ final class PortForwardConfigurationWindowController: NSWindowController,
         for field in [remotePortField, localPortField, bindAddressField, labelField] {
             field.delegate = self
             field.bezelStyle = .roundedBezel
+            field.setContentCompressionResistancePriority(.required, for: .vertical)
         }
         remotePortField.placeholderString = "1–65535"
         remotePortField.setAccessibilityLabel("Remote port")

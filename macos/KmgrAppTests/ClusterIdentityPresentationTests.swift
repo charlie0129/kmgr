@@ -114,6 +114,9 @@ struct ClusterIdentityPresentationTests {
         let fields = identityDescendants(of: root).compactMap { $0 as? NSTextField }
         let remote = try #require(fields.first { $0.accessibilityLabel() == "Remote port" })
         let local = try #require(fields.first { $0.accessibilityLabel() == "Local port" })
+        let bind = try #require(fields.first { $0.accessibilityLabel() == "Bind address" })
+        let label = try #require(fields.first { $0.accessibilityLabel() == "Port-forward label" })
+        #expect([remote, local, bind, label].allSatisfy { $0.frame.height >= 22 })
         remote.stringValue = "8080"
         controller.controlTextDidChange(Notification(
             name: NSControl.textDidChangeNotification,
