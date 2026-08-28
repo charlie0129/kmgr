@@ -3,8 +3,8 @@ import KmgrCore
 
 /// A deliberately small, independent YAML document window.
 ///
-/// It installs the server's UTF-8 bytes directly in AppKit's factory-created
-/// plain document text view. Editing uses the same backend validation and
+/// It installs the backend's display YAML UTF-8 bytes directly in AppKit's
+/// factory-created plain document text view. Editing uses the same backend validation and
 /// optimistic apply contract as the standalone YAML utility, without adding Yams, a
 /// custom ruler, or `TextDocumentGeometry` to this presentation path.
 @MainActor
@@ -268,8 +268,8 @@ final class YAMLSnapshotWindowController: NSWindowController, NSWindowDelegate,
 
         displayedDetail = detail
         displayedYAMLUTF8 = yamlUTF8
-        // Decode the received bytes directly. In particular, do not parse,
-        // normalize, serialize, or remove managedFields before first display.
+        // Decode the backend's managedFields-free display projection directly.
+        // Do not parse or reserialize it on the client before first display.
         if !isEditingYAML {
             replaceYAMLText(with: String(decoding: yamlUTF8, as: UTF8.self))
         }

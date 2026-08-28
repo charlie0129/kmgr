@@ -117,8 +117,9 @@ live in one app-wide Port Forwards window.
   same searchable, draggable key/value split view, keyboard
   behavior, structured-text highlighting, whitespace markers, staged row
   states, and save review while keeping their validation rules separate. The
-  dedicated YAML utility handles full-object viewing and editing, while
-  ConfigMap/Secret Data is the complete Return-driven key/value viewer and
+  dedicated YAML utility handles object viewing and editing, with the
+  API-managed `metadata.managedFields` field omitted. ConfigMap/Secret Data is
+  the complete Return-driven key/value viewer and
   editor. Oversized Summary values,
   including metadata values, stay available through cell copy while their
   inline presentation remains bounded to one line.
@@ -140,7 +141,8 @@ live in one app-wide Port Forwards window.
 - YAML edits are parsed in Go, identity-checked, and dry-run as an exact
   material JSON Patch before the semantic diff is shown. UID/resourceVersion
   test operations prevent retargeting or stale writes, unchanged unknown fields
-  are preserved, and force field ownership is unsupported.
+  are preserved, and API-managed `metadata.managedFields` stays out of the
+  editor and kmgr's patch, while force field ownership is unsupported.
 - YAML viewing and editing use lightweight visible-range syntax colors. Shared
   key-value editors apply the same YAML colors to `.yml`/`.yaml` keys and
   best-effort JSON colors to object or array values, including nested annotation

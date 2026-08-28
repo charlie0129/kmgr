@@ -198,7 +198,8 @@ func (r *Reader) prepareYAMLInput(
 	}
 
 	// These fields are owned by the API server or status controllers and are
-	// never part of a generic editor patch or its normalized preview.
+	// never part of a generic editor patch or its normalized preview. Omitting
+	// them from the client YAML therefore leaves their live values untouched.
 	desired = sanitizeYAMLEditObject(desired)
 	desired.SetResourceVersion(expectedResourceVersion)
 	patch, err := minimalYAMLJSONPatch(sanitizeYAMLEditObject(current), desired, identity, expectedResourceVersion)

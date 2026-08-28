@@ -80,6 +80,43 @@ func TestDetailReturnsReadableYAMLWithoutJSONCrossingBoundary(t *testing.T) {
 	}
 }
 
+func TestDetailYAMLOmitsManagedFieldsWithoutMutatingAuthoritativeObject(t *testing.T) {
+	t.Parallel()
+	value := kubernetesObject("v1", "ConfigMap", "configmaps", "ns", "settings", "uid")
+	value.SetManagedFields([]metav1.ManagedFieldsEntry{{
+		Manager: "controller-manager", Operation: metav1.ManagedFieldsOperationUpdate,
+	}})
+	value.Object["data"] = map[string]any{
+		"managedFields": "application-value",
+		"mode":          "fast",
+	}
+
+	detail, err := detailFromObject(value, Identity{
+		SessionID: "session", Version: "v1", Resource: "configmaps",
+		Namespace: "ns", Name: "settings", UID: "uid",
+	}, true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	display, err := parseSingleYAMLObject(detail.YAML)
+	if err != nil {
+		t.Fatalf("parse display YAML: %v", err)
+	}
+	if _, found, err := unstructured.NestedFieldNoCopy(
+		display.Object, "metadata", "managedFields",
+	); err != nil || found {
+		t.Fatalf("display YAML exposed metadata.managedFields: %#v (error %v)", display.Object, err)
+	}
+	data, found, err := unstructured.NestedMap(display.Object, "data")
+	if err != nil || !found || data["managedFields"] != "application-value" || data["mode"] != "fast" {
+		t.Fatalf("display YAML lost a non-metadata field: %#v (error %v)", display.Object, err)
+	}
+	managedFields := value.GetManagedFields()
+	if len(managedFields) != 1 || managedFields[0].Manager != "controller-manager" {
+		t.Fatalf("authoritative managedFields changed: %#v", managedFields)
+	}
+}
+
 func TestPodSummaryIncludesBoundedContainerChoicesAndDeclaredPorts(t *testing.T) {
 	t.Parallel()
 	value := kubernetesObject("v1", "Pod", "pods", "ns", "pod", "uid")

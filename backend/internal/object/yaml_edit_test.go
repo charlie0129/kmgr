@@ -100,6 +100,50 @@ status:
 	}
 }
 
+func TestPrepareYAMLWithoutManagedFieldsPreservesServerOwnershipMetadata(t *testing.T) {
+	t.Parallel()
+	current := kubernetesObject("apps/v1", "Deployment", "deployments", "ns", "web", "uid")
+	current.Object["spec"] = map[string]any{"replicas": int64(1)}
+	current.SetManagedFields([]metav1.ManagedFieldsEntry{{
+		Manager: "controller-manager", Operation: metav1.ManagedFieldsOperationUpdate,
+	}})
+	reader, client := fakeYAMLReader(t, current)
+	var patch []byte
+	client.PrependReactor("patch", "deployments", func(action ktesting.Action) (bool, runtime.Object, error) {
+		patch = append([]byte(nil), requirePatchAction(t, action).GetPatch()...)
+		return true, current.DeepCopy(), nil
+	})
+	identity := Identity{
+		SessionID: "session", Group: "apps", Version: "v1", Resource: "deployments",
+		Namespace: "ns", Name: "web", UID: "uid",
+	}
+	prepared, err := reader.PrepareYAML(context.Background(), identity, []byte(`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: ns
+  uid: uid
+  resourceVersion: rv-1
+spec:
+  replicas: 2
+`), "rv-1", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertJSONEqual(t, patch, `[
+  {"op":"test","path":"/metadata/uid","value":"uid"},
+  {"op":"test","path":"/metadata/resourceVersion","value":"rv-1"},
+  {"op":"replace","path":"/spec/replicas","value":2}
+]`)
+	if strings.Contains(string(prepared.NormalizedYAML), "managedFields") {
+		t.Fatalf("normalized YAML exposed managedFields: %s", prepared.NormalizedYAML)
+	}
+	managedFields := current.GetManagedFields()
+	if len(managedFields) != 1 || managedFields[0].Manager != "controller-manager" {
+		t.Fatalf("authoritative managedFields changed: %#v", managedFields)
+	}
+}
+
 func TestPrepareYAMLBuildsContextDiffAndCarriesDecodedSecretChanges(t *testing.T) {
 	t.Parallel()
 	current := kubernetesObject("v1", "Secret", "secrets", "ns", "credentials", "uid")

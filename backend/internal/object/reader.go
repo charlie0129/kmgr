@@ -1,6 +1,7 @@
 // Package object implements fresh, UID-authoritative Kubernetes object reads.
-// Table views retain raw objects in Go, while this package exposes full YAML or
-// sensitive key/value bytes only after an explicit detail request.
+// Table views retain raw objects in Go, while this package exposes display YAML
+// (with metadata.managedFields omitted) or sensitive key/value bytes only after
+// an explicit detail request.
 package object
 
 import (
@@ -262,7 +263,13 @@ func detailFromObject(
 		object:           value,
 	}
 	if includeYAML {
-		jsonBytes, err := value.MarshalJSON()
+		// YAML is a display/editing projection. Keep the authoritative object
+		// untouched because summaries, metrics, and mutation checks still need
+		// the server-managed metadata. The edit path likewise compares against a
+		// fresh object and deliberately excludes managedFields from its patch.
+		display := value.DeepCopy()
+		unstructured.RemoveNestedField(display.Object, "metadata", "managedFields")
+		jsonBytes, err := display.MarshalJSON()
 		if err != nil {
 			return Detail{}, fmt.Errorf("marshal Kubernetes object: %w", err)
 		}
