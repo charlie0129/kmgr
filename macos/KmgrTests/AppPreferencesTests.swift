@@ -445,7 +445,7 @@ import Testing
     )
     for keys in [
         "⌘N", "⌘K", "/", "↑ / ↓ or K / J", "⇧↑ / ⇧↓ or ⇧-click",
-        "⌘-click", "⌘A", "Return", "⌘Return", "P", "⌘P", "O", "D", "⌘[ / ⌘]", "Escape", "Y", "E",
+        "⌘-click", "⌘A", "Return", "⌘Return", "P", "⌘P", "O", "⌘O", "D", "⌘[ / ⌘]", "Escape", "Y", "E",
         "L", "⇧L", "S", "F", "⌘F", "R", "⌘⌫", "⌘S",
     ] {
         #expect(shortcuts[keys] != nil, "Missing shortcut reference for \(keys)")
@@ -455,6 +455,7 @@ import Testing
     #expect(shortcuts["P"] == "Go to the selected object's parent")
     #expect(shortcuts["⌘P"]?.contains("parent in a new workspace") == true)
     #expect(shortcuts["O"] == "Show the selected Pod's Node")
+    #expect(shortcuts["⌘O"]?.contains("Node in a new workspace") == true)
     #expect(shortcuts["D"] == "Open Details for the selected object")
     #expect(shortcuts["Y"] == "Open selected object YAML")
     #expect(shortcuts["E"] == "Edit selected object YAML")

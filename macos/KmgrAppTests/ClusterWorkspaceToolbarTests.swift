@@ -2333,6 +2333,66 @@ struct ClusterWorkspaceToolbarTests {
         #expect(window.firstResponder === table)
     }
 
+    @Test("Command-O requests the selected Pod's Node in a sibling workspace")
+    func commandShowAssignedNodeShortcutRequestsSiblingWorkspace() async throws {
+        let pod = toolbarPodIdentity()
+        let provider = PodNodeDrillDownWorkspaceResourceProvider(pod: pod)
+        let controller = makeWorkspace(
+            provider: provider,
+            objectDetailProvider: NoopToolbarObjectDetailProvider(detail: ObjectDetail(
+                identity: pod,
+                resourceVersion: "rv-node",
+                summaryFields: [ObjectSummaryField(
+                    sectionID: "network", fieldID: "node",
+                    label: "Node", displayText: "worker-a"
+                )]
+            )),
+            restoration: ClusterWindowRestorationRecord(
+                id: "pod-node-command-shortcut",
+                state: ClusterWindowRestorationState(
+                    contextName: "test-context",
+                    gvr: GVR(group: "", version: "v1", resource: "pods"),
+                    namespaceScope: .namespace("default")
+                )
+            )
+        )
+        var request: ClusterWorkspaceOpenRequest?
+        controller.onOpenNewWorkspace = { request = $0 }
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
+        let table = try #require(descendants(of: root).compactMap { $0 as? NSTableView }
+            .first { $0.accessibilityLabel() == "Kubernetes resources" })
+
+        try await waitUntil { provider.streamRequests.count == 1 && table.numberOfRows == 1 }
+        try await selectResourceRow(0, in: table)
+        #expect(window.makeFirstResponder(table))
+        #expect(controller.contextualShortcutSnapshot?.items.contains {
+            $0.id == "resource.node.window" && $0.keys == "\u{2318}O"
+        } == true)
+
+        table.keyDown(with: try workspaceLetterKey("o", modifiers: [.command]))
+
+        try await waitUntil { request != nil }
+        let captured = try #require(request)
+        #expect(captured.contextReference == controller.session.contextReference)
+        #expect(captured.resource == GVR(group: "", version: "v1", resource: "nodes"))
+        #expect(captured.namespaceScope == NamespaceSelection())
+        #expect(captured.filter == "fieldSelector:\"metadata.name=worker-a\"")
+        #expect(captured.selectionUID == nil)
+        #expect(captured.selectOnlyResult)
+        #expect(provider.streamRequests.count == 1)
+
+        controller.open(captured)
+        try await waitUntil {
+            provider.streamRequests.count == 2
+                && table.numberOfRows == 1
+                && resourceRowIsMaterialized(0, in: table)
+                && table.selectedRowIndexes == IndexSet(integer: 0)
+        }
+    }
+
     @Test("R opens the single detailed rollout restart confirmation")
     func rolloutRestartShortcut() async throws {
         let deployment = ResourceIdentity(

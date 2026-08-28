@@ -120,6 +120,11 @@ public enum ContextualShortcutCatalog {
         }
         if availability.canShowNode {
             items.append(item("resource.node", "O", "Show selected Pod's Node"))
+            items.append(item(
+                "resource.node.window",
+                "\u{2318}O",
+                "Show selected Pod's Node in a new workspace"
+            ))
         }
         if availability.canOpenDetails {
             items.append(item("resource.details", "D", "Open selected object Details"))

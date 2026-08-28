@@ -247,6 +247,12 @@ struct NativeMainMenuBuilderTests {
                 NSEvent.ModifierFlags()
             ),
             (
+                "Show Node in New Workspace",
+                #selector(ClusterWorkspaceWindowController.showPodNodeInNewWorkspace(_:)),
+                "o",
+                NSEvent.ModifierFlags.command
+            ),
+            (
                 "Open Details",
                 #selector(ClusterWorkspaceWindowController.openResourceDetails(_:)),
                 "d",

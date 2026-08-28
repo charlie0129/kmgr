@@ -350,6 +350,15 @@ enum NativeMainMenuBuilder {
         )
         addResponderItem(
             to: menu,
+            title: "Show Node in New Workspace",
+            action: #selector(
+                ClusterWorkspaceWindowController.showPodNodeInNewWorkspace(_:)
+            ),
+            keyEquivalent: "o",
+            modifiers: [.command]
+        )
+        addResponderItem(
+            to: menu,
             title: "Open Details",
             action: #selector(ClusterWorkspaceWindowController.openResourceDetails(_:)),
             keyEquivalent: "d",

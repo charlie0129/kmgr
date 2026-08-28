@@ -13,6 +13,10 @@ struct ClusterWorkspaceOpenRequest: Sendable {
     var filter: String
     var subresource: ResourceIdentity?
     var selectionUID: ResourceUID?
+    /// Requests that the receiving resource list select its sole filtered
+    /// result. This is useful when the destination object has no UID in the
+    /// source relationship (for example, a Pod's assigned Node).
+    var selectOnlyResult: Bool
 
     init(
         contextReference: String,
@@ -20,7 +24,8 @@ struct ClusterWorkspaceOpenRequest: Sendable {
         resource: GVR? = nil,
         filter: String = "",
         subresource: ResourceIdentity? = nil,
-        selectionUID: ResourceUID? = nil
+        selectionUID: ResourceUID? = nil,
+        selectOnlyResult: Bool = false
     ) {
         self.contextReference = contextReference
         self.namespaceScope = namespaceScope
@@ -28,13 +33,14 @@ struct ClusterWorkspaceOpenRequest: Sendable {
         self.filter = filter
         self.subresource = subresource
         self.selectionUID = selectionUID
+        self.selectOnlyResult = selectOnlyResult
     }
 }
 
 typealias NamespacePickerPresenter = (NSPopUpButton, Any?) -> Void
 typealias NamespacePickerKeyWindowCheck = (NSWindow) -> Bool
 
-private enum ResourceParentDestination {
+private enum ResourceNavigationDestination {
     case currentWorkspace
     case newWorkspace
 }
@@ -1177,6 +1183,9 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         workspaceController.showResourceParentInNewWorkspace(sender)
     }
     @objc func showPodNode(_ sender: Any?) { workspaceController.showPodNode(sender) }
+    @objc func showPodNodeInNewWorkspace(_ sender: Any?) {
+        workspaceController.showPodNodeInNewWorkspace(sender)
+    }
     @objc func openResourceDetails(_ sender: Any?) { workspaceController.openResourceDetails(sender) }
     @objc func openResourceYAML(_ sender: Any?) { workspaceController.openResourceYAML(sender) }
     @objc func editResourceYAML(_ sender: Any?) { workspaceController.editResourceYAML(sender) }
@@ -1229,6 +1238,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         case #selector(showResourceParent(_:)): command = .showParent
         case #selector(showResourceParentInNewWorkspace(_:)): command = .showParentInNewWorkspace
         case #selector(showPodNode(_:)): command = .showNode
+        case #selector(showPodNodeInNewWorkspace(_:)): command = .showNodeInNewWorkspace
         case #selector(openResourceDetails(_:)): command = .open
         case #selector(openResourceYAML(_:)): command = .openYAML
         case #selector(editResourceYAML(_:)): command = .editYAML
@@ -1491,8 +1501,8 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         contentController.onShowParent = { [weak self] identity, destination in
             self?.showParent(for: identity, destination: destination)
         }
-        contentController.onShowPodNode = { [weak self] identity in
-            self?.showNode(forPod: identity)
+        contentController.onShowPodNode = { [weak self] identity, destination in
+            self?.showNode(forPod: identity, destination: destination)
         }
         contentController.onStartPortForward = { [weak self] identity in
             self?.onStartPortForward?(identity)
@@ -1637,6 +1647,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
                 resource: target,
                 scope: scope,
                 initialFilter: request.filter,
+                selectOnlyResult: request.selectOnlyResult,
                 selectResultUID: request.selectionUID,
                 reason: .commandPaletteSelection
             )
@@ -2344,6 +2355,9 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         contentController.performCommand(.showParentInNewWorkspace)
     }
     @objc func showPodNode(_ sender: Any?) { contentController.performCommand(.showNode) }
+    @objc func showPodNodeInNewWorkspace(_ sender: Any?) {
+        contentController.performCommand(.showNodeInNewWorkspace)
+    }
     @objc func openResourceDetails(_ sender: Any?) { contentController.performCommand(.open) }
     @objc func openResourceYAML(_ sender: Any?) { contentController.performCommand(.openYAML) }
     @objc func editResourceYAML(_ sender: Any?) { contentController.performCommand(.editYAML) }
@@ -2742,7 +2756,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
 
     private func showParent(
         for identity: ResourceIdentity,
-        destination: ResourceParentDestination
+        destination: ResourceNavigationDestination
     ) {
         guard let returnState = contentController.captureNavigationState(),
             let sourceSelectionTicket = contentController
@@ -2842,7 +2856,10 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         }
     }
 
-    private func showNode(forPod identity: ResourceIdentity) {
+    private func showNode(
+        forPod identity: ResourceIdentity,
+        destination: ResourceNavigationDestination = .currentWorkspace
+    ) {
         guard PodNodeNavigationPlanner.hasPotentialTarget(identity),
             resources.contains(where: {
                 $0.group.isEmpty && $0.version == "v1"
@@ -2887,15 +2904,31 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
                     ))
                     return
                 }
-                guard openDrillDownResource(
-                    query,
-                    selectOnlyResult: true
-                ) else {
-                    publishWorkspaceOperation(WorkspaceStatus(
-                        "The Node list is no longer available in discovered resources.",
-                        severity: .warning
+                switch destination {
+                case .currentWorkspace:
+                    guard openDrillDownResource(
+                        query,
+                        selectOnlyResult: true
+                    ) else {
+                        publishWorkspaceOperation(WorkspaceStatus(
+                            "The Node list is no longer available in discovered resources.",
+                            severity: .warning
+                        ))
+                        return
+                    }
+                case .newWorkspace:
+                    onOpenNewWorkspace?(ClusterWorkspaceOpenRequest(
+                        contextReference: session.contextReference,
+                        namespaceScope: query.namespaceScope,
+                        resource: GVR(
+                            group: query.group,
+                            version: query.version,
+                            resource: query.resource
+                        ),
+                        filter: query.filterExpression,
+                        selectionUID: query.selectionUID,
+                        selectOnlyResult: true
                     ))
-                    return
                 }
             } catch is CancellationError {
                 if objectOpenRevision == revision {
@@ -4377,8 +4410,8 @@ private final class ResourceListViewController: NSViewController,
     private var projectionRequestGeneration: UInt64?
     var onShowCommandPalette: (() -> Void)?
     var onEnterObject: ((ResourceIdentity) -> Void)?
-    var onShowParent: ((ResourceIdentity, ResourceParentDestination) -> Void)?
-    var onShowPodNode: ((ResourceIdentity) -> Void)?
+    var onShowParent: ((ResourceIdentity, ResourceNavigationDestination) -> Void)?
+    var onShowPodNode: ((ResourceIdentity, ResourceNavigationDestination) -> Void)?
     var onOpenDetails: ((ResourceIdentity) -> Void)?
     var onOpenEvents: ((ResourceIdentity) -> Void)?
     var onOpenYAML: ((ResourceIdentity) -> Void)?
@@ -4527,7 +4560,7 @@ private final class ResourceListViewController: NSViewController,
                 canEnterSubresource: canUse(.enter) || canUse(.enterInNewWorkspace),
                 canShowParent: canUse(.showParent)
                     || canUse(.showParentInNewWorkspace),
-                canShowNode: canUse(.showNode),
+                canShowNode: canUse(.showNode) || canUse(.showNodeInNewWorkspace),
                 canOpenDetails: canUse(.open),
                 canOpenYAML: canUse(.openYAML),
                 canOpenLogs: canUse(.openLogs),
@@ -5152,6 +5185,7 @@ private final class ResourceListViewController: NSViewController,
             ("Go to Parent", .showParent),
             ("Go to Parent in New Workspace", .showParentInNewWorkspace),
             ("Show Node", .showNode),
+            ("Show Node in New Workspace", .showNodeInNewWorkspace),
             ("Open Details", .open),
             ("Open YAML", .openYAML),
             ("Edit YAML", .editYAML),
@@ -9755,11 +9789,14 @@ private final class ResourceListViewController: NSViewController,
                 identity,
                 command == .showParent ? .currentWorkspace : .newWorkspace
             )
-        case .showNode:
+        case .showNode, .showNodeInNewWorkspace:
             guard let identity = selected.only,
                 PodNodeNavigationPlanner.hasPotentialTarget(identity)
             else { return }
-            onShowPodNode?(identity)
+            onShowPodNode?(
+                identity,
+                command == .showNode ? .currentWorkspace : .newWorkspace
+            )
         case .open:
             if capturedIdentities == nil {
                 openSelectedObjectFromTable()
@@ -10323,7 +10360,7 @@ private final class ResourceListViewController: NSViewController,
             return ResourceDrillDownPlanner.hasPotentialTarget(identity)
         case .showParent, .showParentInNewWorkspace:
             return exactlyOne
-        case .showNode:
+        case .showNode, .showNodeInNewWorkspace:
             return exactlyOne && group.isEmpty && version == "v1"
                 && name == "pods"
         case .open, .openYAML, .editYAML, .openEvents, .openEventsInNewWorkspace:
@@ -10371,7 +10408,7 @@ private final class ResourceListViewController: NSViewController,
                 && ResourceDrillDownPlanner.hasPotentialTarget(selected[0])
         case .showParent, .showParentInNewWorkspace:
             return selected.count == 1
-        case .showNode:
+        case .showNode, .showNodeInNewWorkspace:
             return selected.count == 1
                 && PodNodeNavigationPlanner.hasPotentialTarget(selected[0])
         case .open, .openYAML, .editYAML, .openEvents, .openEventsInNewWorkspace:
@@ -10737,7 +10774,7 @@ private final class ObjectDetailRecentEventsController: ObjectDetailEventsContro
 }
 
 private enum ResourceTableCommand: Equatable {
-    case focusFilter, enter, enterInNewWorkspace, showNode
+    case focusFilter, enter, enterInNewWorkspace, showNode, showNodeInNewWorkspace
     case open, openYAML, editYAML
     case showParent, showParentInNewWorkspace
     case openEvents, openEventsInNewWorkspace
@@ -10894,6 +10931,7 @@ private final class ResourceTableView: CapturedCellTableView {
         case ("d", _) where unmodified: onCommand?(.open)
         case ("p", _) where commandOnly: onCommand?(.showParentInNewWorkspace)
         case ("p", _) where unmodified: onCommand?(.showParent)
+        case ("o", _) where commandOnly: onCommand?(.showNodeInNewWorkspace)
         case ("o", _) where unmodified: onCommand?(.showNode)
         case (_, 36) where commandOnly: onCommand?(.enterInNewWorkspace)
         case (_, 36) where unmodified: onCommand?(.enter)

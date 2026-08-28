@@ -917,6 +917,7 @@ public struct KeyboardShortcutReference: Hashable, Sendable {
         Self(keys: "P", action: "Go to the selected object's parent"),
         Self(keys: "⌘P", action: "Go to the selected object's parent in a new workspace"),
         Self(keys: "O", action: "Show the selected Pod's Node"),
+        Self(keys: "⌘O", action: "Show the selected Pod's Node in a new workspace"),
         Self(keys: "D", action: "Open Details for the selected object"),
         Self(keys: "⌘[ / ⌘]", action: "Back / Forward"),
         Self(keys: "Escape", action: "Close transient UI, leave edit mode, clear filter, or return focus"),

@@ -134,6 +134,8 @@ live in one app-wide Port Forwards window.
   ambiguous. The destination list uses a visible exact
   `fieldSelector:"metadata.name=…"` server-side query and auto-selects only
   the referenced UID, never a same-name replacement.
+- Press `O` on a selected Pod to show its assigned Node in the current
+  workspace, or Command-O to open that Node list in a new workspace.
 - `Y` opens an independent, UID-pinned read-only YAML utility; `E` opens or
   focuses that same utility and immediately enters editing. The YAML utility
   has an exact received-byte count, explicit refresh, and the validated
@@ -220,7 +222,7 @@ globally across launches rather than per cluster.
 | Command-? | Open Kmgr Help |
 | Control-Command-S | Show or hide the current workspace's sidebar |
 | Control-Command-F | Enter or leave full screen |
-| Command-O | Add kubeconfig files from Cluster Manager |
+| Command-O in Cluster Manager | Add kubeconfig files |
 | `/` in Cluster Manager | Search kubeconfig contexts |
 | Command-K | Open the current workspace's Command Palette |
 | Shift-Command-N | Open the current workspace's namespace picker |
@@ -234,6 +236,7 @@ globally across launches rather than per cluster.
 | Command-click | Toggle one selected row |
 | Command-A | Select all visible rows |
 | `O` | Show the selected Pod's assigned Node in the Node list |
+| Command-O | Show the selected Pod's assigned Node in a new full workspace |
 | `D` | Open or focus Details in a utility window for exactly one object |
 | Return | Enter a useful subresource in the current workspace |
 | Command-Return | Enter the selected subresource in a new full workspace |
