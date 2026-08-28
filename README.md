@@ -182,11 +182,13 @@ live in one app-wide Port Forwards window.
   chooses the annotated/default regular container and probes `/bin/bash` then
   `/bin/sh`; Shift-S opens configuration for choosing a container or running an
   explicit executable without shell parsing.
-- Pod and Service port-forwards bind loopback by default and retry with
-  exponential backoff capped at 15 seconds until explicitly stopped. A direct
-  Pod forward rechecks its pinned UID before every retry. If the Pod was
-  deleted and a same-name Pod appears with a new UID, the forward stays
-  **Failed** and never attaches to the replacement. Service forwards may
+- Pod and Service port-forwards bind loopback by default. The local port starts
+  at the selected remote port; if that listener is occupied, the engine tries
+  bounded `+10,000` fallbacks and finally asks the OS for a free port. Forwards
+  retry with exponential backoff capped at 15 seconds until explicitly
+  stopped. A direct Pod forward rechecks its pinned UID before every retry. If
+  the Pod was deleted and a same-name Pod appears with a new UID, the forward
+  stays **Failed** and never attaches to the replacement. Service forwards may
   resolve another eligible Pod.
 - Delete, scale, rollout restart, separate Edit Labels and Edit Annotations
   actions, and copy actions are exposed through native menus. Metadata editors

@@ -52,9 +52,11 @@ final class PortForwardConfigurationWindowController: NSWindowController,
     private let startButton = NSButton(title: "Start", target: nil, action: nil)
 
     private var declaredPorts: [DeclaredPort] = []
+    private var contentStack: NSStackView?
     private var loadTask: Task<Void, Never>?
     private var startTask: Task<Void, Never>?
     private var loadStarted = false
+    private var localPortWasEdited = false
     private var hasStartAttempted = false
     private var isStarting = false
     private var didFinish = false
@@ -108,6 +110,11 @@ final class PortForwardConfigurationWindowController: NSWindowController,
     }
 
     func controlTextDidChange(_ obj: Notification) {
+        if (obj.object as AnyObject?) === localPortField {
+            localPortWasEdited = true
+        } else if (obj.object as AnyObject?) === remotePortField {
+            updateDefaultLocalPort()
+        }
         validateForm()
     }
 
@@ -173,7 +180,7 @@ final class PortForwardConfigurationWindowController: NSWindowController,
         configure(grid: configurationGrid)
 
         let localPortHelp = NSTextField(wrappingLabelWithString:
-            "Local port 0 asks the engine to allocate an available port without a check-then-bind race. Kubernetes port-forward supports TCP."
+            "Local port defaults to remote. Busy ports try +10,000 fallbacks, then an automatic port; enter 0 to always let the OS choose. Kubernetes port-forward supports TCP."
         )
         localPortHelp.textColor = .secondaryLabelColor
         localPortHelp.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
@@ -217,6 +224,7 @@ final class PortForwardConfigurationWindowController: NSWindowController,
         for view in [identityGrid, separator, configurationGrid, localPortHelp, validationLabel, footer] {
             view.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         }
+        contentStack = stack
 
         let root = NSView()
         root.addSubview(stack)
@@ -236,6 +244,7 @@ final class PortForwardConfigurationWindowController: NSWindowController,
         grid.columnSpacing = 12
         grid.column(at: 0).xPlacement = .leading
         grid.column(at: 1).xPlacement = .fill
+        grid.setContentHuggingPriority(.required, for: .vertical)
         grid.translatesAutoresizingMaskIntoConstraints = false
     }
 
@@ -264,6 +273,7 @@ final class PortForwardConfigurationWindowController: NSWindowController,
         statusLabel.stringValue = "Refreshing the selected object and loading declared ports…"
         statusLabel.textColor = .secondaryLabelColor
         progressIndicator.startAnimation(nil)
+        resizeToFitContent()
         let identity = targetIdentity
         loadTask = Task { [weak self, objectDetailProvider] in
             do {
@@ -284,6 +294,7 @@ final class PortForwardConfigurationWindowController: NSWindowController,
                         ? "No declared TCP ports were found. Enter a remote port manually."
                         : "Choose a declared port or enter a remote port manually."
                     statusLabel.textColor = .secondaryLabelColor
+                    resizeToFitContent()
                 }
             } catch is CancellationError {
             } catch {
@@ -342,6 +353,7 @@ final class PortForwardConfigurationWindowController: NSWindowController,
             remotePortField.stringValue = String(first.number)
             declaredPortButton.selectItem(at: 1)
         }
+        updateDefaultLocalPort()
         validateForm()
     }
 
@@ -355,7 +367,15 @@ final class PortForwardConfigurationWindowController: NSWindowController,
         let index = declaredPortButton.indexOfSelectedItem - 1
         guard declaredPorts.indices.contains(index) else { return }
         remotePortField.stringValue = String(declaredPorts[index].number)
+        updateDefaultLocalPort()
         validateForm()
+    }
+
+    private func updateDefaultLocalPort() {
+        guard !localPortWasEdited else { return }
+        let remoteText = remotePortField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let remote = UInt16(remoteText), remote > 0 else { return }
+        localPortField.stringValue = String(remote)
     }
 
     private func draft() -> Draft? {
@@ -407,7 +427,20 @@ final class PortForwardConfigurationWindowController: NSWindowController,
     private func validateForm() {
         let message = validationMessage()
         validationLabel.stringValue = message ?? ""
+        validationLabel.isHidden = message == nil
         startButton.isEnabled = message == nil && !isStarting
+        resizeToFitContent()
+    }
+
+    private func resizeToFitContent() {
+        guard let panel = window, let contentStack,
+            let contentView = panel.contentView
+        else { return }
+        contentView.layoutSubtreeIfNeeded()
+        let targetHeight = ceil(contentStack.fittingSize.height + 34)
+        guard abs(contentView.bounds.height - targetHeight) > 0.5 else { return }
+        panel.setContentSize(NSSize(width: contentView.bounds.width, height: targetHeight))
+        contentView.layoutSubtreeIfNeeded()
     }
 
     @objc private func start() {
@@ -462,10 +495,12 @@ final class PortForwardConfigurationWindowController: NSWindowController,
         setFormEnabled(false)
         progressIndicator.startAnimation(nil)
         validationLabel.stringValue = ""
+        validationLabel.isHidden = true
         statusLabel.toolTip = nil
         statusLabel.textColor = .secondaryLabelColor
         let localDescription = draft.localPort == 0 ? "an automatic local port" : "local port \(draft.localPort)"
         statusLabel.stringValue = "Starting \(draft.bindAddress) on \(localDescription) → remote port \(draft.remotePort)…"
+        resizeToFitContent()
         let request = StartPortForwardRequest(
             target: targetIdentity,
             remotePort: draft.remotePort,
@@ -518,6 +553,7 @@ final class PortForwardConfigurationWindowController: NSWindowController,
                 ? "" : "\n\(presentation.supplementaryText)")
         statusLabel.toolTip = presentation.detailedText
         statusLabel.textColor = .systemRed
+        resizeToFitContent()
     }
 
     @objc private func cancel() {

@@ -96,6 +96,44 @@ struct ClusterIdentityPresentationTests {
         #expect(declaredPort.frame.width >= 260)
     }
 
+    @Test("port-forward form stays compact and follows the remote port by default")
+    func portForwardFormLayoutAndDefaultLocalPort() throws {
+        let controller = PortForwardConfigurationWindowController(
+            session: identitySession(),
+            targetIdentity: podIdentity(),
+            objectDetailProvider: IdentityNoopObjectDetailProvider(),
+            coordinator: PortForwardCoordinator(provider: IdentityNoopPortForwardProvider())
+        )
+        let root = try #require(controller.window?.contentView)
+        root.layoutSubtreeIfNeeded()
+        #expect(root.bounds.height < 500)
+        let grids = identityDescendants(of: root).compactMap { $0 as? NSGridView }
+        #expect(grids.count == 2)
+        #expect(grids.allSatisfy { $0.frame.height < 180 })
+
+        let fields = identityDescendants(of: root).compactMap { $0 as? NSTextField }
+        let remote = try #require(fields.first { $0.accessibilityLabel() == "Remote port" })
+        let local = try #require(fields.first { $0.accessibilityLabel() == "Local port" })
+        remote.stringValue = "8080"
+        controller.controlTextDidChange(Notification(
+            name: NSControl.textDidChangeNotification,
+            object: remote
+        ))
+        #expect(local.stringValue == "8080")
+
+        local.stringValue = "19090"
+        controller.controlTextDidChange(Notification(
+            name: NSControl.textDidChangeNotification,
+            object: local
+        ))
+        remote.stringValue = "8081"
+        controller.controlTextDidChange(Notification(
+            name: NSControl.textDidChangeNotification,
+            object: remote
+        ))
+        #expect(local.stringValue == "19090")
+    }
+
     @Test("node shell form shares columns and stays compact")
     func nodeShellFormLayout() throws {
         let nodeShell = NodeShellConfigurationWindowController(

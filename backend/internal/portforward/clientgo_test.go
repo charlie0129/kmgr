@@ -3,8 +3,12 @@ package portforward
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"slices"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -32,6 +36,103 @@ func TestPortForwardFallbackRecognizesBothClientGoUpgradeErrorFamilies(t *testin
 	}
 	if shouldFallbackPortForward(errors.New("unrelated failure")) {
 		t.Fatal("unrelated error enabled SPDY fallback")
+	}
+}
+
+func TestLocalPortCandidatesUseBoundedTenThousandFallbacks(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		requested uint16
+		want      []uint16
+	}{
+		{requested: 0, want: []uint16{0}},
+		{requested: 8_080, want: []uint16{8_080, 18_080, 28_080, 38_080, 48_080, 58_080, 0}},
+		{requested: 60_000, want: []uint16{60_000, 0}},
+	}
+	for _, test := range tests {
+		if got := localPortCandidates(test.requested); !slices.Equal(got, test.want) {
+			t.Errorf("localPortCandidates(%d) = %v, want %v", test.requested, got, test.want)
+		}
+	}
+}
+
+func TestLocalPortFallbackUsesFirstAvailableCandidateAndThenRandom(t *testing.T) {
+	t.Parallel()
+	bindErr := fmt.Errorf("%w: unable to listen on any of the requested ports", errLocalPortUnavailable)
+	request := ForwardRequest{RemotePort: 8_080, LocalPort: 8_080}
+	var attempts []uint16
+	running, err := startWithLocalPortFallback(
+		context.Background(), request,
+		func(attempt ForwardRequest) (RunningForward, error) {
+			attempts = append(attempts, attempt.LocalPort)
+			if attempt.LocalPort != 28_080 {
+				return nil, bindErr
+			}
+			return &fakeRunning{port: attempt.LocalPort}, nil
+		},
+	)
+	if err != nil || running == nil || running.LocalPort() != 28_080 {
+		t.Fatalf("fallback result = (%v, %v), want listening on 28080", running, err)
+	}
+	if !slices.Equal(attempts, []uint16{8_080, 18_080, 28_080}) {
+		t.Fatalf("fallback attempts = %v", attempts)
+	}
+
+	attempts = nil
+	running, err = startWithLocalPortFallback(
+		context.Background(), request,
+		func(attempt ForwardRequest) (RunningForward, error) {
+			attempts = append(attempts, attempt.LocalPort)
+			return nil, bindErr
+		},
+	)
+	if err == nil || running != nil {
+		t.Fatalf("all-port result = (%v, %v), want the final bind error", running, err)
+	}
+	if got := attempts[len(attempts)-1]; got != 0 {
+		t.Fatalf("final fallback port = %d, want random allocation (0)", got)
+	}
+}
+
+func TestLocalPortFallbackDoesNotRetryRemoteFailures(t *testing.T) {
+	t.Parallel()
+	request := ForwardRequest{RemotePort: 8_080, LocalPort: 8_080}
+	remoteErr := errors.New("error upgrading connection")
+	var attempts []uint16
+	_, err := startWithLocalPortFallback(
+		context.Background(), request,
+		func(attempt ForwardRequest) (RunningForward, error) {
+			attempts = append(attempts, attempt.LocalPort)
+			return nil, remoteErr
+		},
+	)
+	if !errors.Is(err, remoteErr) {
+		t.Fatalf("remote error = %v, want %v", err, remoteErr)
+	}
+	if !slices.Equal(attempts, []uint16{8_080}) {
+		t.Fatalf("remote failure attempts = %v", attempts)
+	}
+}
+
+func TestClientGoForwardReportsAddressInUseAsLocalPortFailure(t *testing.T) {
+	t.Parallel()
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	_, portText, _ := net.SplitHostPort(listener.Addr().String())
+	port, err := strconv.ParseUint(portText, 10, 16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = startClientGoForward(
+		context.Background(),
+		fakeDialer{connection: &blockingConnection{closed: make(chan bool)}},
+		ForwardRequest{RemotePort: 8080, LocalPort: uint16(port), BindAddress: "127.0.0.1"},
+	)
+	if !errors.Is(err, errLocalPortUnavailable) {
+		t.Fatalf("bind error = %v, want errLocalPortUnavailable", err)
 	}
 }
 

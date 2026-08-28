@@ -7,7 +7,9 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
+	"syscall"
 
 	"github.com/charlie0129/kmgr/backend/internal/podidentity"
 	"k8s.io/apimachinery/pkg/util/httpstream"
@@ -22,6 +24,10 @@ type ClientGoForwarder struct {
 	RESTClient rest.Interface
 	PodUIDs    podidentity.Getter
 }
+
+const localPortFallbackStep uint32 = 10_000
+
+var errLocalPortUnavailable = errors.New("requested local port is unavailable")
 
 func (f ClientGoForwarder) Start(ctx context.Context, request ForwardRequest) (RunningForward, error) {
 	if f.Config == nil || f.RESTClient == nil || f.PodUIDs == nil {
@@ -61,7 +67,9 @@ func shouldFallbackPortForward(err error) bool {
 // Kubernetes streaming upgrade succeeds and before client-go binds a local
 // listener. The API's port-forward URL contains only namespace/name, so the
 // earlier resolver GET alone cannot prevent a same-name replacement from
-// winning the race between resolution and transport upgrade.
+// winning the race between resolution and transport upgrade. A requested
+// nonzero local port gets bounded, listener-atomic fallback attempts when the
+// port is unavailable; zero remains client-go's OS-selected allocation.
 func startUIDPinnedClientGoForward(
 	ctx context.Context,
 	dialer httpstream.Dialer,
@@ -84,15 +92,98 @@ func startUIDPinnedClientGoForward(
 			return nil
 		},
 	}
-	running, err := startClientGoForward(ctx, pinned, request)
-	if err != nil {
-		// client-go stringifies Dial errors. Restore the original typed error so
-		// the manager can make a direct-Pod UID mismatch terminal immediately.
-		if validationErr := pinned.validationError(); validationErr != nil {
-			return nil, validationErr
+	return startWithLocalPortFallback(ctx, request, func(attempt ForwardRequest) (RunningForward, error) {
+		running, err := startClientGoForward(ctx, pinned, attempt)
+		if err != nil {
+			// client-go stringifies Dial errors. Restore the original typed error so
+			// the manager can make a direct-Pod UID mismatch terminal immediately.
+			if validationErr := pinned.validationError(); validationErr != nil {
+				return nil, validationErr
+			}
+		}
+		return running, err
+	})
+}
+
+func startWithLocalPortFallback(
+	ctx context.Context,
+	request ForwardRequest,
+	start func(ForwardRequest) (RunningForward, error),
+) (RunningForward, error) {
+	var lastErr error
+	for _, localPort := range localPortCandidates(request.LocalPort) {
+		attempt := request
+		attempt.LocalPort = localPort
+		running, err := start(attempt)
+		if err == nil {
+			return running, nil
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		lastErr = err
+		// Only a listener-bind failure is eligible for a local-port fallback.
+		// Upgrade, negotiation, and remote forwarding failures must be returned
+		// immediately instead of creating additional Kubernetes streams.
+		if localPort == 0 || !isLocalPortBindFailure(err) {
+			return nil, err
 		}
 	}
-	return running, err
+	return nil, lastErr
+}
+
+// localPortCandidates returns the requested port, then the documented
+// 10,000-port fallbacks, and finally zero (client-go's race-free OS allocation).
+// A zero request already means automatic allocation and therefore needs no
+// additional candidates.
+func localPortCandidates(requested uint16) []uint16 {
+	if requested == 0 {
+		return []uint16{0}
+	}
+	result := []uint16{requested}
+	for candidate := uint32(requested) + localPortFallbackStep; candidate <= 65_535; candidate += localPortFallbackStep {
+		result = append(result, uint16(candidate))
+	}
+	result = append(result, 0)
+	return result
+}
+
+func isLocalPortBindFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, errLocalPortUnavailable) || errors.Is(err, syscall.EADDRINUSE) {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "address already in use") ||
+		strings.Contains(message, "eaddrinuse")
+}
+
+// portForwardErrorOutput retains the one listener error that client-go writes
+// to errOut but otherwise omits from its returned aggregate error. Keeping this
+// marker lets fallback remain limited to EADDRINUSE rather than retrying for
+// malformed addresses or permission failures.
+type portForwardErrorOutput struct {
+	mu           sync.Mutex
+	addressInUse bool
+}
+
+func (w *portForwardErrorOutput) Write(value []byte) (int, error) {
+	message := strings.ToLower(string(value))
+	if strings.Contains(message, "address already in use") ||
+		strings.Contains(message, "eaddrinuse") {
+		w.mu.Lock()
+		w.addressInUse = true
+		w.mu.Unlock()
+	}
+	return len(value), nil
+}
+
+func (w *portForwardErrorOutput) isAddressInUse() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.addressInUse
 }
 
 type podUIDValidatingDialer struct {
@@ -131,10 +222,11 @@ func startClientGoForward(
 ) (RunningForward, error) {
 	stop := make(chan struct{})
 	ready := make(chan struct{})
+	errOutput := &portForwardErrorOutput{}
 	forwarder, err := clientportforward.NewOnAddresses(
 		dialer, []string{request.BindAddress},
 		[]string{strconv.Itoa(int(request.LocalPort)) + ":" + strconv.Itoa(int(request.RemotePort))},
-		stop, ready, io.Discard, io.Discard,
+		stop, ready, io.Discard, errOutput,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("configure port-forward listener: %w", err)
@@ -146,6 +238,9 @@ func startClientGoForward(
 		_ = running.Close()
 		return nil, ctx.Err()
 	case err := <-running.done:
+		if err != nil && errOutput.isAddressInUse() {
+			return nil, fmt.Errorf("%w: %v", errLocalPortUnavailable, err)
+		}
 		return nil, err
 	case <-ready:
 		ports, err := forwarder.GetPorts()
