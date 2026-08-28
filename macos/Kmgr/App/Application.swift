@@ -430,7 +430,7 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                 for: session.contextReference
             ).map {
                 WorkspaceWindowPlacementMode.contextBookmark(
-                    seedFrameAutosaveName: $0.frameAutosaveName
+                    frame: $0.frame
                 )
             } ?? .fresh
             _ = openWorkspace(
@@ -528,8 +528,6 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             controller.onFrameCheckpoint = nil
             controller.onWindowSizeCheckpoint = nil
             if !isTerminating {
-                controller.window?.setFrameAutosaveName("")
-                NSWindow.removeFrame(usingName: restoration.frameAutosaveName)
                 try? restorationStore.remove(id: restoration.id)
             }
             columnsManagerControllers.removeValue(forKey: identifier)?.close()
@@ -574,40 +572,40 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             guard let self, controller != nil else { return }
             try? restorationStore.upsert(record)
         }
-        controller.onActivationCheckpoint = { [weak self, weak controller] record in
-            guard let self, let controller else { return }
-            try? restorationStore.activate(record)
-            if let bookmark = try? workspaceFrameBookmarkStore.activate(
+        controller.onActivationCheckpoint = { [weak self] record in
+            guard let self else { return }
+            try? self.restorationStore.activate(record)
+            _ = try? self.workspaceFrameBookmarkStore.activate(
                 contextReference: record.state.contextReference,
-                sourceWindowID: record.id
-            ) {
-                controller.window?.saveFrame(usingName: bookmark.frameAutosaveName)
-            }
+                sourceWindowID: record.id,
+                frame: record.frame
+            )
         }
-        controller.onFrameCheckpoint = { [weak self, weak controller] record in
-            guard let self, let controller else { return }
-            controller.window?.saveFrame(usingName: record.frameAutosaveName)
-            guard let bookmark = workspaceFrameBookmarkStore.bookmark(
-                for: record.state.contextReference
-            ), bookmark.sourceWindowID == record.id else { return }
-            controller.window?.saveFrame(usingName: bookmark.frameAutosaveName)
+        controller.onFrameCheckpoint = { [weak self] record in
+            guard let self else { return }
+            guard let frame = record.frame else { return }
+            _ = try? self.workspaceFrameBookmarkStore.updateFrame(
+                contextReference: record.state.contextReference,
+                sourceWindowID: record.id,
+                frame: frame
+            )
         }
         controller.onWindowSizeCheckpoint = { [weak self] size in
             _ = self?.workspaceWindowSizeStore.save(size)
         }
-        try? restorationStore.upsert(restoration)
+        try? restorationStore.upsert(controller.restorationRecord)
         controller.showWindow(nil)
         controller.window?.makeKeyAndOrderFront(nil)
         if placement != .restored {
             // A newly opened context is immediately a valid source, even if
             // AppKit has not yet emitted a user activation notification.
-            try? restorationStore.activate(restoration)
-            if let bookmark = try? workspaceFrameBookmarkStore.activate(
-                contextReference: restoration.state.contextReference,
-                sourceWindowID: restoration.id
-            ) {
-                controller.window?.saveFrame(usingName: bookmark.frameAutosaveName)
-            }
+            let record = controller.restorationRecord
+            try? restorationStore.activate(record)
+            _ = try? workspaceFrameBookmarkStore.activate(
+                contextReference: record.state.contextReference,
+                sourceWindowID: record.id,
+                frame: record.frame
+            )
         }
         return controller
     }
@@ -634,7 +632,7 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             for: request.contextReference
         ).map {
             WorkspaceWindowPlacementMode.contextBookmark(
-                seedFrameAutosaveName: $0.frameAutosaveName
+                frame: $0.frame
             )
         } ?? .fresh
 
@@ -718,9 +716,7 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             // A skipped document describes windows from a process that no
             // longer exists. Consume it now so re-enabling restoration later
             // cannot resurrect an older launch's workspace set.
-            let records = restorationStore.windows
             try? restorationStore.removeAllOpenWindows()
-            records.forEach(removeWorkspaceFrameAutosave)
             showClusterManager()
             return
         }
@@ -739,7 +735,10 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                 suppressInitialActivation: true,
                 startsAuthenticated: false
             )
-            lastRestoredByContext[record.state.contextReference] = (record, controller)
+            lastRestoredByContext[record.state.contextReference] = (
+                controller.restorationRecord,
+                controller
+            )
             let identifier = ObjectIdentifier(controller)
             let attempt = RestoredWorkspaceConnectionAttempt(
                 provider: clusterContextProvider,
@@ -771,17 +770,15 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             attempt.start()
         }
 
-        // A v3 restoration document may predate frame bookmarks. Seed only
-        // the last record for each context (restore order puts the previously
-        // active record last), and never replace an established bookmark.
+        // A restoration document may predate frame bookmarks. Seed only the
+        // last record for each context (restore order puts the previously
+        // active record last), and never replace an established frame.
         for (contextReference, value) in lastRestoredByContext {
-            guard workspaceFrameBookmarkStore.bookmark(for: contextReference) == nil,
-                let bookmark = try? workspaceFrameBookmarkStore.ensure(
-                    contextReference: contextReference,
-                    sourceWindowID: value.record.id
-                )
-            else { continue }
-            value.controller.window?.saveFrame(usingName: bookmark.frameAutosaveName)
+            _ = try? workspaceFrameBookmarkStore.ensure(
+                contextReference: contextReference,
+                sourceWindowID: value.record.id,
+                frame: value.record.frame
+            )
         }
         lastRestoredByContext.values.forEach {
             $0.controller.completeInitialPresentation()
@@ -818,12 +815,6 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             $0.onFrameCheckpoint = nil
             $0.onWindowSizeCheckpoint = nil
         }
-    }
-
-    private func removeWorkspaceFrameAutosave(
-        _ record: ClusterWindowRestorationRecord
-    ) {
-        NSWindow.removeFrame(usingName: record.frameAutosaveName)
     }
 
     private var activeWorkspaceController: ClusterWorkspaceWindowController? {

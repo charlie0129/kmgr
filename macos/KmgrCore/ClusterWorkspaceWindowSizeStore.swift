@@ -1,8 +1,9 @@
 import Foundation
 
 /// The last full-frame size used by any cluster workspace window. Position is
-/// deliberately absent: restored windows retain their independent AppKit
-/// frames, while newly created windows share only this global size.
+/// deliberately absent: restored windows retain their independent persisted
+/// frames, while newly created windows for an unseen context share only this
+/// global size.
 public struct ClusterWorkspaceWindowSize: Codable, Hashable, Sendable {
     public static let maximumDimension = 65_536.0
 

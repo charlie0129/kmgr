@@ -384,17 +384,20 @@ Versioned UI settings and column configuration are kept under
 restored, but warm object caches remain process-memory-only and are never
 presented as restored cluster truth after relaunch.
 
-Cluster workspace frames are remembered independently. On relaunch, each
-restored workspace uses its own last size and position when that frame is still
-reachable; an unavailable display or invalid frame gets a visible fallback.
-When a new workspace is opened, an exact kubeconfig context with prior frame
-history starts from that context's frame. If another visible window occupies
-that frame, kmgr first tries to place the new window beside it on the same
-display and otherwise uses a small cascade on that display; it does not move
-to another display merely to avoid overlap. An unavailable bookmark prefers the
-display of the current source window, while an unseen context uses the global
-last workspace size and a visible cascade. Closing a workspace removes only its
-open-window record and per-window frame; the exact-context frame history remains
+Cluster workspace frames are remembered independently as signed global
+coordinates, so a window on a display to the left or below the primary display
+can be restored without a physical display identifier. On relaunch, each
+restored workspace uses its own last size and position when that frame still
+intersects a current display; an unavailable or invalid frame gets a visible
+fallback. When a new workspace is opened, an exact kubeconfig context with
+prior frame history starts from that context's frame. If another visible window
+occupies that frame, kmgr first tries to place the new window beside it on the
+same display and otherwise uses a small cascade on that display; it does not
+move to another display merely to avoid overlap. An unavailable bookmark
+prefers the display of the current source window, while an unseen context uses
+the global last workspace size and a visible cascade. Frames are checkpointed
+while a window moves or resizes, not only when it closes. Closing a workspace
+removes only its open-window record; the exact-context frame history remains
 available for a later new window.
 
 Warm resource stores are governed by three independent LRU ceilings. Defaults

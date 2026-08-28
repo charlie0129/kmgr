@@ -18,7 +18,8 @@ import Testing
             scrollAnchor: ScrollAnchor(
                 uid: "deployment-uid", pixelOffsetFromTop: 7.5, priorRowIndex: 9_000
             )
-        )
+        ),
+        frame: WorkspaceWindowFrame(x: -1_920, y: 140, width: 840, height: 620)
     )
     let second = ClusterWindowRestorationRecord(
         id: "window-b",
@@ -26,7 +27,8 @@ import Testing
             contextName: "production",
             gvr: GVR(group: "", version: "v1", resource: "pods"),
             namespaceScope: .namespace("api")
-        )
+        ),
+        frame: WorkspaceWindowFrame(x: 80, y: -90, width: 980, height: 700)
     )
 
     let store = WorkspaceRestorationStore(defaults: storage.defaults)
@@ -39,6 +41,24 @@ import Testing
     #expect(reloaded.lastStates.count == 1)
     #expect(reloaded.lastState(for: first.state.contextReference) == first.state)
     #expect(reloaded.loadIssue == nil)
+}
+
+@MainActor
+@Test func invalidWorkspaceFrameIsRejectedAndResetsTheDocument() throws {
+    let storage = try restorationDefaults()
+    defer { storage.defaults.removePersistentDomain(forName: storage.suite) }
+    let store = WorkspaceRestorationStore(defaults: storage.defaults)
+    let invalid = ClusterWindowRestorationRecord(
+        id: "window",
+        contextName: "local",
+        contextReference: "context-local",
+        frame: WorkspaceWindowFrame(x: -.infinity, y: 0, width: 900, height: 600)
+    )
+
+    #expect(throws: RestorationValidationError.self) {
+        try store.upsert(invalid)
+    }
+    #expect(store.windows.isEmpty)
 }
 
 @MainActor

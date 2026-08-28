@@ -40,6 +40,28 @@ struct ClusterWorkspaceOpenRequest: Sendable {
 typealias NamespacePickerPresenter = (NSPopUpButton, Any?) -> Void
 typealias NamespacePickerKeyWindowCheck = (NSWindow) -> Bool
 
+private extension WorkspaceWindowFrame {
+    init?(appKitFrame: NSRect) {
+        self.init(
+            x: Double(appKitFrame.minX),
+            y: Double(appKitFrame.minY),
+            width: Double(appKitFrame.width),
+            height: Double(appKitFrame.height)
+        )
+        guard isValid else { return nil }
+    }
+
+    var appKitFrame: NSRect? {
+        guard isValid else { return nil }
+        return NSRect(
+            x: CGFloat(x),
+            y: CGFloat(y),
+            width: CGFloat(width),
+            height: CGFloat(height)
+        )
+    }
+}
+
 private enum ResourceNavigationDestination {
     case currentWorkspace
     case newWorkspace
@@ -205,6 +227,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
 
     var restorationIdentifier: String { restoration.id }
     var isOpenForRestoration: Bool { !isClosing }
+    var restorationRecord: ClusterWindowRestorationRecord { restoration }
 
     init(
         session: OpenedClusterSession,
@@ -330,13 +353,9 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         case .fresh:
             savedFrame = nil
         case .restored:
-            savedFrame = window.setFrameUsingName(restoration.frameAutosaveName)
-                ? window.frame
-                : nil
-        case .contextBookmark(let seedFrameAutosaveName):
-            savedFrame = window.setFrameUsingName(seedFrameAutosaveName)
-                ? window.frame
-                : nil
+            savedFrame = restoration.frame?.appKitFrame
+        case .contextBookmark(let frame):
+            savedFrame = frame?.appKitFrame
         }
         let fallbackSize: NSSize?
         if let initialWindowFrameSize, initialWindowFrameSize.isValid {
@@ -367,11 +386,12 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
             preferredFrame: preferredWindowFrame
         )
         window.setFrame(resolvedFrame, display: false)
-        window.setFrameAutosaveName(restoration.frameAutosaveName)
-        // Explicitly seed the per-window key. This is important for a newly
-        // created record and also makes a fallback durable before its first
-        // move/resize notification.
-        window.saveFrame(usingName: restoration.frameAutosaveName)
+        // Capture the resolved frame immediately. This makes a fallback
+        // durable even when AppKit emits no move notification before the
+        // application stores the newly created record.
+        if let frame = WorkspaceWindowFrame(appKitFrame: window.frame) {
+            self.restoration.frame = frame
+        }
     }
 
     private func installWorkspaceCallbacks() {
@@ -585,16 +605,14 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         checkpointsSize: Bool
     ) -> ClusterWindowRestorationState {
         restoration.state = workspaceController.restorationState()
-        let state = restoration.state
-        onRestorationCheckpoint?(restoration)
+        checkpointWindowFrame()
         if activatesContext {
             onActivationCheckpoint?(restoration)
         }
-        checkpointWindowFrame()
         if checkpointsSize {
             checkpointWindowSize()
         }
-        return state
+        return restoration.state
     }
 
     func checkpointRestoration() {
@@ -658,11 +676,13 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
 
     private func checkpointWindowFrame() {
         guard let window else { return }
-        // Keep the individual record durable even if the application callback
-        // is temporarily unavailable (for example in a focused controller
-        // test). The application callback mirrors this frame to the active
-        // exact-context bookmark when appropriate.
-        window.saveFrame(usingName: restoration.frameAutosaveName)
+        if let frame = WorkspaceWindowFrame(appKitFrame: window.frame) {
+            restoration.frame = frame
+        }
+        // Keep the individual record durable on every move/resize and
+        // lifecycle checkpoint. The application callback mirrors this frame
+        // to the active exact-context bookmark when appropriate.
+        onRestorationCheckpoint?(restoration)
         // During automatic relaunch, each restored window is presented before
         // the complete set exists. Do not let those opening checkpoints copy
         // a fallback frame over the previously active context bookmark.

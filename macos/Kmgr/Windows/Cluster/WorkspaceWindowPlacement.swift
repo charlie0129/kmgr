@@ -1,19 +1,19 @@
 import AppKit
+import KmgrCore
 
 /// The frame source is kept explicit at the application boundary. A restored
-/// record reads its own AppKit frame key; a fresh context may read the shared
+/// record reads its own raw frame; a fresh context may read the shared
 /// exact-context bookmark; an unseen context starts from the global size.
 enum WorkspaceWindowPlacementMode: Equatable {
     case fresh
     case restored
-    case contextBookmark(seedFrameAutosaveName: String)
+    case contextBookmark(frame: WorkspaceWindowFrame?)
 }
 
 /// Small, deterministic geometry helpers for workspace windows. AppKit's
-/// named-frame API supplies the historical rectangle; this type decides
-/// whether that rectangle is reachable and chooses a bounded fallback on its
-/// display when a display was disconnected or a new window would stack on an
-/// existing one.
+/// raw frame supplies the historical rectangle; this type decides whether that
+/// rectangle is reachable and chooses a bounded fallback on its display when
+/// a display was disconnected or a new window would stack on an existing one.
 enum WorkspaceWindowPlacement {
     static let defaultFrame = NSRect(
         x: 0,

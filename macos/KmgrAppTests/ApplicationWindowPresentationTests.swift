@@ -396,34 +396,24 @@ struct ApplicationWindowPresentationTests {
         )
         let recordA = ClusterWindowRestorationRecord(
             id: "restored-frame-a-\(UUID().uuidString)",
-            state: bookmarkState(filter: "frame-a")
+            state: bookmarkState(filter: "frame-a"),
+            frame: WorkspaceWindowFrame(
+                x: Double(frameA.minX),
+                y: Double(frameA.minY),
+                width: Double(frameA.width),
+                height: Double(frameA.height)
+            )
         )
         let recordB = ClusterWindowRestorationRecord(
             id: "restored-frame-b-\(UUID().uuidString)",
-            state: bookmarkState(filter: "frame-b")
-        )
-        for (record, frame) in [(recordA, frameA), (recordB, frameB)] {
-            NSWindow.removeFrame(usingName: record.frameAutosaveName)
-            let seed = makeColumnPropagationWorkspace(
-                session: bookmarkSession(sessionID: "seed-" + record.id),
-                provider: BookmarkWorkspaceProvider(),
-                optionalResourceCatalogProvider: BookmarkOptionalResourceProvider(),
-                columnsConfigurationPath: columnsDirectory.appendingPathComponent(
-                    "seed-" + record.id + ".yaml"
-                ).path,
-                restoration: record,
-                occupiedWindowFrames: []
+            state: bookmarkState(filter: "frame-b"),
+            frame: WorkspaceWindowFrame(
+                x: Double(frameB.minX),
+                y: Double(frameB.minY),
+                width: Double(frameB.width),
+                height: Double(frameB.height)
             )
-            seed.window?.setFrame(frame, display: false)
-            seed.window?.saveFrame(usingName: record.frameAutosaveName)
-            seed.window?.setFrameAutosaveName("")
-            seed.window?.delegate = nil
-            seed.close()
-        }
-        defer {
-            NSWindow.removeFrame(usingName: recordA.frameAutosaveName)
-            NSWindow.removeFrame(usingName: recordB.frameAutosaveName)
-        }
+        )
 
         let first = makeColumnPropagationWorkspace(
             session: bookmarkSession(sessionID: "restored-frame-session-a"),
@@ -458,6 +448,42 @@ struct ApplicationWindowPresentationTests {
         #expect(first.window?.frame != second.window?.frame)
     }
 
+    @Test("an unreachable raw workspace frame uses a visible fallback")
+    func unreachableRawWorkspaceFrameUsesVisibleFallback() throws {
+        let visibleFrames = WorkspaceWindowPlacement.visibleFrames()
+        guard !visibleFrames.isEmpty else { return }
+        let columnsDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("kmgr-offscreen-frame-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: columnsDirectory) }
+        let record = ClusterWindowRestorationRecord(
+            id: "offscreen-frame-\(UUID().uuidString)",
+            state: bookmarkState(filter: "offscreen"),
+            frame: WorkspaceWindowFrame(
+                x: 20_000,
+                y: 20_000,
+                width: 900,
+                height: 600
+            )
+        )
+
+        let controller = makeColumnPropagationWorkspace(
+            session: bookmarkSession(sessionID: "offscreen-frame-session"),
+            provider: BookmarkWorkspaceProvider(),
+            optionalResourceCatalogProvider: BookmarkOptionalResourceProvider(),
+            columnsConfigurationPath: columnsDirectory.appendingPathComponent("columns.yaml").path,
+            restoration: record,
+            placement: .restored,
+            occupiedWindowFrames: []
+        )
+        defer { controller.close() }
+
+        let resolved = try #require(controller.window?.frame)
+        #expect(resolved != NSRect(
+            x: 20_000, y: 20_000, width: 900, height: 600
+        ))
+        #expect(WorkspaceWindowPlacement.isReachable(resolved, in: visibleFrames))
+    }
+
     @Test("a same-context fresh workspace seeds its context frame bookmark")
     func freshSameContextWorkspaceUsesFrameBookmark() throws {
         let columnsDirectory = FileManager.default.temporaryDirectory
@@ -468,10 +494,6 @@ struct ApplicationWindowPresentationTests {
         defer { defaults.removePersistentDomain(forName: suite) }
         let store = WorkspaceFrameBookmarkStore(defaults: defaults)
         let contextReference = bookmarkSession().contextReference
-        let bookmark = try store.activate(
-            contextReference: contextReference,
-            sourceWindowID: "source-window"
-        )
         let visible = NSScreen.main?.visibleFrame
             ?? NSRect(x: 0, y: 0, width: 1_600, height: 1_000)
         let rememberedFrame = NSRect(
@@ -480,26 +502,17 @@ struct ApplicationWindowPresentationTests {
             width: 900,
             height: 600
         )
-        NSWindow.removeFrame(usingName: bookmark.frameAutosaveName)
-        let seed = makeColumnPropagationWorkspace(
-            session: bookmarkSession(sessionID: "seed-context-frame"),
-            provider: BookmarkWorkspaceProvider(),
-            optionalResourceCatalogProvider: BookmarkOptionalResourceProvider(),
-            columnsConfigurationPath: columnsDirectory.appendingPathComponent(
-                "seed.yaml"
-            ).path,
-            restoration: ClusterWindowRestorationRecord(
-                id: "seed-context-frame-" + UUID().uuidString,
-                state: bookmarkState(filter: "seed")
-            ),
-            occupiedWindowFrames: []
+        let rememberedRawFrame = WorkspaceWindowFrame(
+            x: Double(rememberedFrame.minX),
+            y: Double(rememberedFrame.minY),
+            width: Double(rememberedFrame.width),
+            height: Double(rememberedFrame.height)
         )
-        seed.window?.setFrame(rememberedFrame, display: false)
-        seed.window?.saveFrame(usingName: bookmark.frameAutosaveName)
-        seed.window?.setFrameAutosaveName("")
-        seed.window?.delegate = nil
-        seed.close()
-        defer { NSWindow.removeFrame(usingName: bookmark.frameAutosaveName) }
+        let bookmark = try store.activate(
+            contextReference: contextReference,
+            sourceWindowID: "source-window",
+            frame: rememberedRawFrame
+        )
 
         let record = ClusterWindowRestorationRecord(
             id: "fresh-context-frame-\(UUID().uuidString)",
@@ -512,18 +525,17 @@ struct ApplicationWindowPresentationTests {
             columnsConfigurationPath: columnsDirectory.appendingPathComponent("columns.yaml").path,
             restoration: record,
             placement: .contextBookmark(
-                seedFrameAutosaveName: bookmark.frameAutosaveName
+                frame: bookmark.frame
             ),
             occupiedWindowFrames: []
         )
         defer {
             controller.window?.delegate = nil
-            controller.window?.setFrameAutosaveName("")
             controller.close()
         }
 
         #expect(controller.window?.frame == rememberedFrame)
-        #expect(controller.window?.frameAutosaveName == record.frameAutosaveName)
+        #expect(controller.restorationRecord.frame == rememberedRawFrame)
         #expect(store.bookmark(for: contextReference) == bookmark)
     }
 
@@ -688,12 +700,15 @@ struct ApplicationWindowPresentationTests {
         )
         let window = try #require(controller.window)
         var checkpoints: [ClusterWindowRestorationRecord] = []
+        var frameCheckpoints: [ClusterWindowRestorationRecord] = []
         var sizeCheckpoints: [ClusterWorkspaceWindowSize] = []
         controller.onRestorationCheckpoint = { checkpoints.append($0) }
+        controller.onFrameCheckpoint = { frameCheckpoints.append($0) }
         controller.onWindowSizeCheckpoint = { sizeCheckpoints.append($0) }
         controller.showWindow(nil)
         window.orderOut(nil)
         checkpoints.removeAll(keepingCapacity: true)
+        frameCheckpoints.removeAll(keepingCapacity: true)
         sizeCheckpoints.removeAll(keepingCapacity: true)
 
         controller.windowDidBecomeKey(Notification(
@@ -703,6 +718,7 @@ struct ApplicationWindowPresentationTests {
         #expect(checkpoints.count == 1)
         #expect(checkpoints.first?.state.contextReference == bookmarkSession().contextReference)
         #expect(checkpoints.first?.state.filter == "name:active")
+        #expect(checkpoints.first?.frame != nil)
         #expect(sizeCheckpoints.count == 1)
 
         controller.windowDidResignKey(Notification(
@@ -725,7 +741,24 @@ struct ApplicationWindowPresentationTests {
         #expect(abs((sizeCheckpoints.last?.width ?? 0) - window.frame.width) < 0.5)
         #expect(abs((sizeCheckpoints.last?.height ?? 0) - window.frame.height) < 0.5)
 
+        let movedFrame = window.frame.offsetBy(dx: -37, dy: 29)
+        window.setFrame(movedFrame, display: false)
+        controller.windowDidMove(Notification(
+            name: NSWindow.didMoveNotification,
+            object: window
+        ))
+        try await Task.sleep(for: .milliseconds(350))
+        let expectedFrame = WorkspaceWindowFrame(
+            x: Double(window.frame.minX),
+            y: Double(window.frame.minY),
+            width: Double(window.frame.width),
+            height: Double(window.frame.height)
+        )
+        #expect(checkpoints.last?.frame == expectedFrame)
+        #expect(frameCheckpoints.last?.frame == expectedFrame)
+
         controller.onRestorationCheckpoint = nil
+        controller.onFrameCheckpoint = nil
         controller.onWindowSizeCheckpoint = nil
         controller.close()
     }

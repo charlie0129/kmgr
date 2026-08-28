@@ -14,38 +14,36 @@ private func isValidRestorationIdentifier(_ value: String) -> Bool {
 
 /// One independently restorable cluster window. `id` is deliberately not the
 /// context name: several windows may point at the same context while retaining
-/// independent navigation state.
+/// independent navigation state and frames.
 public struct ClusterWindowRestorationRecord: Hashable, Codable, Sendable, Identifiable {
     public static let maximumIdentifierBytes = 128
-    public static let frameAutosaveNamePrefix = "Kmgr-ClusterWorkspace-"
 
     public var id: String
     public var state: ClusterWindowRestorationState
+    /// The last raw global frame observed for this specific window. `nil` is
+    /// allowed for records written before frame persistence was introduced.
+    public var frame: WorkspaceWindowFrame?
 
     public init(
         id: String = UUID().uuidString.lowercased(),
-        state: ClusterWindowRestorationState
+        state: ClusterWindowRestorationState,
+        frame: WorkspaceWindowFrame? = nil
     ) {
         self.id = id
         self.state = state
+        self.frame = frame
     }
 
     public init(
         id: String = UUID().uuidString.lowercased(),
         contextName: String,
-        contextReference: String
+        contextReference: String,
+        frame: WorkspaceWindowFrame? = nil
     ) {
         self.init(id: id, state: ClusterWindowRestorationState(
             contextName: contextName,
             contextReference: contextReference
-        ))
-    }
-
-    /// AppKit's per-window frame key. The restoration record identity is
-    /// intentionally used instead of the context reference because several
-    /// windows may point at the same exact kubeconfig context.
-    public var frameAutosaveName: String {
-        "\(Self.frameAutosaveNamePrefix)\(id)"
+        ), frame: frame)
     }
 
     public func validated() throws -> Self {
@@ -55,6 +53,12 @@ public struct ClusterWindowRestorationRecord: Hashable, Codable, Sendable, Ident
                 path: "id",
                 message: "A saved cluster window ID must be a bounded opaque identifier."
             ), at: 0)
+        }
+        if let frame, !frame.isValid {
+            issues.append(.init(
+                path: "frame",
+                message: "A saved cluster window frame must contain finite coordinates and positive bounded dimensions."
+            ))
         }
         guard issues.isEmpty else { throw RestorationValidationError(issues: issues) }
         return self
