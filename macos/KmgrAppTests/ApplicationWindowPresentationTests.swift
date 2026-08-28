@@ -686,6 +686,162 @@ struct ApplicationWindowPresentationTests {
         #expect(liveState.filter == expected.filter)
     }
 
+    @Test("initial activation repair restores the saved raw frame")
+    func initialActivationRepairRestoresSavedRawFrame() async throws {
+        let columnsDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("kmgr-initial-frame-repair-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: columnsDirectory) }
+        let visible = try #require(NSScreen.main?.visibleFrame)
+        let target = NSRect(
+            x: visible.minX + 80,
+            y: visible.minY + 80,
+            width: 900,
+            height: 600
+        )
+        let provisional = target.offsetBy(dx: 240, dy: 120)
+        let targetRawFrame = WorkspaceWindowFrame(
+            x: Double(target.minX),
+            y: Double(target.minY),
+            width: Double(target.width),
+            height: Double(target.height)
+        )
+        let record = ClusterWindowRestorationRecord(
+            id: "initial-frame-repair-\(UUID().uuidString)",
+            state: bookmarkState(filter: "initial-frame-repair"),
+            frame: targetRawFrame
+        )
+        let controller = makeColumnPropagationWorkspace(
+            session: bookmarkSession(sessionID: "initial-frame-repair-session"),
+            provider: BookmarkStalledWorkspaceProvider(),
+            optionalResourceCatalogProvider: BookmarkOptionalResourceProvider(),
+            columnsConfigurationPath: columnsDirectory.appendingPathComponent("columns.yaml").path,
+            restoration: record,
+            placement: .restored,
+            suppressInitialActivation: true,
+            occupiedWindowFrames: []
+        )
+        let window = try #require(controller.window)
+        var checkpoints: [ClusterWindowRestorationRecord] = []
+        var frameCheckpoints: [ClusterWindowRestorationRecord] = []
+        controller.onRestorationCheckpoint = { checkpoints.append($0) }
+        controller.onFrameCheckpoint = { frameCheckpoints.append($0) }
+
+        controller.showWindow(nil)
+        checkpoints.removeAll(keepingCapacity: true)
+        frameCheckpoints.removeAll(keepingCapacity: true)
+
+        // Model AppKit's provisional move to the active launch display. The
+        // restoration record must still expose the frame chosen before order.
+        window.setFrame(provisional, display: false)
+        controller.windowDidMove(Notification(
+            name: NSWindow.didMoveNotification,
+            object: window
+        ))
+        #expect(window.frame == target)
+        controller.checkpointRestoration()
+        #expect(controller.restorationRecord.frame == targetRawFrame)
+        #expect(checkpoints.last?.frame == targetRawFrame)
+
+        controller.completeInitialPresentation()
+        controller.repairInitialPlacementAfterActivation()
+
+        // A lifecycle checkpoint is not proof of user intent. If AppKit has
+        // supplied another provisional frame just before Command-N or quit,
+        // the saved target must remain authoritative.
+        window.delegate = nil
+        window.setFrame(provisional, display: false)
+        window.delegate = controller
+        _ = controller.checkpointActiveWorkspace()
+        #expect(window.frame == target)
+        #expect(controller.restorationRecord.frame == targetRawFrame)
+        try await Task.sleep(for: .milliseconds(800))
+
+        #expect(window.frame == target)
+        #expect(controller.restorationRecord.frame == targetRawFrame)
+        #expect(frameCheckpoints.last?.frame == targetRawFrame)
+
+        controller.onRestorationCheckpoint = nil
+        controller.onFrameCheckpoint = nil
+        window.delegate = nil
+        controller.close()
+    }
+
+    @Test("a user resize during initial placement remains authoritative")
+    func userResizeDuringInitialPlacementIsPreserved() async throws {
+        let columnsDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("kmgr-user-frame-change-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: columnsDirectory) }
+        let visible = try #require(NSScreen.main?.visibleFrame)
+        let target = NSRect(
+            x: visible.minX + 80,
+            y: visible.minY + 80,
+            width: 900,
+            height: 600
+        )
+        let targetRawFrame = WorkspaceWindowFrame(
+            x: Double(target.minX),
+            y: Double(target.minY),
+            width: Double(target.width),
+            height: Double(target.height)
+        )
+        let record = ClusterWindowRestorationRecord(
+            id: "user-frame-change-\(UUID().uuidString)",
+            state: bookmarkState(filter: "user-frame-change"),
+            frame: targetRawFrame
+        )
+        let controller = makeColumnPropagationWorkspace(
+            session: bookmarkSession(sessionID: "user-frame-change-session"),
+            provider: BookmarkStalledWorkspaceProvider(),
+            optionalResourceCatalogProvider: BookmarkOptionalResourceProvider(),
+            columnsConfigurationPath: columnsDirectory.appendingPathComponent("columns.yaml").path,
+            restoration: record,
+            placement: .restored,
+            suppressInitialActivation: true,
+            occupiedWindowFrames: []
+        )
+        let window = try #require(controller.window)
+        var frameCheckpoints: [ClusterWindowRestorationRecord] = []
+        controller.onFrameCheckpoint = { frameCheckpoints.append($0) }
+
+        controller.showWindow(nil)
+        controller.completeInitialPresentation()
+        controller.repairInitialPlacementAfterActivation()
+
+        let userFrame = NSRect(
+            x: target.minX + 37,
+            y: target.minY - 29,
+            width: target.width + 80,
+            height: target.height + 40
+        )
+        // Set the frame without delivering the intermediate AppKit callbacks;
+        // the explicit end-live-resize callback below models the user gesture.
+        window.delegate = nil
+        window.setFrame(userFrame, display: false)
+        window.delegate = controller
+        controller.windowDidEndLiveResize(Notification(
+            name: NSWindow.didEndLiveResizeNotification,
+            object: window
+        ))
+        let userRawFrame = WorkspaceWindowFrame(
+            x: Double(userFrame.minX),
+            y: Double(userFrame.minY),
+            width: Double(userFrame.width),
+            height: Double(userFrame.height)
+        )
+
+        #expect(controller.restorationRecord.frame == userRawFrame)
+        // Allow the coalesced frame checkpoint to run after any automatic
+        // move checkpoint queued by the initial presentation.
+        try await Task.sleep(for: .milliseconds(600))
+        #expect(frameCheckpoints.last?.frame == userRawFrame)
+        try await Task.sleep(for: .milliseconds(500))
+        #expect(window.frame == userFrame)
+
+        controller.onFrameCheckpoint = nil
+        window.delegate = nil
+        controller.close()
+    }
+
     @Test("activation checkpoints exact context and global size changes debounce")
     func activationAndWindowSizeCheckpointPolicy() async throws {
         let columnsDirectory = FileManager.default.temporaryDirectory

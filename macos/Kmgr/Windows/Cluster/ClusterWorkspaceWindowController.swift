@@ -221,6 +221,15 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     private var isClosing = false
     private var suppressInitialActivation = true
     private let holdInitialActivationDuringRestore: Bool
+    /// AppKit can move a newly ordered window to the app's active Space while
+    /// launch activation is still settling. Keep the frame chosen before
+    /// presentation authoritative until the post-activation repair finishes.
+    private var initialPlacementFrame: NSRect?
+    private var initialPlacementPending = true
+    private let reassertInitialPlacementAfterPresentation: Bool
+    private var initialPlacementProtectionPending = false
+    private var initialPlacementProtectionTask: Task<Void, Never>?
+    private var userInitiatedInitialPlacementChange = false
     private var frameCheckpointTask: Task<Void, Never>?
     private var windowSizeCheckpointTask: Task<Void, Never>?
     private let resourceFilterFieldEditor = ResourceFilterFieldEditor(frame: .zero)
@@ -301,6 +310,8 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         self.saveNodeShellPreferences = saveNodeShellPreferences
         self.onShowPortForwards = onShowPortForwards
         self.holdInitialActivationDuringRestore = suppressInitialActivation
+        self.reassertInitialPlacementAfterPresentation = placement != .fresh
+            || suppressInitialActivation
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1_180, height: 760),
@@ -386,6 +397,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
             preferredFrame: preferredWindowFrame
         )
         window.setFrame(resolvedFrame, display: false)
+        initialPlacementFrame = window.frame
         // Capture the resolved frame immediately. This makes a fallback
         // durable even when AppKit emits no move notification before the
         // application stores the newly created record.
@@ -478,6 +490,16 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
             )
         }
         super.showWindow(sender)
+        if !holdInitialActivationDuringRestore {
+            // User-created windows are already being presented from an active
+            // application. Apply their chosen frame before returning control
+            // to the caller; automatic restoration uses the activation-aware
+            // path below.
+            applyInitialPlacement()
+            finishInitialPlacement()
+            checkpointWindowSize()
+            beginInitialPlacementProtection()
+        }
         // AppKit may synchronously deliver didBecomeKey from inside
         // super.showWindow. Suppress that opening notification, then allow
         // later user activations to update the context bookmark. Automatic
@@ -492,6 +514,23 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     /// being presented during application launch.
     func completeInitialPresentation() {
         suppressInitialActivation = false
+        if !initialPlacementPending {
+            beginInitialPlacementProtection()
+        }
+    }
+
+    /// Reasserts the frame after the application has become active. The
+    /// activation notification is important because AppKit may assign a
+    /// newly launched window to the Space/display that was active before the
+    /// application itself became frontmost.
+    func repairInitialPlacementAfterActivation() {
+        guard !isClosing else { return }
+        guard initialPlacementPending || initialPlacementProtectionPending else {
+            return
+        }
+        applyInitialPlacement()
+        finishInitialPlacement(checkpoint: true)
+        beginInitialPlacementProtection()
     }
 
     /// Keep the last rendered view visible while the shared helper is down.
@@ -597,7 +636,18 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     /// the complete active presentation for Command-N or application shutdown.
     @discardableResult
     func checkpointActiveWorkspace() -> ClusterWindowRestorationState {
-        checkpointWorkspace(activatesContext: true, checkpointsSize: true)
+        // An explicit user action (Command-N, for example) is a safe point to
+        // finish any launch handoff before this window becomes the source for
+        // another workspace.
+        finishInitialPlacement(
+            usingCurrentFrame: userInitiatedInitialPlacementChange
+                || window?.inLiveResize == true
+        )
+        let state = checkpointWorkspace(
+            activatesContext: true,
+            checkpointsSize: true
+        )
+        return state
     }
 
     private func checkpointWorkspace(
@@ -621,19 +671,76 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
 
     func windowDidMove(_ notification: Notification) {
         guard didStartWorkspace, !isClosing else { return }
+        handleInitialPlacementChange()
         scheduleFrameCheckpoint()
+    }
+
+    func windowWillMove(_ notification: Notification) {
+        guard didStartWorkspace, !isClosing else { return }
+        guard initialPlacementPending || initialPlacementProtectionPending else {
+            return
+        }
+        if isCurrentEventLikelyUserWindowGesture {
+            userInitiatedInitialPlacementChange = true
+        }
     }
 
     func windowDidResize(_ notification: Notification) {
         guard didStartWorkspace, !isClosing else { return }
+        handleInitialPlacementChange()
         scheduleFrameCheckpoint()
         scheduleWindowSizeCheckpoint()
     }
 
+    func windowWillStartLiveResize(_ notification: Notification) {
+        guard didStartWorkspace, !isClosing else { return }
+        guard initialPlacementPending || initialPlacementProtectionPending else {
+            return
+        }
+        userInitiatedInitialPlacementChange = true
+    }
+
     func windowDidEndLiveResize(_ notification: Notification) {
         guard didStartWorkspace, !isClosing else { return }
+        if initialPlacementPending || initialPlacementProtectionPending {
+            finishInitialPlacement(usingCurrentFrame: true)
+        }
         scheduleFrameCheckpoint()
         scheduleWindowSizeCheckpoint()
+    }
+
+    func windowDidChangeScreen(_ notification: Notification) {
+        guard didStartWorkspace, !isClosing else { return }
+        handleInitialPlacementChange()
+    }
+
+    private func handleInitialPlacementChange() {
+        guard initialPlacementPending || initialPlacementProtectionPending else {
+            return
+        }
+        if userInitiatedInitialPlacementChange
+            || isCurrentEventLikelyUserWindowGesture
+            || window?.inLiveResize == true
+        {
+            // A drag is user intent, not AppKit's launch-time relocation.
+            finishInitialPlacement(usingCurrentFrame: true)
+        } else {
+            // A launch/Space/display handoff is programmatic. Repair it at the
+            // notification boundary instead of allowing its provisional frame
+            // to reach the persistence debounce.
+            applyInitialPlacement()
+        }
+    }
+
+    private var isCurrentEventLikelyUserWindowGesture: Bool {
+        if NSEvent.pressedMouseButtons != 0 { return true }
+        switch NSApp.currentEvent?.type {
+        case .leftMouseDown, .leftMouseDragged, .rightMouseDown,
+            .rightMouseDragged:
+            return true
+        default:
+            return false
+        }
     }
 
     func windowWillReturnFieldEditor(
@@ -674,9 +781,106 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         }
     }
 
+    private func beginInitialPlacementProtection() {
+        guard reassertInitialPlacementAfterPresentation,
+            !initialPlacementPending,
+            !isClosing
+        else { return }
+        initialPlacementProtectionTask?.cancel()
+        initialPlacementProtectionPending = true
+        initialPlacementProtectionTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: .milliseconds(500))
+            } catch {
+                return
+            }
+            guard let self, !Task.isCancelled, !self.isClosing,
+                self.initialPlacementProtectionPending
+            else { return }
+            self.applyInitialPlacement()
+
+            // Give the window server one more turn after the first repair
+            // before allowing a frame notification to become durable.
+            do {
+                try await Task.sleep(for: .milliseconds(250))
+            } catch {
+                return
+            }
+            guard !Task.isCancelled, !self.isClosing,
+                self.initialPlacementProtectionPending
+            else { return }
+            self.applyInitialPlacement()
+            self.initialPlacementProtectionPending = false
+            self.initialPlacementProtectionTask = nil
+            self.checkpointWindowFrame()
+        }
+    }
+
+    private func applyInitialPlacement() {
+        guard let window else { return }
+        guard var target = initialPlacementFrame else { return }
+
+        // Display topology can change between construction and activation.
+        // Never reapply a frame that no longer intersects a connected display;
+        // resolve a bounded visible fallback instead.
+        let visibleFrames = WorkspaceWindowPlacement.visibleFrames()
+        if !WorkspaceWindowPlacement.isReachable(target, in: visibleFrames),
+            !visibleFrames.isEmpty
+        {
+            target = WorkspaceWindowPlacement.resolve(
+                defaultFrame: WorkspaceWindowPlacement.defaultFrame,
+                savedFrame: nil,
+                minimumSize: window.minSize,
+                fallbackSize: target.size,
+                visibleFrames: visibleFrames
+            )
+            initialPlacementFrame = target
+            restoration.frame = WorkspaceWindowFrame(appKitFrame: target)
+        }
+
+        if window.frame != target {
+            // Keep initialPlacementPending true while this emits any move
+            // notification, so the transient callback cannot be persisted.
+            window.setFrame(target, display: false)
+        }
+    }
+
+    private func finishInitialPlacement(
+        usingCurrentFrame: Bool = false,
+        checkpoint: Bool = false
+    ) {
+        guard initialPlacementPending || initialPlacementProtectionPending else {
+            return
+        }
+        if !usingCurrentFrame {
+            applyInitialPlacement()
+        }
+        initialPlacementProtectionTask?.cancel()
+        initialPlacementProtectionTask = nil
+        initialPlacementProtectionPending = false
+        userInitiatedInitialPlacementChange = false
+
+        if usingCurrentFrame, let frame = window?.frame,
+            let rawFrame = WorkspaceWindowFrame(appKitFrame: frame)
+        {
+            initialPlacementFrame = frame
+            restoration.frame = rawFrame
+        }
+
+        initialPlacementPending = false
+        if checkpoint {
+            checkpointWindowFrame()
+            checkpointWindowSize()
+        }
+    }
+
     private func checkpointWindowFrame() {
         guard let window else { return }
-        if let frame = WorkspaceWindowFrame(appKitFrame: window.frame) {
+        let frameIsProtected = initialPlacementPending
+            || initialPlacementProtectionPending
+        if !frameIsProtected,
+            let frame = WorkspaceWindowFrame(appKitFrame: window.frame)
+        {
             restoration.frame = frame
         }
         // Keep the individual record durable on every move/resize and
@@ -686,12 +890,15 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         // During automatic relaunch, each restored window is presented before
         // the complete set exists. Do not let those opening checkpoints copy
         // a fallback frame over the previously active context bookmark.
-        if !suppressInitialActivation {
+        if !frameIsProtected, !suppressInitialActivation {
             onFrameCheckpoint?(restoration)
         }
     }
 
     private func checkpointWindowSize() {
+        guard !initialPlacementPending, !initialPlacementProtectionPending else {
+            return
+        }
         guard let size = window?.frame.size else { return }
         onWindowSizeCheckpoint?(ClusterWorkspaceWindowSize(
             width: size.width,
@@ -711,6 +918,10 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         onActivationCheckpoint = nil
         onFrameCheckpoint = nil
         onWindowSizeCheckpoint = nil
+        initialPlacementProtectionTask?.cancel()
+        initialPlacementProtectionTask = nil
+        initialPlacementProtectionPending = false
+        userInitiatedInitialPlacementChange = false
         frameCheckpointTask?.cancel()
         frameCheckpointTask = nil
         windowSizeCheckpointTask?.cancel()
@@ -732,6 +943,10 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
 
     func windowWillClose(_ notification: Notification) {
         guard !isClosing else { return }
+        finishInitialPlacement(
+            usingCurrentFrame: userInitiatedInitialPlacementChange
+                || window?.inLiveResize == true
+        )
         let wasKeyWindow = window?.isKeyWindow == true
         isClosing = true
         _ = checkpointWorkspace(

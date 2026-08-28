@@ -44,6 +44,9 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private let engineSupervisor: EngineSupervisor
     private var engineStateObserver: UUID?
     private var readyEngineInstanceID: String?
+    private var didObserveApplicationActivation = false
+    private var didPresentInitialWorkspaces = false
+    private var initialPresentationFallbackTask: Task<Void, Never>?
     private var helperRecoveryRequired = false
     private var hasPresentedEngineFailureDiagnostics = false
     private var workspaceRecoveryTasks: [ObjectIdentifier: Task<Void, Never>] = [:]
@@ -190,10 +193,78 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             self?.engineStateChanged(state)
         }
         engineSupervisor.start()
-        restoreWorkspacesOrShowChooser()
         contextualShortcutsCoordinator.start()
         NSApp.activate(ignoringOtherApps: true)
+        // Finder/LaunchServices can invoke didFinishLaunching before its
+        // activation notification, or while isActive is already true without
+        // sending another notification. Prefer the notification boundary and
+        // retain a short active-state fallback for the latter launch path.
+        scheduleInitialPresentationFallback()
         logger.info("Kmgr application launched")
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        // A bundle launch can present a window before AppKit has completed
+        // activation. Reassert every pending raw frame at that boundary so
+        // the launch Space cannot replace the saved display choice.
+        initialPresentationFallbackTask?.cancel()
+        initialPresentationFallbackTask = nil
+        completeInitialApplicationActivation()
+    }
+
+    private func scheduleInitialPresentationFallback() {
+        guard !didObserveApplicationActivation,
+            !didPresentInitialWorkspaces,
+            !isTerminating
+        else { return }
+        initialPresentationFallbackTask?.cancel()
+        initialPresentationFallbackTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: .milliseconds(250))
+            } catch {
+                return
+            }
+            guard let self, !Task.isCancelled, !self.isTerminating
+            else { return }
+            self.initialPresentationFallbackTask = nil
+            if NSApp.isActive {
+                self.completeInitialApplicationActivation()
+            } else {
+                // Some direct executable launches do not receive a separate
+                // activation callback. Still present after the bounded wait;
+                // the controller keeps the raw frame protected and will
+                // repair it if activation arrives later.
+                self.presentInitialWorkspacesAsFallback()
+            }
+        }
+    }
+
+    private func completeInitialApplicationActivation() {
+        guard !isTerminating else { return }
+        didObserveApplicationActivation = true
+        presentInitialWorkspacesIfPossible()
+        repairInitialPlacements()
+    }
+
+    private func presentInitialWorkspacesAsFallback() {
+        guard !didPresentInitialWorkspaces, !isTerminating else { return }
+        didPresentInitialWorkspaces = true
+        restoreWorkspacesOrShowChooser()
+        repairInitialPlacements()
+    }
+
+    private func repairInitialPlacements() {
+        for controller in workspaceControllers.values {
+            controller.repairInitialPlacementAfterActivation()
+        }
+    }
+
+    private func presentInitialWorkspacesIfPossible() {
+        guard !didPresentInitialWorkspaces, !isTerminating, NSApp.isActive else {
+            return
+        }
+        didPresentInitialWorkspaces = true
+        restoreWorkspacesOrShowChooser()
     }
 
     private func engineStateChanged(_ state: EngineConnectionState) {
@@ -329,6 +400,8 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             }
         }
         isTerminating = true
+        initialPresentationFallbackTask?.cancel()
+        initialPresentationFallbackTask = nil
         // Column resize/move writes are intentionally coalesced. Flush before
         // beginning asynchronous engine shutdown so the final presentation is
         // durable even when termination happens inside the debounce window.
@@ -596,6 +669,11 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         try? restorationStore.upsert(controller.restorationRecord)
         controller.showWindow(nil)
         controller.window?.makeKeyAndOrderFront(nil)
+        if didObserveApplicationActivation || (
+            placement != .restored && NSApp.isActive
+        ) {
+            controller.repairInitialPlacementAfterActivation()
+        }
         if placement != .restored {
             // A newly opened context is immediately a valid source, even if
             // AppKit has not yet emitted a user activation notification.
@@ -626,8 +704,8 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         // The source may have a pending editor/frame change that has not yet
         // reached its debounce. Capture it before choosing the context's
         // reusable starting frame.
-        let sourceWindowFrame = source?.window?.frame
         _ = source?.checkpointActiveWorkspace()
+        let sourceWindowFrame = source?.window?.frame
         let placement = workspaceFrameBookmarkStore.bookmark(
             for: request.contextReference
         ).map {
