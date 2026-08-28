@@ -381,11 +381,14 @@ Cluster workspace frames are remembered independently. On relaunch, each
 restored workspace uses its own last size and position when that frame is still
 reachable; an unavailable display or invalid frame gets a visible fallback.
 When a new workspace is opened, an exact kubeconfig context with prior frame
-history starts from that context's frame (offset when another visible window
-occupies it), while an unseen context uses the global last workspace size and a
-visible cascade. Closing a workspace removes only its open-window record and
-per-window frame; the exact-context frame history remains available for a later
-new window.
+history starts from that context's frame. If another visible window occupies
+that frame, kmgr first tries to place the new window beside it on the same
+display and otherwise uses a small cascade on that display; it does not move
+to another display merely to avoid overlap. An unavailable bookmark prefers the
+display of the current source window, while an unseen context uses the global
+last workspace size and a visible cascade. Closing a workspace removes only its
+open-window record and per-window frame; the exact-context frame history remains
+available for a later new window.
 
 Warm resource stores are governed by three independent LRU ceilings. Defaults
 are 24 views, 250,000 objects, and a conservative 512 MiB retained-size

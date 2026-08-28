@@ -248,6 +248,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         placement: WorkspaceWindowPlacementMode = .fresh,
         suppressInitialActivation: Bool = false,
         occupiedWindowFrames: [NSRect]? = nil,
+        preferredWindowFrame: NSRect? = nil,
         startsAuthenticated: Bool = true,
         onShowPortForwards: @escaping @MainActor () -> Void
     ) {
@@ -356,7 +357,8 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
             // A context bookmark is a starting point for a new window. A
             // restored record is an independent historical presentation and
             // should retain its exact reachable rectangle.
-            avoidOccupiedSavedFrame: placement != .restored
+            avoidOccupiedSavedFrame: placement != .restored,
+            preferredFrame: preferredWindowFrame
         )
         window.setFrame(resolvedFrame, display: false)
         window.setFrameAutosaveName(restoration.frameAutosaveName)

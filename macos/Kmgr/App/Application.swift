@@ -399,7 +399,9 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         // independent workspaces, including the same context more than once.
         // Flush a live editor before opening the chooser. The restoration
         // store remains the single source used after the user picks a context.
-        _ = activeWorkspaceController?.checkpointActiveWorkspace()
+        let sourceWorkspace = activeWorkspaceController
+        let sourceWindowFrame = sourceWorkspace?.window?.frame
+        _ = sourceWorkspace?.checkpointActiveWorkspace()
         let initialNotice = pendingRestorationNotice
         pendingRestorationNotice = nil
         let controller = ClusterManagerWindowController(
@@ -437,7 +439,8 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                     state: initialState
                 ),
                 initialWindowFrameSize: workspaceWindowSizeStore.lastSize,
-                placement: placement
+                placement: placement,
+                preferredWindowFrame: sourceWindowFrame
             )
         }
         controller.onClose = { [weak self] in
@@ -451,6 +454,7 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         restoration: ClusterWindowRestorationRecord,
         initialWindowFrameSize: ClusterWorkspaceWindowSize? = nil,
         placement: WorkspaceWindowPlacementMode = .fresh,
+        preferredWindowFrame: NSRect? = nil,
         suppressInitialActivation: Bool = false,
         startsAuthenticated: Bool = true
     ) -> ClusterWorkspaceWindowController {
@@ -506,6 +510,7 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             initialWindowFrameSize: initialWindowFrameSize,
             placement: placement,
             suppressInitialActivation: suppressInitialActivation,
+            preferredWindowFrame: preferredWindowFrame,
             startsAuthenticated: startsAuthenticated,
             onShowPortForwards: { [weak self] in
                 self?.showPortForwards(nil)
@@ -623,6 +628,7 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         // The source may have a pending editor/frame change that has not yet
         // reached its debounce. Capture it before choosing the context's
         // reusable starting frame.
+        let sourceWindowFrame = source?.window?.frame
         _ = source?.checkpointActiveWorkspace()
         let placement = workspaceFrameBookmarkStore.bookmark(
             for: request.contextReference
@@ -654,6 +660,7 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             restoration: record,
             initialWindowFrameSize: workspaceWindowSizeStore.lastSize,
             placement: placement,
+            preferredWindowFrame: sourceWindowFrame,
             startsAuthenticated: false
         )
         let identifier = ObjectIdentifier(controller)
