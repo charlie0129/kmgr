@@ -11,7 +11,7 @@ struct ApplicationWindowPresentationTests {
     @Test("restoration setting is default-on and persists from Settings")
     func restorationSetting() throws {
         let suite = "kmgr-app-restoration-settings-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suite))
+        let defaults = try #require(TestUserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
         let store = AppPreferencesStore(defaults: defaults)
         let settings = SettingsWindowController(preferencesStore: store)
@@ -35,7 +35,7 @@ struct ApplicationWindowPresentationTests {
     @Test("terminal size defaults to 120 by 35 and persists from Settings")
     func terminalSizeSettings() throws {
         let suite = "kmgr-app-terminal-settings-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suite))
+        let defaults = try #require(TestUserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
         let store = AppPreferencesStore(defaults: defaults)
         let settings = SettingsWindowController(
@@ -72,7 +72,7 @@ struct ApplicationWindowPresentationTests {
     @Test("Advanced Performance exposes cache and Kubernetes engine tunables")
     func advancedPerformanceSettings() throws {
         let suite = "kmgr-app-performance-settings-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suite))
+        let defaults = try #require(TestUserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
         let store = AppPreferencesStore(defaults: defaults)
         let settings = SettingsWindowController(
@@ -183,7 +183,7 @@ struct ApplicationWindowPresentationTests {
     @Test("log and diagnostic display limits persist from Settings")
     func displayAndDiagnosticSettings() throws {
         let suite = "kmgr-app-display-settings-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suite))
+        let defaults = try #require(TestUserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
         let store = AppPreferencesStore(defaults: defaults)
         let settings = SettingsWindowController(
@@ -232,7 +232,7 @@ struct ApplicationWindowPresentationTests {
     @Test("Settings preserves its frame when reopened and when restored")
     func settingsFrameAutosaveIsNotOverriddenByCentering() throws {
         let preferencesSuite = "kmgr-app-settings-frame-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: preferencesSuite))
+        let defaults = try #require(TestUserDefaults(suiteName: preferencesSuite))
         defer { defaults.removePersistentDomain(forName: preferencesSuite) }
         let frameName = "Settings-test-\(UUID().uuidString)"
         NSWindow.removeFrame(usingName: frameName)
@@ -490,7 +490,7 @@ struct ApplicationWindowPresentationTests {
             .appendingPathComponent("kmgr-context-frame-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: columnsDirectory) }
         let suite = "kmgr-context-frame-store-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suite))
+        let defaults = try #require(TestUserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
         let store = WorkspaceFrameBookmarkStore(defaults: defaults)
         let contextReference = bookmarkSession().contextReference
@@ -542,7 +542,7 @@ struct ApplicationWindowPresentationTests {
     @Test("saved navigation survives reload and seeds a same-context window")
     func savedNavigationSurvivesReloadAndSeedsNewWindow() async throws {
         let suite = "kmgr-app-navigation-restoration-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suite))
+        let defaults = try #require(TestUserDefaults(suiteName: suite))
         defaults.removePersistentDomain(forName: suite)
         defer { defaults.removePersistentDomain(forName: suite) }
         let columnsDirectory = FileManager.default.temporaryDirectory

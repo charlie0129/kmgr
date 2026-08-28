@@ -5,7 +5,7 @@ import Testing
 @MainActor
 @Test func appPreferencesRoundTripAsOneVersionedDocument() throws {
     let suite = "kmgr-tests-\(UUID().uuidString)"
-    let defaults = try #require(UserDefaults(suiteName: suite))
+    let defaults = try #require(TestUserDefaults(suiteName: suite))
     defer { defaults.removePersistentDomain(forName: suite) }
     let store = AppPreferencesStore(defaults: defaults)
     var preferences = AppPreferences()
@@ -91,7 +91,7 @@ import Testing
 @MainActor
 @Test func unsupportedOrInvalidSavedPreferencesFallBackExplicitly() throws {
     let suite = "kmgr-tests-\(UUID().uuidString)"
-    let defaults = try #require(UserDefaults(suiteName: suite))
+    let defaults = try #require(TestUserDefaults(suiteName: suite))
     defer { defaults.removePersistentDomain(forName: suite) }
     let encodedDefaults = try JSONEncoder().encode(AppPreferences())
     let preferencesObject = try #require(
@@ -285,7 +285,7 @@ import Testing
 @MainActor
 @Test func oldPreferenceSchemaIsResetWithoutDecodingLegacyFields() throws {
     let suite = "kmgr-tests-old-performance-schema-\(UUID().uuidString)"
-    let defaults = try #require(UserDefaults(suiteName: suite))
+    let defaults = try #require(TestUserDefaults(suiteName: suite))
     defer { defaults.removePersistentDomain(forName: suite) }
 
     var preferences = try #require(
@@ -403,7 +403,7 @@ import Testing
 @MainActor
 @Test func invalidPersistedPerformanceSettingsAreRemovedAndReset() throws {
     let suite = "kmgr-tests-invalid-performance-\(UUID().uuidString)"
-    let defaults = try #require(UserDefaults(suiteName: suite))
+    let defaults = try #require(TestUserDefaults(suiteName: suite))
     defer { defaults.removePersistentDomain(forName: suite) }
 
     var preferences = AppPreferences()

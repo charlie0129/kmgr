@@ -484,6 +484,12 @@ row synthetic model plus native `NSTableView` harness. Targeted AppKit tests
 also pin the resource workspace's accessibility roles, text alternatives, and
 the Details/YAML utility presentations.
 
+Swift tests use an in-memory `UserDefaults` store, so they do not create
+UUID-named plist files in `~/Library/Preferences`. `make test` also runs a
+scoped cleanup trap for any legacy or accidentally created test suites. To
+remove leftovers from older test runs, use `make clean-test-preferences`; it
+does not touch the application's persistent preference domains.
+
 For a manual smoke test, provide the exact disposable context name and
 explicitly authorize the test scope first. Merely making a context available
 authorizes read-only checks; it does not authorize creating or deleting test

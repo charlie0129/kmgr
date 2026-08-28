@@ -1,4 +1,7 @@
+import KmgrTestSupport
 @testable import KmgrCore
+
+typealias TestUserDefaults = InMemoryUserDefaults
 
 // Test fixtures use deterministic opaque references while production APIs
 // require callers to carry the exact kubeconfig context identity explicitly.

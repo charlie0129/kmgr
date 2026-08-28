@@ -83,7 +83,7 @@ import Testing
 
 private func sidebarPinDefaults() throws -> (defaults: UserDefaults, suite: String) {
     let suite = "kmgr-sidebar-pin-tests-\(UUID().uuidString)"
-    let defaults = try #require(UserDefaults(suiteName: suite))
+    let defaults = try #require(TestUserDefaults(suiteName: suite))
     defaults.removePersistentDomain(forName: suite)
     return (defaults, suite)
 }

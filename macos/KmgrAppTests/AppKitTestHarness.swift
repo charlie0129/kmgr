@@ -1,8 +1,11 @@
 import AppKit
 import Foundation
 import KmgrCore
+import KmgrTestSupport
 import Testing
 @testable import Kmgr
+
+typealias TestUserDefaults = InMemoryUserDefaults
 
 @Suite("AppKit tests", .serialized)
 struct AppKitTestHarness {}

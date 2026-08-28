@@ -12,7 +12,7 @@ struct ClusterOperationHistoryWindowControllerTests {
         let rawOperationError =
             "dial tcp 10.0.0.8:6443:  connect: connection refused\nTLS handshake timeout"
         let suite = "kmgr-operation-window-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suite))
+        let defaults = try #require(TestUserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
         let frameName = "OperationHistory-test-\(UUID().uuidString)"
         NSWindow.removeFrame(usingName: frameName)
@@ -98,7 +98,7 @@ struct ClusterOperationHistoryWindowControllerTests {
     @Test("Active Only filters retained completions without discarding them")
     func activeOnlyFilter() throws {
         let suite = "kmgr-operation-filter-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suite))
+        let defaults = try #require(TestUserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
         let frameName = "OperationHistory-filter-\(UUID().uuidString)"
         NSWindow.removeFrame(usingName: frameName)

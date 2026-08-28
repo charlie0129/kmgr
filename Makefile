@@ -1,6 +1,6 @@
 SHELL := /bin/zsh
 
-.PHONY: all generate test app app-release run clean test-build test-go test-swift clean-app-preferences
+.PHONY: all generate test app app-release run clean test-build test-go test-swift clean-test-preferences clean-app-preferences
 
 all: test
 
@@ -17,7 +17,7 @@ test-go:
 	go test -tags kmgr_dev ./backend/cmd/kmgr-engine
 
 test-swift:
-	swift test --package-path macos --no-parallel
+	./scripts/test-swift.sh
 
 app:
 	./scripts/build-app.sh
@@ -35,6 +35,9 @@ run: app
 clean:
 	rm -rf build bin macos/.build .build
 
-clean-app-preferences:
+clean-test-preferences:
+	./scripts/clean-test-preferences.sh
+
+clean-app-preferences: clean-test-preferences
 	rm -rf ~/Library/Application\ Support/kmgr
 	rm -f ~/Library/Preferences/cc.chlc.kmgr.plist

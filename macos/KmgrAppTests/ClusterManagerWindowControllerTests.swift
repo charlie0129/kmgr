@@ -419,7 +419,7 @@ struct ClusterManagerWindowControllerTests {
     @Test("remembered kubeconfig paths bind both listing and opening")
     func rememberedKubeconfigPathsBindRequests() async throws {
         let suite = "kmgr-cluster-manager-source-tests-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suite))
+        let defaults = try #require(TestUserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
         let sourceStore = KubeconfigSourceStore(defaults: defaults)
         let sourcePath = "/tmp/custom-team-kubeconfig"

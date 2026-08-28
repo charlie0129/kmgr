@@ -172,7 +172,7 @@ import Testing
 
 private func tableLayoutDefaults() throws -> (defaults: UserDefaults, suite: String) {
     let suite = "kmgr-table-layout-tests-\(UUID().uuidString)"
-    let defaults = try #require(UserDefaults(suiteName: suite))
+    let defaults = try #require(TestUserDefaults(suiteName: suite))
     defaults.removePersistentDomain(forName: suite)
     return (defaults, suite)
 }

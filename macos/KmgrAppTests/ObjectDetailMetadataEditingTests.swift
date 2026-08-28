@@ -123,7 +123,7 @@ struct ObjectDetailMetadataEditingTests {
     func summaryRowsAndColumnsFillViewportAcrossResize() async throws {
         let identity = detailMetadataIdentity()
         let suite = "kmgr-detail-metadata-layout-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suite))
+        let defaults = try #require(TestUserDefaults(suiteName: suite))
         defaults.removePersistentDomain(forName: suite)
         defer { defaults.removePersistentDomain(forName: suite) }
         let tableLayoutStore = TableLayoutStore(

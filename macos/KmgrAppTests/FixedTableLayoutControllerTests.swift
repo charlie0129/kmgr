@@ -321,7 +321,7 @@ private func fixedControllerLayoutFixture() throws -> (
     store: TableLayoutStore
 ) {
     let suite = "kmgr-fixed-controller-layout-tests-\(UUID().uuidString)"
-    let defaults = try #require(UserDefaults(suiteName: suite))
+    let defaults = try #require(TestUserDefaults(suiteName: suite))
     defaults.removePersistentDomain(forName: suite)
     return (
         defaults,

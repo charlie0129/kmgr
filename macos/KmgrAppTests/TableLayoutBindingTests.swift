@@ -239,7 +239,7 @@ private func tableLayoutBindingFixture() throws -> (
     store: TableLayoutStore
 ) {
     let suite = "kmgr-table-layout-binding-tests-\(UUID().uuidString)"
-    let defaults = try #require(UserDefaults(suiteName: suite))
+    let defaults = try #require(TestUserDefaults(suiteName: suite))
     defaults.removePersistentDomain(forName: suite)
     return (defaults, suite, TableLayoutStore(
         defaults: defaults,

@@ -366,7 +366,7 @@ import Testing
 
 private func restorationDefaults() throws -> (defaults: UserDefaults, suite: String) {
     let suite = "kmgr-restoration-tests-\(UUID().uuidString)"
-    let defaults = try #require(UserDefaults(suiteName: suite))
+    let defaults = try #require(TestUserDefaults(suiteName: suite))
     defaults.removePersistentDomain(forName: suite)
     return (defaults, suite)
 }

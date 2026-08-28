@@ -141,7 +141,7 @@ struct WorkspaceFrameBookmarkStoreTests {
 
     private func makeDefaults() throws -> (defaults: UserDefaults, suite: String) {
         let suite = "kmgr-frame-bookmarks-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suite))
+        let defaults = try #require(TestUserDefaults(suiteName: suite))
         defaults.removePersistentDomain(forName: suite)
         return (defaults, suite)
     }

@@ -269,7 +269,7 @@ private func contextualShortcutDescendants(of root: NSView) -> [NSView] {
 
 private func shortcutsVisibilityStorage() throws -> (defaults: UserDefaults, suite: String) {
     let suite = "KmgrAppTests.ContextualShortcuts.\(UUID().uuidString)"
-    let defaults = try #require(UserDefaults(suiteName: suite))
+    let defaults = try #require(TestUserDefaults(suiteName: suite))
     defaults.removePersistentDomain(forName: suite)
     return (defaults, suite)
 }

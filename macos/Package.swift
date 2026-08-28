@@ -47,6 +47,12 @@ let package = Package(
             name: "KmgrCore",
             path: "KmgrCore"
         ),
+        // Test-only UserDefaults replacement shared by the Core and AppKit
+        // suites; it is intentionally not part of a production target.
+        .target(
+            name: "KmgrTestSupport",
+            path: "KmgrTestSupport"
+        ),
         .target(
             name: "KmgrProto",
             dependencies: [
@@ -96,7 +102,7 @@ let package = Package(
         ),
         .testTarget(
             name: "KmgrCoreTests",
-            dependencies: ["KmgrCore"],
+            dependencies: ["KmgrCore", "KmgrTestSupport"],
             path: "KmgrTests"
         ),
         .testTarget(
@@ -109,7 +115,7 @@ let package = Package(
         ),
         .testTarget(
             name: "KmgrAppTests",
-            dependencies: ["Kmgr", "KmgrIPC"],
+            dependencies: ["Kmgr", "KmgrIPC", "KmgrTestSupport"],
             path: "KmgrAppTests"
         )
     ]

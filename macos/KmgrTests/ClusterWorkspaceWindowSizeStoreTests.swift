@@ -5,7 +5,7 @@ import Testing
 @MainActor
 @Test func clusterWorkspaceWindowSizeIsGlobalAndSurvivesStoreInstances() throws {
     let suite = "kmgr-workspace-size-tests-\(UUID().uuidString)"
-    let defaults = try #require(UserDefaults(suiteName: suite))
+    let defaults = try #require(TestUserDefaults(suiteName: suite))
     defer { defaults.removePersistentDomain(forName: suite) }
     let store = ClusterWorkspaceWindowSizeStore(defaults: defaults)
     let firstClusterSize = ClusterWorkspaceWindowSize(width: 1_120, height: 740)
@@ -21,7 +21,7 @@ import Testing
 @MainActor
 @Test func invalidClusterWorkspaceWindowSizeConfigurationResets() throws {
     let suite = "kmgr-workspace-size-invalid-tests-\(UUID().uuidString)"
-    let defaults = try #require(UserDefaults(suiteName: suite))
+    let defaults = try #require(TestUserDefaults(suiteName: suite))
     defer { defaults.removePersistentDomain(forName: suite) }
     defaults.set(Data("not-json".utf8), forKey: ClusterWorkspaceWindowSizeStore.storageKey)
 
