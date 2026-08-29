@@ -650,6 +650,78 @@ struct ClusterWorkspaceToolbarTests {
             == selectedResource.id)
     }
 
+    @Test("Command-palette resource navigation updates the sidebar selection")
+    func commandPaletteResourceNavigationUpdatesSidebarSelection() async throws {
+        let controller = makeWorkspace(
+            provider: CommandPaletteNavigationWorkspaceResourceProvider()
+        )
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let window = try #require(controller.window)
+        let outline = try #require(apiResourceOutline(in: window))
+
+        try await waitUntil {
+            guard outline.selectedRow >= 0,
+                let selected = outline.item(atRow: outline.selectedRow)
+                    as? DiscoveredResource
+            else { return false }
+            return selected.id == "/v1/pods"
+        }
+
+        controller.showCommandPalette(nil)
+        var paletteTable: NSTableView?
+        var paletteSearch: NSSearchField?
+        try await waitUntil {
+            let paletteWindow = window.childWindows?.first { child in
+                child.contentView.map { descendants(of: $0).contains {
+                    ($0 as? NSTableView)?.accessibilityLabel() == "Command palette results"
+                }} ?? false
+            }
+            guard let paletteContent = paletteWindow?.contentView else { return false }
+            paletteTable = descendants(of: paletteContent).compactMap { $0 as? NSTableView }
+                .first { $0.accessibilityLabel() == "Command palette results" }
+            paletteSearch = descendants(of: paletteContent).compactMap { $0 as? NSSearchField }
+                .first { $0.accessibilityLabel() == "Command palette search" }
+            return paletteTable != nil && paletteSearch != nil
+        }
+
+        let table = try #require(paletteTable)
+        let search = try #require(paletteSearch)
+        search.stringValue = "deployment"
+        search.delegate?.controlTextDidChange?(Notification(
+            name: NSControl.textDidChangeNotification,
+            object: search
+        ))
+
+        var deploymentRow: Int?
+        try await waitUntil {
+            deploymentRow = (0..<table.numberOfRows).first { row in
+                guard let cell = table.view(
+                    atColumn: 0,
+                    row: row,
+                    makeIfNecessary: true
+                ) else { return false }
+                return descendants(of: cell).compactMap { ($0 as? NSTextField)?.stringValue }
+                    .first == "Go to Deployment"
+            }
+            return deploymentRow != nil
+        }
+        let row = try #require(deploymentRow)
+        table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        let action = try #require(table.doubleAction)
+        #expect(NSApp.sendAction(action, to: table.target, from: table))
+
+        try await waitUntil {
+            guard outline.selectedRow >= 0,
+                let selected = outline.item(atRow: outline.selectedRow)
+                    as? DiscoveredResource
+            else { return false }
+            return selected.id == "apps/v1/deployments"
+        }
+        #expect((outline.item(atRow: outline.selectedRow) as? DiscoveredResource)?.kind
+            == "Deployment")
+    }
+
     @Test("Port Forwards button gives its title and arrows separate geometry")
     func portForwardsButtonGeometry() throws {
         let controller = makeWorkspace()
@@ -3822,6 +3894,64 @@ private struct HeaderStatusWorkspaceResourceProvider: WorkspaceResourceProviding
                     status: status
                 ))
             }
+            continuation.finish()
+        }
+    }
+
+    func cancelView(sessionID: String, viewID: String, generation: UInt64) async {}
+    func closeSession(sessionID: String) async {}
+}
+
+private struct CommandPaletteNavigationWorkspaceResourceProvider:
+    RangeBackedTestWorkspaceProviding {
+    private static let resources = [
+        DiscoveredResource(
+            group: "", version: "v1", resource: "pods", kind: "Pod",
+            namespaced: true, verbs: ["list", "watch"]
+        ),
+        DiscoveredResource(
+            group: "apps", version: "v1", resource: "deployments", kind: "Deployment",
+            namespaced: true, verbs: ["list", "watch"]
+        ),
+    ]
+
+    func discoverResources(sessionID: String, refresh: Bool) async throws
+        -> ResourceDiscoveryResult {
+        .init(resources: Self.resources)
+    }
+
+    func listNamespaces(sessionID: String) async throws -> [String] { ["default"] }
+
+    func streamView(request: ResourceViewRequest)
+        -> AsyncThrowingStream<ResourceViewMessage, Error> {
+        let identity = ResourceIdentity(
+            clusterSessionID: request.sessionID,
+            group: request.resource.group,
+            version: request.resource.version,
+            resource: request.resource.resource,
+            namespace: "default",
+            name: request.resource.resource == "pods" ? "api" : "web",
+            uid: ResourceUID(request.resource.resource == "pods" ? "pod-api" : "deployment-web")
+        )
+        return AsyncThrowingStream { continuation in
+            continuation.yield(testSnapshotInvalidation(
+                request: request,
+                sequence: 1,
+                rows: [ResourceRow(identity: identity, cells: [
+                    Cell(
+                        columnID: "name",
+                        displayText: identity.name,
+                        typedValue: .string(identity.name)
+                    ),
+                ])]
+            ))
+            continuation.yield(.status(
+                cursor: StreamCursor(generation: request.generation, sequence: 2),
+                status: ResourceViewStatus(
+                    freshness: .watching,
+                    rowsVisible: 1
+                )
+            ))
             continuation.finish()
         }
     }

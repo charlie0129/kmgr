@@ -2770,6 +2770,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
                 scope: selectedNamespaceScope(),
                 reason: .commandPaletteSelection
             )
+            sidebarController.selectResource(matchingCurrent: resource.id)
             checkpointRestoration()
             view.window?.makeFirstResponder(contentController.tableResponder)
         }
@@ -2784,6 +2785,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
                     scope: selectedNamespaceScope(),
                     reason: .commandPaletteSelection
                 )
+                sidebarController.selectResource(matchingCurrent: resource.id)
                 checkpointRestoration()
                 view.window?.makeFirstResponder(contentController.tableResponder)
             case .alternateWindow:
