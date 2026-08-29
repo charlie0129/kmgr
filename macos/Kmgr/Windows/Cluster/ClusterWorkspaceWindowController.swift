@@ -3743,6 +3743,7 @@ private final class ResourceSidebarViewController: NSViewController,
 {
     private static let pinnedSectionTitle = "Pinned"
     private static let pinPasteboardType = NSPasteboard.PasteboardType("com.kmgr.sidebar-pin-gvr")
+    private static let sectionRowHeight: CGFloat = 28
 
     private struct Section: Hashable {
         var title: String
@@ -4057,7 +4058,17 @@ private final class ResourceSidebarViewController: NSViewController,
         item is Section
     }
 
-    func outlineView(_ outlineView: NSOutlineView, isGroupItem item: Any) -> Bool { item is Section }
+    // Section rows have their own full-width material and typography. Marking
+    // them as AppKit group items would add the platform's group spacing before
+    // every following section, which appears as a blank row in this compact
+    // sidebar.
+    func outlineView(_ outlineView: NSOutlineView, isGroupItem item: Any) -> Bool { false }
+
+    func outlineView(_ outlineView: NSOutlineView, heightOfRowByItem item: Any) -> CGFloat {
+        // Preserve the slightly roomier section header while ordinary
+        // resource rows continue to use the outline's compact row metric.
+        item is Section ? Self.sectionRowHeight : -1
+    }
 
     func outlineView(
         _ outlineView: NSOutlineView,

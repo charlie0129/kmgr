@@ -524,6 +524,26 @@ struct ClusterWorkspaceToolbarTests {
             .contains { !$0.isEmpty })
     }
 
+    @Test("sidebar sections do not add an implicit blank row")
+    func sidebarSectionsHaveNoImplicitBlankRow() async throws {
+        let controller = makeWorkspace(provider: SidebarSpacingWorkspaceResourceProvider())
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let window = try #require(controller.window)
+        let outline = try #require(apiResourceOutline(in: window))
+        try await waitUntil { outline.numberOfRows >= 4 }
+        let sectionRows = (0..<outline.numberOfRows).filter { row in
+            outline.view(atColumn: 0, row: row, makeIfNecessary: true)?
+                .identifier?.rawValue == "sidebar-section-cell"
+        }
+        #expect(sectionRows.count == 2)
+        for sectionRow in sectionRows.dropFirst() {
+            let precedingRect = outline.rect(ofRow: sectionRow - 1)
+            let sectionRect = outline.rect(ofRow: sectionRow)
+            #expect(abs(precedingRect.maxY - sectionRect.minY) < 0.5)
+        }
+    }
+
     @Test("sidebar resource selection keeps one gray color while emphasized")
     func sidebarResourceSelectionStaysGrayWhileEmphasized() async throws {
         let controller = makeWorkspace(provider: FilterValidationWorkspaceResourceProvider())
@@ -5491,6 +5511,48 @@ private struct NoopWorkspaceResourceProvider: WorkspaceResourceProviding {
         -> AsyncThrowingStream<ResourceViewMessage, Error> {
         AsyncThrowingStream { $0.finish() }
     }
+    func cancelView(sessionID: String, viewID: String, generation: UInt64) async {}
+    func closeSession(sessionID: String) async {}
+}
+
+private struct SidebarSpacingWorkspaceResourceProvider: RangeBackedTestWorkspaceProviding {
+    private let resources = [
+        DiscoveredResource(
+            group: "batch", version: "v1", resource: "cronjobs", kind: "CronJob",
+            namespaced: true, verbs: ["list", "watch"]
+        ),
+        DiscoveredResource(
+            group: "networking.k8s.io", version: "v1", resource: "ingresses", kind: "Ingress",
+            namespaced: true, verbs: ["list", "watch"]
+        ),
+    ]
+
+    func discoverResources(sessionID: String, refresh: Bool) async throws
+        -> ResourceDiscoveryResult {
+        .init(resources: resources)
+    }
+
+    func listNamespaces(sessionID: String) async throws -> [String] { ["default"] }
+
+    func streamView(request: ResourceViewRequest)
+        -> AsyncThrowingStream<ResourceViewMessage, Error> {
+        AsyncThrowingStream { continuation in
+            continuation.yield(testSnapshotInvalidation(
+                request: request,
+                sequence: 1,
+                rows: []
+            ))
+            continuation.yield(.status(
+                cursor: StreamCursor(generation: request.generation, sequence: 2),
+                status: ResourceViewStatus(freshness: .watching, rowsVisible: 0)
+            ))
+            if request.stageUntilReconciled {
+                continuation.yield(testReconciliation(request: request, sequence: 3))
+            }
+            continuation.finish()
+        }
+    }
+
     func cancelView(sessionID: String, viewID: String, generation: UInt64) async {}
     func closeSession(sessionID: String) async {}
 }
