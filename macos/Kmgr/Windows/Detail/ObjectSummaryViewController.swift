@@ -337,17 +337,25 @@ enum ObjectDetailSummaryPresentation {
         case "annotations": 20
         case "status": 30
         case "replicas": 31
-        case "scheduling": 32
-        case "network": 33
-        case "service": 34
-        case "secret": 35
-        case "resources": 36
-        case "system": 37
-        case "owners": 40
-        case "selectors": 41
-        case "containers": 50
-        case "ports": 51
-        case "endpoints": 52
+        case "rollout": 32
+        case "scheduling": 33
+        case "network": 34
+        case "routing": 35
+        case "service": 36
+        case "resources": 37
+        case "storage": 38
+        case "security": 39
+        case "policy": 40
+        case "job": 41
+        case "secret": 42
+        case "data": 43
+        case "system": 44
+        case "event": 45
+        case "owners": 50
+        case "selectors": 51
+        case "containers": 60
+        case "ports": 61
+        case "endpoints": 62
         case "conditions": 1_000
         default: 900
         }

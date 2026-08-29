@@ -111,6 +111,15 @@ live in one app-wide Port Forwards window.
   value. A Pod Summary reports the reason, exit code, and relative and local
   absolute finish times for its most recent container restart when Kubernetes
   provides them.
+  Pod details also include lifecycle, scheduling constraints, container state,
+  probes, resource requests/limits, volumes, and security flags. Workload
+  details include rollout strategy/health and Pod-template context; Ingresses
+  include classes, load-balancer addresses, routes, and TLS; Services include
+  traffic/IP policy and per-port details. Storage, policy/RBAC, Job/CronJob,
+  ConfigMap/Secret metadata, and Event objects expose similarly curated
+  operational fields. Collections are bounded and deterministic, and Summary
+  never includes Secret values, environment values, commands, or image
+  references; use the explicit Data/YAML surfaces for complete object content.
   Labels and Annotations remain visible as separate sections even when empty;
   each has its own editor, and Return on a selected metadata row opens that kind
   with the key selected. The metadata and ConfigMap/Secret Data editors use the

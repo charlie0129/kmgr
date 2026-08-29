@@ -72,6 +72,26 @@ struct ObjectSummaryPresentationTests {
         ])
     }
 
+    @Test("Resource inspection sections keep rollout, routing, storage, and policy context ordered")
+    func resourceInspectionSectionPriority() {
+        let fields = [
+            "conditions", "policy", "security", "storage", "routing", "rollout", "job",
+            "resources", "network", "status", "identity", "data", "event",
+        ].map {
+            ObjectSummaryField(sectionID: $0, fieldID: $0, label: $0, displayText: $0)
+        }
+        let sections = ObjectDetailSummaryPresentation.sections(for: ObjectDetail(
+            identity: identity,
+            resourceVersion: "rv",
+            summaryFields: fields
+        ))
+
+        #expect(sections.map(\.id) == [
+            "identity", "labels", "annotations", "status", "rollout", "network", "routing", "resources",
+            "storage", "security", "policy", "job", "data", "event", "conditions",
+        ])
+    }
+
     @Test("Summary bounds metadata values and entry counts")
     func boundedSummaryMetadata() throws {
         let labels = Dictionary(uniqueKeysWithValues:

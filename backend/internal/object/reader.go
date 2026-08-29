@@ -494,10 +494,78 @@ func summarize(value *unstructured.Unstructured) []SummaryField {
 // sufficient to select the Node projection.
 func summarizeForIdentity(value *unstructured.Unstructured, identity Identity) []SummaryField {
 	kind := value.GetKind()
-	if identity.Group == "" && identity.Version == "v1" && identity.Resource == "nodes" {
-		kind = "Node"
+	if kind == "" {
+		kind = kindForIdentity(identity)
 	}
 	return summarizeWithKind(value, kind)
+}
+
+// kindForIdentity provides a conservative TypeMeta fallback for dynamic
+// objects whose API response omitted kind. Dynamic clients identify the
+// resource by GVR, so selected built-in projections can still be rendered
+// without guessing for arbitrary custom resources.
+func kindForIdentity(identity Identity) string {
+	switch identity.GVR() {
+	case schema.GroupVersionResource{Version: "v1", Resource: "pods"}:
+		return "Pod"
+	case schema.GroupVersionResource{Version: "v1", Resource: "nodes"}:
+		return "Node"
+	case schema.GroupVersionResource{Version: "v1", Resource: "services"}:
+		return "Service"
+	case schema.GroupVersionResource{Version: "v1", Resource: "persistentvolumeclaims"}:
+		return "PersistentVolumeClaim"
+	case schema.GroupVersionResource{Version: "v1", Resource: "persistentvolumes"}:
+		return "PersistentVolume"
+	case schema.GroupVersionResource{Version: "v1", Resource: "configmaps"}:
+		return "ConfigMap"
+	case schema.GroupVersionResource{Version: "v1", Resource: "secrets"}:
+		return "Secret"
+	case schema.GroupVersionResource{Version: "v1", Resource: "serviceaccounts"}:
+		return "ServiceAccount"
+	case schema.GroupVersionResource{Version: "v1", Resource: "events"}:
+		return "Event"
+	case schema.GroupVersionResource{Version: "v1", Resource: "namespaces"}:
+		return "Namespace"
+	case schema.GroupVersionResource{Version: "v1", Resource: "resourcequotas"}:
+		return "ResourceQuota"
+	case schema.GroupVersionResource{Version: "v1", Resource: "limitranges"}:
+		return "LimitRange"
+	case schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}:
+		return "Deployment"
+	case schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "statefulsets"}:
+		return "StatefulSet"
+	case schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "daemonsets"}:
+		return "DaemonSet"
+	case schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "replicasets"}:
+		return "ReplicaSet"
+	case schema.GroupVersionResource{Version: "v1", Resource: "replicationcontrollers"}:
+		return "ReplicationController"
+	case schema.GroupVersionResource{Group: "batch", Version: "v1", Resource: "jobs"},
+		schema.GroupVersionResource{Group: "batch", Version: "v1beta1", Resource: "jobs"}:
+		return "Job"
+	case schema.GroupVersionResource{Group: "batch", Version: "v1", Resource: "cronjobs"},
+		schema.GroupVersionResource{Group: "batch", Version: "v1beta1", Resource: "cronjobs"}:
+		return "CronJob"
+	case schema.GroupVersionResource{Group: "networking.k8s.io", Version: "v1", Resource: "ingresses"},
+		schema.GroupVersionResource{Group: "networking.k8s.io", Version: "v1beta1", Resource: "ingresses"},
+		schema.GroupVersionResource{Group: "extensions", Version: "v1beta1", Resource: "ingresses"}:
+		return "Ingress"
+	case schema.GroupVersionResource{Group: "networking.k8s.io", Version: "v1", Resource: "networkpolicies"}:
+		return "NetworkPolicy"
+	case schema.GroupVersionResource{Group: "policy", Version: "v1", Resource: "poddisruptionbudgets"}:
+		return "PodDisruptionBudget"
+	case schema.GroupVersionResource{Group: "rbac.authorization.k8s.io", Version: "v1", Resource: "roles"}:
+		return "Role"
+	case schema.GroupVersionResource{Group: "rbac.authorization.k8s.io", Version: "v1", Resource: "clusterroles"}:
+		return "ClusterRole"
+	case schema.GroupVersionResource{Group: "rbac.authorization.k8s.io", Version: "v1", Resource: "rolebindings"}:
+		return "RoleBinding"
+	case schema.GroupVersionResource{Group: "rbac.authorization.k8s.io", Version: "v1", Resource: "clusterrolebindings"}:
+		return "ClusterRoleBinding"
+	case schema.GroupVersionResource{Group: "storage.k8s.io", Version: "v1", Resource: "storageclasses"}:
+		return "StorageClass"
+	}
+	return ""
 }
 
 func summarizeWithKind(value *unstructured.Unstructured, kind string) []SummaryField {
@@ -538,22 +606,55 @@ func summarizeWithKind(value *unstructured.Unstructured, kind string) []SummaryF
 	case "Pod":
 		fields = append(fields, podRestartSummary(value.Object)...)
 		fields = append(fields, podOverviewSummary(value.Object)...)
+		fields = append(fields, podDetailSummary(value.Object)...)
 		fields = append(fields, podContainerSummary(value.Object)...)
 	case "Node":
 		fields = append(fields, nodeSummary(value)...)
 	case "Service":
 		fields = append(fields, serviceOverviewSummary(value.Object)...)
 		fields = append(fields, servicePortSummary(value.Object)...)
-	case "Deployment", "StatefulSet", "DaemonSet", "ReplicaSet", "Job":
+		fields = append(fields, serviceDetailSummary(value.Object)...)
+	case "Deployment", "StatefulSet", "DaemonSet", "ReplicaSet":
 		fields = append(fields, workloadSelectorSummary(value.Object)...)
+		fields = append(fields, workloadDetailSummary(value.Object, kind)...)
+	case "Job":
+		fields = append(fields, workloadSelectorSummary(value.Object)...)
+		fields = append(fields, workloadDetailSummary(value.Object, kind)...)
+	case "CronJob":
+		fields = append(fields, cronJobSummary(value.Object)...)
+	case "Ingress":
+		fields = append(fields, ingressSummary(value.Object)...)
+	case "PersistentVolumeClaim":
+		fields = append(fields, persistentVolumeClaimSummary(value.Object)...)
+	case "PersistentVolume":
+		fields = append(fields, persistentVolumeSummary(value.Object)...)
+	case "NetworkPolicy":
+		fields = append(fields, networkPolicySummary(value.Object)...)
+	case "Role", "ClusterRole", "RoleBinding", "ClusterRoleBinding":
+		fields = append(fields, rbacSummary(value.Object, kind)...)
+	case "ServiceAccount":
+		fields = append(fields, serviceAccountSummary(value.Object)...)
+	case "ConfigMap":
+		fields = append(fields, configMapSummary(value.Object)...)
 	case "ReplicationController":
 		fields = append(fields, flatSelectorSummary(value.Object, "spec", "selector")...)
 	case "Secret":
+		fields = append(fields, secretSummary(value.Object)...)
 		if secretType, found, _ := unstructured.NestedString(value.Object, "type"); found && secretType != "" {
 			fields = append(fields, SummaryField{
 				Section: "secret", ID: "type", Label: "Type", Value: secretType,
 			})
 		}
+	case "Event":
+		fields = append(fields, eventSummary(value.Object)...)
+	case "StorageClass":
+		fields = append(fields, storageClassSummary(value.Object)...)
+	case "PodDisruptionBudget":
+		fields = append(fields, podDisruptionBudgetSummary(value.Object)...)
+	case "ResourceQuota":
+		fields = append(fields, resourceQuotaSummary(value.Object)...)
+	case "LimitRange":
+		fields = append(fields, limitRangeSummary(value.Object)...)
 	}
 	// Apply one final bound to every presentation string, including fields
 	// produced by resource-specific helpers. This keeps future helpers from
@@ -601,13 +702,22 @@ func genericStatusSummary(object map[string]any) []SummaryField {
 		{path: []string{"status", "observedGeneration"}, id: "observedGeneration", label: "Observed Generation", section: "status"},
 		{path: []string{"spec", "replicas"}, id: "desiredReplicas", label: "Desired Replicas", section: "replicas"},
 		{path: []string{"status", "replicas"}, id: "replicas", label: "Current Replicas", section: "replicas"},
+		{path: []string{"status", "currentReplicas"}, id: "currentReplicas", label: "Current Replicas", section: "replicas"},
 		{path: []string{"status", "readyReplicas"}, id: "readyReplicas", label: "Ready Replicas", section: "replicas"},
 		{path: []string{"status", "availableReplicas"}, id: "availableReplicas", label: "Available Replicas", section: "replicas"},
 		{path: []string{"status", "updatedReplicas"}, id: "updatedReplicas", label: "Updated Replicas", section: "replicas"},
 		{path: []string{"status", "unavailableReplicas"}, id: "unavailableReplicas", label: "Unavailable Replicas", section: "replicas"},
+		{path: []string{"status", "terminatingReplicas"}, id: "terminatingReplicas", label: "Terminating Replicas", section: "replicas"},
+		{path: []string{"status", "desiredNumberScheduled"}, id: "desiredScheduled", label: "Desired Scheduled", section: "replicas"},
+		{path: []string{"status", "currentNumberScheduled"}, id: "currentScheduled", label: "Current Scheduled", section: "replicas"},
+		{path: []string{"status", "numberReady"}, id: "numberReady", label: "Ready", section: "replicas"},
+		{path: []string{"status", "updatedNumberScheduled"}, id: "updatedScheduled", label: "Updated Scheduled", section: "replicas"},
+		{path: []string{"status", "numberAvailable"}, id: "numberAvailable", label: "Available", section: "replicas"},
+		{path: []string{"status", "numberUnavailable"}, id: "numberUnavailable", label: "Unavailable", section: "replicas"},
+		{path: []string{"status", "numberMisscheduled"}, id: "numberMisscheduled", label: "Misscheduled", section: "replicas"},
 	}
 	for _, field := range integerFields {
-		if number, found, _ := unstructured.NestedInt64(object, field.path...); found {
+		if number, found := summaryIntegerAt(object, field.path...); found {
 			result = append(result, SummaryField{
 				Section: field.section, ID: field.id, Label: field.label, Value: fmt.Sprint(number),
 			})
@@ -710,6 +820,7 @@ func podOverviewSummary(object map[string]any) []SummaryField {
 		{path: []string{"spec", "nodeName"}, id: "node", label: "Node"},
 		{path: []string{"status", "podIP"}, id: "podIP", label: "Pod IP"},
 		{path: []string{"status", "hostIP"}, id: "hostIP", label: "Host IP"},
+		{path: []string{"status", "nominatedNodeName"}, id: "nominatedNode", label: "Nominated Node"},
 	} {
 		if value, found, _ := unstructured.NestedString(object, field.path...); found && value != "" {
 			result = append(result, SummaryField{
