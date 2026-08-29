@@ -647,7 +647,13 @@ func appendGateSummary(
 				omitted++
 				continue
 			}
-			name, found := summaryStringAt(mapping, "condition")
+			// PodReadinessGate serializes its field as conditionType.  Keep
+			// the older condition/name spellings as bounded fallbacks for
+			// malformed or pre-release objects.
+			name, found := summaryStringAt(mapping, "conditionType")
+			if !found {
+				name, found = summaryStringAt(mapping, "condition")
+			}
 			if !found {
 				name, found = summaryStringAt(mapping, "name")
 			}

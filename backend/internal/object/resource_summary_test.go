@@ -40,6 +40,9 @@ func TestPodSummaryIncludesLifecycleSchedulingResourcesStorageAndSecurity(t *tes
 		"tolerations": []any{map[string]any{
 			"key": "dedicated", "operator": "Equal", "value": "batch", "effect": "NoSchedule",
 		}},
+		"readinessGates": []any{map[string]any{
+			"conditionType": "example.com/ready",
+		}},
 		"topologySpreadConstraints": []any{map[string]any{
 			"maxSkew": int64(1), "topologyKey": "topology.kubernetes.io/zone",
 			"whenUnsatisfiable": "DoNotSchedule", "labelSelector": map[string]any{
@@ -91,6 +94,7 @@ func TestPodSummaryIncludesLifecycleSchedulingResourcesStorageAndSecurity(t *tes
 		{"security", "Service Account", "workload"},
 		{"scheduling", "zone", "east"},
 		{"scheduling", "Toleration", "dedicated operator=Equal value=batch effect=NoSchedule"},
+		{"scheduling", "Readiness Gate", "example.com/ready"},
 		{"resources", "Container api Request CPU", "250m"},
 		{"resources", "Container api Limit Memory", "256Mi"},
 		{"containers", "Container api Readiness Probe", "HTTP GET /readyz:8080 · periodSeconds=5"},
