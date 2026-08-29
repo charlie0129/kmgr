@@ -5,7 +5,7 @@
 - Kmgr is a prototype. Prefer a clean design and simple logic over backward compatibility.
 - Breaking changes and substantial refactors are acceptable when they produce a cleaner result.
 - Do not add compatibility shims, migrations, deprecated paths, or legacy fallbacks unless the user explicitly asks for them.
-- If persisted configuration is invalid or uses an unsupported format, discard it and reset to defaults. Do not attempt to repair or migrate it.
+- If persisted configuration is invalid or uses an unsupported format, discard it and reset to defaults. If the config is just a little out of date (only version differences) but fields are still valid, migrate it to the current format.
 - Remove dead code related to the task instead of preserving it for hypothetical future use.
 - This no-compatibility policy applies to Kmgr's own configuration, internal APIs, and previous app behavior. It does not prohibit compatibility with older Kubernetes API servers.
 - Targeted fallbacks for Kubernetes API-server capabilities are acceptable when an older server does not support the preferred API. Prefer API discovery or capability detection over hard-coded Kubernetes version checks, and keep the fallback clean, bounded, and efficient.
