@@ -292,6 +292,133 @@ struct ResourceColumnPropagationTests {
         #expect(secondTable.selectedRowIndexes.isEmpty)
     }
 
+    @Test("a CEL draft is reprojected after its durable save")
+    func celDraftReprojectsAfterDurableSave() async throws {
+        let fixture = try ColumnPropagationFixture()
+        defer { fixture.remove() }
+        let match = ColumnResourceMatch(group: "", version: "v1", resource: "pods")
+        let name = ColumnDefinition(
+            id: "name",
+            title: "Name",
+            source: .builtin,
+            value: "name",
+            type: .string
+        )
+        let initialDocument = ColumnsConfigurationDocument(views: [
+            ResourceColumnConfiguration(match: match, columns: [name])
+        ])
+        try ColumnConfigurationFileStore(path: fixture.path).save(initialDocument)
+        let coordinator = ColumnConfigurationCoordinator(path: fixture.path)
+        let pods = DiscoveredResource(
+            group: "", version: "v1", resource: "pods", kind: "Pod",
+            namespaced: true, verbs: ["list", "watch"]
+        )
+        let provider = ColumnPropagationWorkspaceProvider(resource: pods)
+        let workspace = makeWorkspace(
+            suffix: "cel-save-refresh",
+            provider: provider,
+            optionalResourceCatalogProvider: NoOptionalResourceCatalogProvider(),
+            configurationPath: fixture.path,
+            configurationCoordinator: coordinator
+        )
+        start([workspace])
+        defer { workspace.close() }
+
+        try await waitUntil {
+            provider.streamRequests.last?.columnIDs == [name.id]
+        }
+        let requestCountBeforeDraft = provider.streamRequests.count
+        let cel = ColumnDefinition(
+            id: "namespace-from-cel",
+            title: "Namespace From CEL",
+            source: .cel,
+            expression: "object.metadata.namespace",
+            type: .string
+        )
+        let updated = [name, cel]
+        let columnsRequest = try #require(resourceColumnsRequest(in: workspace))
+        columnsRequest.apply(updated)
+        try await waitUntil {
+            provider.streamRequests.count > requestCountBeforeDraft
+                && provider.streamRequests.last?.columnIDs == updated.map(\.id)
+        }
+        let requestCountBeforeSave = provider.streamRequests.count
+        let staleDraftRequest = try #require(provider.streamRequests.last)
+
+        let savedDocument = try await coordinator.save(updated, matching: match)
+        let savedVersion = try #require(savedDocument.persistedVersion())
+        try await waitUntil {
+            provider.streamRequests.count > requestCountBeforeSave
+                && provider.streamRequests.last?.columnIDs == updated.map(\.id)
+                && provider.streamRequests.last?.columnConfigurationVersion == savedVersion
+        }
+        #expect(staleDraftRequest.columnConfigurationVersion
+            != provider.streamRequests.last?.columnConfigurationVersion)
+    }
+
+    @Test("a CEL save during the initial load waits for the durable version")
+    func celSaveDuringInitialLoadReprojectsAfterLoad() async throws {
+        let fixture = try ColumnPropagationFixture()
+        defer { fixture.remove() }
+        let match = ColumnResourceMatch(group: "", version: "v1", resource: "pods")
+        let name = ColumnDefinition(
+            id: "name",
+            title: "Name",
+            source: .builtin,
+            value: "name",
+            type: .string
+        )
+        let initialDocument = ColumnsConfigurationDocument(views: [
+            ResourceColumnConfiguration(match: match, columns: [name])
+        ])
+        try ColumnConfigurationFileStore(path: fixture.path).save(initialDocument)
+        let loader = StagedColumnConfigurationDocumentLoader()
+        defer { loader.cancelPendingLoads() }
+        let coordinator = ColumnConfigurationCoordinator(path: fixture.path)
+        let pods = DiscoveredResource(
+            group: "", version: "v1", resource: "pods", kind: "Pod",
+            namespaced: true, verbs: ["list", "watch"]
+        )
+        let provider = ColumnPropagationWorkspaceProvider(resource: pods)
+        let workspace = makeWorkspace(
+            suffix: "cel-save-load-race",
+            provider: provider,
+            optionalResourceCatalogProvider: NoOptionalResourceCatalogProvider(),
+            configurationPath: fixture.path,
+            configurationCoordinator: coordinator,
+            configurationLoader: loader.loader
+        )
+        start([workspace])
+        defer { workspace.close() }
+
+        try await waitUntil {
+            loader.requestIsPending(1)
+                && !provider.streamRequests.isEmpty
+        }
+        let cel = ColumnDefinition(
+            id: "namespace-from-cel",
+            title: "Namespace From CEL",
+            source: .cel,
+            expression: "object.metadata.namespace",
+            type: .string
+        )
+        let updated = [name, cel]
+        let columnsRequest = try #require(resourceColumnsRequest(in: workspace))
+        columnsRequest.apply(updated)
+        try await waitUntil {
+            provider.streamRequests.last?.columnIDs == updated.map(\.id)
+        }
+        let savedDocument = try await coordinator.save(updated, matching: match)
+        let savedVersion = try #require(savedDocument.persistedVersion())
+        let requestCountAfterSave = provider.streamRequests.count
+        loader.complete(attempt: 1, with: initialDocument)
+        try await waitUntil {
+            provider.streamRequests.count > requestCountAfterSave
+                && provider.streamRequests.last?.columnIDs == updated.map(\.id)
+                && provider.streamRequests.last?.columnConfigurationVersion == savedVersion
+        }
+    }
+
     @Test("an exact-GVR save preserves sibling caches without a file reload")
     func savedEditPreservesOtherGVRCaches() async throws {
         let fixture = try ColumnPropagationFixture()

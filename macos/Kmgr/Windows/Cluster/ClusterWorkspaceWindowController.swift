@@ -4284,6 +4284,7 @@ private enum ResourceStreamOpenReason: String {
     case optionalResourceColumns = "optional-resource-columns"
     case loadedColumnConfiguration = "loaded-column-configuration"
     case appliedColumns = "applied-columns"
+    case savedColumnConfiguration = "saved-column-configuration"
     case restoration = "restoration"
     case historyRestore = "history-restore"
     case sortChange = "sort-change"
@@ -4526,6 +4527,10 @@ private final class ResourceListViewController: NSViewController,
     private var columnsConfigurationLoadTask: Task<Void, Never>?
     private var columnsConfigurationLoadGeneration: UInt64 = 0
     private var columnsConfigurationObserver: UUID?
+    /// A save can finish while the initial document load is still pending.
+    /// Keep the exact target so that load completion can reopen the stream
+    /// with the durable configuration version instead of the provisional one.
+    private var pendingSavedColumnStreamRefreshMatch: ColumnResourceMatch?
     private var deferredColumnPresentationByResourceID: [
         String: DeferredColumnPresentationState
     ] = [:]
@@ -5087,6 +5092,7 @@ private final class ResourceListViewController: NSViewController,
         columnsConfigurationLoadGeneration &+= 1
         columnsConfigurationLoadTask?.cancel()
         columnsConfigurationLoadTask = nil
+        pendingSavedColumnStreamRefreshMatch = nil
         stopFreshnessAgeUpdates()
         suspend()
         // `suspend()` can preserve a resource-list selection while a utility
@@ -7993,46 +7999,70 @@ private final class ResourceListViewController: NSViewController,
             // Once the complete document is available, navigation history is
             // the source of truth for resources that are no longer visible.
             deferredColumnPresentationByResourceID.removeAll(keepingCapacity: true)
-            guard let resource,
+            if let resource,
                 provisionalDefaultColumnResourceIDs.contains(resource.id)
-            else { return }
-            let match = ColumnResourceMatch(
-                group: resource.group,
-                version: resource.version,
-                resource: resource.resource
-            )
-            let definitions = reconciled.views.first(where: { $0.match == match })?.columns
-                ?? defaultColumnDefinitions(for: resource)
-            let previousProjection = projectionIdentity(
-                for: installedColumnDefinitions
-            )
-            let nextEffective = effectiveColumnDefinitions(
-                persistedDefinitions: definitions,
-                resource: resource
-            )
-            let nextProjection = projectionIdentity(
-                for: enabledColumnDefinitions(in: nextEffective)
-            )
-            let previousSort = currentSortPresentation
-            provisionalDefaultColumnResourceIDs.remove(resource.id)
-            columnDefinitionsByResourceID[resource.id] = definitions
-            installColumns(nextEffective)
-            if let deferredPresentation {
-                applyDeferredColumnPresentation(deferredPresentation)
-                if !deferredPresentation.columnMoves.isEmpty
-                    || !deferredPresentation.measurementOverrides.isEmpty
-                {
-                    scheduleCurrentColumnLayoutPersistence()
-                }
-            }
-            if nextProjection != previousProjection
-                || currentSortPresentation != previousSort
             {
-                openStream(reason: .loadedColumnConfiguration)
+                let match = ColumnResourceMatch(
+                    group: resource.group,
+                    version: resource.version,
+                    resource: resource.resource
+                )
+                let definitions = reconciled.views.first(where: { $0.match == match })?.columns
+                    ?? defaultColumnDefinitions(for: resource)
+                let previousProjection = projectionIdentity(
+                    for: installedColumnDefinitions
+                )
+                let nextEffective = effectiveColumnDefinitions(
+                    persistedDefinitions: definitions,
+                    resource: resource
+                )
+                let nextProjection = projectionIdentity(
+                    for: enabledColumnDefinitions(in: nextEffective)
+                )
+                let previousSort = currentSortPresentation
+                provisionalDefaultColumnResourceIDs.remove(resource.id)
+                columnDefinitionsByResourceID[resource.id] = definitions
+                installColumns(nextEffective)
+                if let deferredPresentation {
+                    applyDeferredColumnPresentation(deferredPresentation)
+                    if !deferredPresentation.columnMoves.isEmpty
+                        || !deferredPresentation.measurementOverrides.isEmpty
+                    {
+                        scheduleCurrentColumnLayoutPersistence()
+                    }
+                }
+                if nextProjection != previousProjection
+                    || currentSortPresentation != previousSort
+                {
+                    openStream(reason: .loadedColumnConfiguration)
+                }
+                updateStatusLine()
+                onRestorationChanged?()
             }
-            updateStatusLine()
-            onRestorationChanged?()
+            reopenPendingSavedColumnStreamIfNeeded()
         }
+    }
+
+    private func reopenPendingSavedColumnStreamIfNeeded() {
+        guard let pendingMatch = pendingSavedColumnStreamRefreshMatch else { return }
+        guard let resource else {
+            pendingSavedColumnStreamRefreshMatch = nil
+            return
+        }
+        let currentMatch = ColumnResourceMatch(
+            group: resource.group,
+            version: resource.version,
+            resource: resource.resource
+        )
+        guard pendingMatch == currentMatch else {
+            // The cache now contains the save, so a later navigation will use
+            // its durable version without needing this refresh anymore.
+            pendingSavedColumnStreamRefreshMatch = nil
+            return
+        }
+        guard columnsConfigurationCache.persistedVersion != nil else { return }
+        pendingSavedColumnStreamRefreshMatch = nil
+        openStream(reason: .savedColumnConfiguration)
     }
 
     private func applyColumns(_ definitions: [ColumnDefinition], forResourceID resourceID: String) {
@@ -8071,11 +8101,46 @@ private final class ResourceListViewController: NSViewController,
         onRestorationChanged?()
     }
 
+    private func effectiveProjectionIdentity(
+        for persistedDefinitions: [ColumnDefinition],
+        resource: DiscoveredResource
+    ) -> Set<ResourceColumnProjectionIdentity> {
+        projectionIdentity(for: enabledColumnDefinitions(in: effectiveColumnDefinitions(
+            persistedDefinitions: persistedDefinitions,
+            resource: resource
+        )))
+    }
+
+    private func persistedProjectionIdentity(
+        for resource: DiscoveredResource
+    ) -> Set<ResourceColumnProjectionIdentity>? {
+        guard let document = columnsConfigurationCache.document else { return nil }
+        let match = ColumnResourceMatch(
+            group: resource.group,
+            version: resource.version,
+            resource: resource.resource
+        )
+        let definitions = document.views.first(where: { $0.match == match })?.columns
+            ?? defaultColumnDefinitions(for: resource)
+        return effectiveProjectionIdentity(
+            for: definitions,
+            resource: resource
+        )
+    }
+
     @discardableResult
     func applySavedColumns(
         _ definitions: [ColumnDefinition],
         matching match: ColumnResourceMatch
     ) -> Bool {
+        // Draft previews are installed before the debounced save completes.
+        // Capture the durable projection first so the save notification can
+        // still tell that the active stream was opened against the old CEL
+        // program, even though the table already has the new definitions.
+        let activeResource = resource
+        let previousPersistedProjection = activeResource.flatMap {
+            persistedProjectionIdentity(for: $0)
+        }
         columnsConfigurationCache.recordSaved(definitions, matching: match)
         columnDefinitionsByResourceID[match.key] = definitions
         provisionalDefaultColumnResourceIDs.remove(match.key)
@@ -8091,7 +8156,32 @@ private final class ResourceListViewController: NSViewController,
                 resource: resource.resource
             )
         else { return false }
+        let nextPersistedProjection = effectiveProjectionIdentity(
+            for: definitions,
+            resource: resource
+        )
+        let projectionChanged = previousPersistedProjection.map {
+            $0 != nextPersistedProjection
+        } ?? true
+        let generationBeforeApply = generation
+        if projectionChanged, columnsConfigurationCache.persistedVersion == nil {
+            pendingSavedColumnStreamRefreshMatch = match
+        } else if columnsConfigurationCache.persistedVersion != nil {
+            pendingSavedColumnStreamRefreshMatch = nil
+        }
         applyColumns(definitions, forResourceID: resource.id)
+        // `applyColumns` normally opens the replacement stream when another
+        // workspace receives the save. The originating workspace already has
+        // the draft installed, so that comparison is equal there; reopen once
+        // after the durable save instead. If the initial document load is
+        // still pending, the load-completion path performs that reopen after
+        // it can attach the durable configuration version.
+        if projectionChanged,
+            columnsConfigurationCache.persistedVersion != nil,
+            generation == generationBeforeApply
+        {
+            openStream(reason: .savedColumnConfiguration)
+        }
         return true
     }
 
