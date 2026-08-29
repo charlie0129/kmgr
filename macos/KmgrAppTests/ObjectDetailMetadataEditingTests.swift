@@ -62,9 +62,7 @@ struct ObjectDetailMetadataEditingTests {
         #expect(sectionDescendants.contains {
             $0.identifier?.rawValue == "object-detail-summary-section-accent"
         })
-        #expect(sectionDescendants.contains {
-            $0.identifier?.rawValue == "object-detail-summary-section-separator"
-        })
+        #expect(table.gridStyleMask.contains(.solidHorizontalGridLineMask))
         let heading = try #require(sectionDescendants
             .compactMap { $0 as? NSTextField }
             .first { $0.stringValue == "Labels" })

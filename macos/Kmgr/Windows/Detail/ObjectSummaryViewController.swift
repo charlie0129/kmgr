@@ -610,8 +610,7 @@ final class ObjectSummaryViewController: NSViewController, NSTableViewDataSource
         summaryTable.allowsMultipleSelection = false
         summaryTable.allowsEmptySelection = true
         // Keep data rows compact while leaving enough breathing room for the
-        // stronger section bands below. The extra point also prevents a group
-        // row's separator from visually colliding with the first data row.
+        // stronger section bands below.
         summaryTable.rowHeight = 25
         summaryTable.intercellSpacing = NSSize(width: 1, height: 1)
         summaryTable.gridStyleMask = [.solidHorizontalGridLineMask]
@@ -935,13 +934,6 @@ final class ObjectSummaryViewController: NSViewController, NSTableViewDataSource
         heading.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(heading)
 
-        let separator = NSBox()
-        separator.identifier = .init("object-detail-summary-section-separator")
-        separator.boxType = .separator
-        separator.translatesAutoresizingMaskIntoConstraints = false
-        separator.setAccessibilityElement(false)
-        container.addSubview(separator)
-
         var constraints = [
             background.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             background.trailingAnchor.constraint(equalTo: container.trailingAnchor),
@@ -949,14 +941,13 @@ final class ObjectSummaryViewController: NSViewController, NSTableViewDataSource
             background.bottomAnchor.constraint(equalTo: container.bottomAnchor),
             accent.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             accent.topAnchor.constraint(equalTo: container.topAnchor),
-            accent.bottomAnchor.constraint(equalTo: separator.topAnchor),
+            // The table owns the horizontal grid rule at the row boundary.
+            // Extending the accent to the row edge avoids adding a second
+            // rule inside the section view at the bottom boundary.
+            accent.bottomAnchor.constraint(equalTo: container.bottomAnchor),
             accent.widthAnchor.constraint(equalToConstant: 3),
             heading.leadingAnchor.constraint(equalTo: accent.trailingAnchor, constant: 8),
             heading.centerYAnchor.constraint(equalTo: container.centerYAnchor),
-            separator.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            separator.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            separator.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-            separator.heightAnchor.constraint(equalToConstant: 1),
         ]
         if let kind = metadataKind(for: section.id) {
             let button = NSButton(
