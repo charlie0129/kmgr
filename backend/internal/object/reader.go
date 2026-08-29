@@ -18,6 +18,10 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/charlie0129/kmgr/backend/internal/cluster"
+	"github.com/charlie0129/kmgr/backend/internal/kubequantity"
+
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -26,8 +30,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"sigs.k8s.io/yaml"
-
-	"github.com/charlie0129/kmgr/backend/internal/cluster"
 )
 
 var (
@@ -1200,8 +1202,8 @@ func nodeResourceValues(object map[string]any, path ...string) map[string]string
 			if !validSummaryToken(name, maximumSummaryLabelBytes) {
 				continue
 			}
-			if quantity, ok := summaryQuantityText(value); ok {
-				result[name] = quantity
+			if quantity, ok := summaryQuantityValue(value); ok {
+				result[name] = kubequantity.Format(corev1.ResourceName(name), &quantity)
 			}
 		}
 	case map[string]string:
@@ -1209,8 +1211,8 @@ func nodeResourceValues(object map[string]any, path ...string) map[string]string
 			if !validSummaryToken(name, maximumSummaryLabelBytes) {
 				continue
 			}
-			if quantity, ok := summaryQuantityText(value); ok {
-				result[name] = quantity
+			if quantity, ok := summaryQuantityValue(value); ok {
+				result[name] = kubequantity.Format(corev1.ResourceName(name), &quantity)
 			}
 		}
 	}
@@ -1218,6 +1220,29 @@ func nodeResourceValues(object map[string]any, path ...string) map[string]string
 }
 
 func summaryQuantityText(value any) (string, bool) {
+	text, ok := summaryQuantityRawText(value)
+	if !ok {
+		return "", false
+	}
+	if _, err := resource.ParseQuantity(text); err != nil {
+		return "", false
+	}
+	return boundedSummaryText(text), true
+}
+
+func summaryQuantityValue(value any) (resource.Quantity, bool) {
+	text, ok := summaryQuantityRawText(value)
+	if !ok {
+		return resource.Quantity{}, false
+	}
+	quantity, err := resource.ParseQuantity(text)
+	if err != nil {
+		return resource.Quantity{}, false
+	}
+	return quantity, true
+}
+
+func summaryQuantityRawText(value any) (string, bool) {
 	var text string
 	switch typed := value.(type) {
 	case string:
@@ -1254,10 +1279,7 @@ func summaryQuantityText(value any) (string, bool) {
 	if text == "" || len(text) > maximumSummaryValueBytes {
 		return "", false
 	}
-	if _, err := resource.ParseQuantity(text); err != nil {
-		return "", false
-	}
-	return boundedSummaryText(text), true
+	return text, true
 }
 
 func nodeResourceLabel(name string) string {

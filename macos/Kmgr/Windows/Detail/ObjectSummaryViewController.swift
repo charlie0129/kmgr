@@ -609,7 +609,10 @@ final class ObjectSummaryViewController: NSViewController, NSTableViewDataSource
         summaryTable.setAccessibilityLabel("Kubernetes object summary")
         summaryTable.allowsMultipleSelection = false
         summaryTable.allowsEmptySelection = true
-        summaryTable.rowHeight = 24
+        // Keep data rows compact while leaving enough breathing room for the
+        // stronger section bands below. The extra point also prevents a group
+        // row's separator from visually colliding with the first data row.
+        summaryTable.rowHeight = 25
         summaryTable.intercellSpacing = NSSize(width: 1, height: 1)
         summaryTable.gridStyleMask = [.solidHorizontalGridLineMask]
         summaryTable.cellValueProvider = { [weak self] row, column in
@@ -902,14 +905,58 @@ final class ObjectSummaryViewController: NSViewController, NSTableViewDataSource
     private func summarySectionView(_ section: ObjectDetailSummarySection) -> NSView {
         let container = NSView()
         container.identifier = .init("object-detail-summary-section")
+
+        // Group rows are intentionally rendered as their own visual band.
+        // AppKit's default group-row treatment is subtle in a plain table and
+        // made adjacent sections look like one continuous list.
+        let background = NSVisualEffectView()
+        background.identifier = .init("object-detail-summary-section-background")
+        background.material = .headerView
+        background.blendingMode = .withinWindow
+        background.state = .followsWindowActiveState
+        background.translatesAutoresizingMaskIntoConstraints = false
+        background.setAccessibilityElement(false)
+        container.addSubview(background, positioned: .below, relativeTo: nil)
+
+        let accent = NSBox()
+        accent.identifier = .init("object-detail-summary-section-accent")
+        accent.boxType = .custom
+        accent.borderWidth = 0
+        accent.fillColor = NSColor.controlAccentColor.withAlphaComponent(0.72)
+        accent.translatesAutoresizingMaskIntoConstraints = false
+        accent.setAccessibilityElement(false)
+        container.addSubview(accent)
+
         let heading = NSTextField(labelWithString: section.title)
-        heading.font = .systemFont(ofSize: 13, weight: .semibold)
-        heading.textColor = .secondaryLabelColor
+        heading.font = .systemFont(ofSize: 13, weight: .bold)
+        heading.textColor = .labelColor
+        heading.lineBreakMode = .byTruncatingTail
+        heading.maximumNumberOfLines = 1
         heading.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(heading)
+
+        let separator = NSBox()
+        separator.identifier = .init("object-detail-summary-section-separator")
+        separator.boxType = .separator
+        separator.translatesAutoresizingMaskIntoConstraints = false
+        separator.setAccessibilityElement(false)
+        container.addSubview(separator)
+
         var constraints = [
-            heading.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 6),
+            background.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            background.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            background.topAnchor.constraint(equalTo: container.topAnchor),
+            background.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            accent.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            accent.topAnchor.constraint(equalTo: container.topAnchor),
+            accent.bottomAnchor.constraint(equalTo: separator.topAnchor),
+            accent.widthAnchor.constraint(equalToConstant: 3),
+            heading.leadingAnchor.constraint(equalTo: accent.trailingAnchor, constant: 8),
             heading.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+            separator.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            separator.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            separator.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            separator.heightAnchor.constraint(equalToConstant: 1),
         ]
         if let kind = metadataKind(for: section.id) {
             let button = NSButton(
@@ -932,7 +979,7 @@ final class ObjectSummaryViewController: NSViewController, NSTableViewDataSource
         } else {
             constraints.append(heading.trailingAnchor.constraint(
                 lessThanOrEqualTo: container.trailingAnchor,
-                constant: -6
+                constant: -10
             ))
         }
         NSLayoutConstraint.activate(constraints)
@@ -1008,7 +1055,7 @@ final class ObjectSummaryViewController: NSViewController, NSTableViewDataSource
         guard tableView === summaryTable, summaryItems.indices.contains(row),
             case .section = summaryItems[row]
         else { return tableView.rowHeight }
-        return 30
+        return 36
     }
 
     private func summaryTextCell(

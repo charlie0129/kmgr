@@ -261,7 +261,7 @@ func TestNodeSummaryIncludesSchedulingNetworkResourcesAndSystemInfo(t *testing.T
 		"address:2":               "203.0.113.10",
 		"podCIDR:0":               "10.244.0.0/24",
 		"podCIDR:1":               "fd00:10::/64",
-		"allocatable:cpu":         "7800m",
+		"allocatable:cpu":         "7.8",
 		"capacity:cpu":            "8",
 		"allocatable:memory":      "30Gi",
 		"capacity:memory":         "32Gi",
@@ -282,6 +282,37 @@ func TestNodeSummaryIncludesSchedulingNetworkResourcesAndSystemInfo(t *testing.T
 	}
 	if _, found := byID["podCIDR:2"]; found {
 		t.Fatal("duplicate singular podCIDR was rendered")
+	}
+}
+
+func TestNodeSummaryUsesLargerKubernetesQuantityUnits(t *testing.T) {
+	t.Parallel()
+	value := kubernetesObject("v1", "Node", "nodes", "", "worker", "uid")
+	value.Object["status"] = map[string]any{
+		"allocatable": map[string]any{
+			"cpu":               "7800m",
+			"memory":            "2108963164Ki",
+			"ephemeral-storage": "464503396794",
+			"hugepages-2Mi":     "131072Ki",
+			"example.com/gpu":   "2",
+		},
+		"capacity": map[string]any{
+			"memory": "2112620892Ki",
+		},
+	}
+
+	fields := summaryFieldsByID(summarize(value))
+	for id, expected := range map[string]string{
+		"allocatable:cpu":               "7.8",
+		"allocatable:memory":            "1.96Ti",
+		"allocatable:ephemeral-storage": "432.6Gi",
+		"allocatable:hugepages-2Mi":     "128Mi",
+		"allocatable:example.com/gpu":   "2",
+		"capacity:memory":               "1.97Ti",
+	} {
+		if field, ok := fields[id]; !ok || field.Value != expected {
+			t.Errorf("summary[%q] = %#v, want value %q", id, field, expected)
+		}
 	}
 }
 

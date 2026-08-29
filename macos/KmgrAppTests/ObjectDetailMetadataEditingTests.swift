@@ -51,6 +51,27 @@ struct ObjectDetailMetadataEditingTests {
         #expect(labelsButton.title == "Edit Labels…")
         #expect(annotationsButton.title == "Edit Annotations…")
 
+        let sectionView = try #require(
+            table.view(atColumn: 0, row: 0, makeIfNecessary: true)
+        )
+        let sectionDescendants = detailMetadataDescendants(of: sectionView)
+        let sectionBackground = try #require(sectionDescendants
+            .compactMap { $0 as? NSVisualEffectView }
+            .first { $0.identifier?.rawValue == "object-detail-summary-section-background" })
+        #expect(sectionBackground.material == .headerView)
+        #expect(sectionDescendants.contains {
+            $0.identifier?.rawValue == "object-detail-summary-section-accent"
+        })
+        #expect(sectionDescendants.contains {
+            $0.identifier?.rawValue == "object-detail-summary-section-separator"
+        })
+        let heading = try #require(sectionDescendants
+            .compactMap { $0 as? NSTextField }
+            .first { $0.stringValue == "Labels" })
+        #expect(heading.font?.fontDescriptor.symbolicTraits.contains(.bold) == true)
+        #expect(controller.tableView(table, heightOfRow: 0) == 36)
+        #expect(abs(table.rect(ofRow: 0).height - 36) <= 1)
+
         annotationsButton.performClick(nil)
         #expect(requests.count == 1)
         #expect(requests[0].0 == .annotations)
