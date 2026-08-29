@@ -8,14 +8,17 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
 	"unicode/utf8"
 
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
@@ -279,7 +282,7 @@ func detailFromObject(
 		}
 	}
 	if includeSummary {
-		detail.Summary = summarize(value)
+		detail.Summary = summarizeForIdentity(value, identity)
 		detail.Owners = ownerReferences(value)
 		if identity.Group == "" && identity.Version == "v1" && identity.Resource == "pods" {
 			detail.Containers = podContainerDetails(value)
@@ -482,8 +485,24 @@ func isSafeUTF8(value []byte) bool {
 }
 
 func summarize(value *unstructured.Unstructured) []SummaryField {
+	return summarizeWithKind(value, value.GetKind())
+}
+
+// summarizeForIdentity keeps resource-specific projections tied to the
+// authoritative detail identity. An API server (or a fake client) may omit or
+// vary TypeMeta on an otherwise complete object, while a core/v1 nodes GVR is
+// sufficient to select the Node projection.
+func summarizeForIdentity(value *unstructured.Unstructured, identity Identity) []SummaryField {
+	kind := value.GetKind()
+	if identity.Group == "" && identity.Version == "v1" && identity.Resource == "nodes" {
+		kind = "Node"
+	}
+	return summarizeWithKind(value, kind)
+}
+
+func summarizeWithKind(value *unstructured.Unstructured, kind string) []SummaryField {
 	fields := []SummaryField{
-		{Section: "identity", ID: "kind", Label: "Kind", Value: boundedSummaryText(value.GetKind())},
+		{Section: "identity", ID: "kind", Label: "Kind", Value: boundedSummaryText(kind)},
 		{Section: "identity", ID: "namespace", Label: "Namespace", Value: boundedSummaryText(valueOrDash(value.GetNamespace()))},
 		{Section: "identity", ID: "name", Label: "Name", Value: boundedSummaryText(value.GetName())},
 		{Section: "identity", ID: "uid", Label: "UID", Value: boundedSummaryText(string(value.GetUID()))},
@@ -509,17 +528,19 @@ func summarize(value *unstructured.Unstructured) []SummaryField {
 	// Secret payloads can occur under data, stringData, or provider-specific
 	// status fields. Keep their summary strictly metadata-only; decoded values
 	// remain exclusive to the explicitly revealed Data surface.
-	if value.GetKind() != "Secret" {
+	if kind != "Secret" {
 		fields = append(fields, genericStatusSummary(value.Object)...)
 		fields = append(fields, conditionSummary(value.Object)...)
 	}
 	fields = append(fields, ownerReferenceSummary(value)...)
 
-	switch value.GetKind() {
+	switch kind {
 	case "Pod":
 		fields = append(fields, podRestartSummary(value.Object)...)
 		fields = append(fields, podOverviewSummary(value.Object)...)
 		fields = append(fields, podContainerSummary(value.Object)...)
+	case "Node":
+		fields = append(fields, nodeSummary(value)...)
 	case "Service":
 		fields = append(fields, serviceOverviewSummary(value.Object)...)
 		fields = append(fields, servicePortSummary(value.Object)...)
@@ -551,6 +572,10 @@ const (
 	maximumSummaryOwners        = 64
 	maximumSummarySelectors     = 64
 	maximumSummaryAddresses     = 64
+	maximumSummaryNodeTaints    = 64
+	maximumSummaryNodeCIDRs     = 64
+	maximumSummaryNodeResources = 64
+	maximumSummaryNodeRoles     = 64
 	maximumSummaryNameBytes     = 253
 	maximumSummaryPortNameBytes = 63
 	// A qualified Kubernetes label key can contain a 253-byte DNS prefix,
@@ -693,6 +718,487 @@ func podOverviewSummary(object map[string]any) []SummaryField {
 		}
 	}
 	return result
+}
+
+// nodeSummary projects the parts of a core/v1 Node that are useful while
+// inspecting one selected object. The list view already exposes a compact
+// subset of these values; Details can afford to show the individual entries
+// without fetching any additional resources. Every collection is bounded so
+// an unusually large or malformed Node cannot create an unbounded IPC/UI
+// response.
+func nodeSummary(value *unstructured.Unstructured) []SummaryField {
+	if value == nil {
+		return nil
+	}
+	result := make([]SummaryField, 0, 24)
+	result = append(result, nodeSchedulingSummary(value)...)
+	result = append(result, nodeNetworkSummary(value)...)
+	result = append(result, nodeResourceSummary(value)...)
+	result = append(result, nodeSystemSummary(value)...)
+	return result
+}
+
+func nodeSchedulingSummary(value *unstructured.Unstructured) []SummaryField {
+	result := make([]SummaryField, 0, 4)
+
+	roles := nodeSummaryRoles(value.GetLabels())
+	omittedRoles := 0
+	if len(roles) > maximumSummaryNodeRoles {
+		omittedRoles = len(roles) - maximumSummaryNodeRoles
+		roles = roles[:maximumSummaryNodeRoles]
+	}
+	roleValue := "None"
+	if len(roles) > 0 {
+		roleValue = strings.Join(roles, ", ")
+	}
+	result = append(result, SummaryField{
+		Section: "scheduling", ID: "roles", Label: "Roles", Value: roleValue,
+	})
+	if omittedRoles > 0 {
+		result = append(result, omittedSummaryField(
+			"scheduling", "rolesOmitted", "Roles", omittedRoles,
+		))
+	}
+
+	unschedulable := false
+	if reported, found, err := unstructured.NestedBool(value.Object, "spec", "unschedulable"); err == nil {
+		unschedulable = found && reported
+		result = append(result, SummaryField{
+			Section: "scheduling", ID: "unschedulable", Label: "Unschedulable",
+			Value: strconv.FormatBool(unschedulable),
+		})
+	}
+
+	taints, found, err := unstructured.NestedSlice(value.Object, "spec", "taints")
+	if err != nil || !found || len(taints) == 0 {
+		result = append(result, SummaryField{
+			Section: "scheduling", ID: "taints", Label: "Taints", Value: "None",
+		})
+		return result
+	}
+
+	omitted := 0
+	displayedTaint := false
+	for index, raw := range taints {
+		if index >= maximumSummaryNodeTaints {
+			omitted++
+			continue
+		}
+		taint, ok := raw.(map[string]any)
+		if !ok {
+			omitted++
+			continue
+		}
+		key := summaryMapString(taint, "key")
+		valueText := summaryMapString(taint, "value")
+		effect := summaryMapString(taint, "effect")
+		text := formatNodeTaint(key, valueText, effect)
+		if text == "" {
+			omitted++
+			continue
+		}
+		result = append(result, SummaryField{
+			Section: "scheduling", ID: fmt.Sprintf("taint:%d", index),
+			Label: "Taint", Value: text,
+		})
+		displayedTaint = true
+	}
+	if omitted > 0 {
+		result = append(result, omittedSummaryField(
+			"scheduling", "taintsOmitted", "Taints", omitted,
+		))
+	}
+	// A malformed list can contain no displayable entries. Keep the section
+	// explicit in that case so Details does not imply that taints were absent.
+	if !displayedTaint {
+		result = append(result, SummaryField{
+			Section: "scheduling", ID: "taints", Label: "Taints", Value: "None",
+		})
+	}
+	return result
+}
+
+func nodeSummaryRoles(labels map[string]string) []string {
+	const prefix = "node-role.kubernetes.io/"
+	roles := make([]string, 0)
+	seen := make(map[string]struct{})
+	for key := range labels {
+		role, found := strings.CutPrefix(key, prefix)
+		if !found || role == "" || !validSummaryToken(role, maximumSummaryNameBytes) {
+			continue
+		}
+		if _, duplicate := seen[role]; duplicate {
+			continue
+		}
+		seen[role] = struct{}{}
+		roles = append(roles, role)
+	}
+	if role := labels["kubernetes.io/role"]; validSummaryToken(role, maximumSummaryNameBytes) {
+		if _, duplicate := seen[role]; !duplicate {
+			roles = append(roles, role)
+		}
+	}
+	slices.Sort(roles)
+	return roles
+}
+
+func formatNodeTaint(key, value, effect string) string {
+	key = boundedSummaryText(key)
+	value = boundedSummaryText(value)
+	effect = boundedSummaryText(effect)
+	if key == "" && value == "" && effect == "" {
+		return ""
+	}
+	text := key
+	if text == "" {
+		text = "<unnamed>"
+	}
+	if value != "" {
+		text += "=" + value
+	}
+	if effect != "" {
+		text += ":" + effect
+	}
+	return boundedSummaryText(text)
+}
+
+func nodeNetworkSummary(value *unstructured.Unstructured) []SummaryField {
+	result := make([]SummaryField, 0, 8)
+	addresses, found, err := unstructured.NestedSlice(value.Object, "status", "addresses")
+	if err != nil || !found || len(addresses) == 0 {
+		result = append(result, SummaryField{
+			Section: "network", ID: "addresses", Label: "Addresses", Value: "None",
+		})
+	} else {
+		result = append(result, nodeAddressFields(addresses)...)
+	}
+
+	cidrs, omittedCIDRs := nodePodCIDRs(value.Object)
+	for index, cidr := range cidrs {
+		result = append(result, SummaryField{
+			Section: "network", ID: fmt.Sprintf("podCIDR:%d", index),
+			Label: "Pod CIDR", Value: cidr,
+		})
+	}
+	if omittedCIDRs > 0 {
+		result = append(result, omittedSummaryField(
+			"network", "podCIDRsOmitted", "Pod CIDRs", omittedCIDRs,
+		))
+	}
+	return result
+}
+
+type nodeSummaryAddress struct {
+	typeName string
+	address  string
+}
+
+func nodeAddressFields(rawAddresses []any) []SummaryField {
+	addresses := make([]nodeSummaryAddress, 0, min(len(rawAddresses), maximumSummaryAddresses))
+	seen := make(map[string]struct{})
+	omitted := 0
+	for _, raw := range rawAddresses {
+		entry, ok := raw.(map[string]any)
+		if !ok {
+			omitted++
+			continue
+		}
+		typeName := summaryMapString(entry, "type")
+		address := summaryMapString(entry, "address")
+		if typeName == "" || address == "" {
+			omitted++
+			continue
+		}
+		typeName = boundedSummaryText(typeName)
+		address = boundedSummaryText(address)
+		key := typeName + "\x00" + address
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		if len(addresses) >= maximumSummaryAddresses {
+			omitted++
+			continue
+		}
+		addresses = append(addresses, nodeSummaryAddress{typeName: typeName, address: address})
+	}
+	slices.SortFunc(addresses, func(left, right nodeSummaryAddress) int {
+		leftPriority := nodeAddressTypePriority(left.typeName)
+		rightPriority := nodeAddressTypePriority(right.typeName)
+		if leftPriority != rightPriority {
+			if leftPriority < rightPriority {
+				return -1
+			}
+			return 1
+		}
+		if left.typeName != right.typeName {
+			return strings.Compare(left.typeName, right.typeName)
+		}
+		return strings.Compare(left.address, right.address)
+	})
+
+	result := make([]SummaryField, 0, len(addresses)+1)
+	for index, address := range addresses {
+		result = append(result, SummaryField{
+			Section: "network", ID: fmt.Sprintf("address:%d", index),
+			Label: nodeAddressLabel(address.typeName), Value: address.address,
+		})
+	}
+	if omitted > 0 {
+		result = append(result, omittedSummaryField(
+			"network", "addressesOmitted", "Addresses", omitted,
+		))
+	}
+	if len(result) == 0 {
+		result = append(result, SummaryField{
+			Section: "network", ID: "addresses", Label: "Addresses", Value: "None",
+		})
+	}
+	return result
+}
+
+func nodeAddressTypePriority(typeName string) int {
+	switch typeName {
+	case "Hostname":
+		return 0
+	case "InternalIP":
+		return 1
+	case "ExternalIP":
+		return 2
+	case "InternalDNS":
+		return 3
+	case "ExternalDNS":
+		return 4
+	default:
+		return 100
+	}
+}
+
+func nodeAddressLabel(typeName string) string {
+	switch typeName {
+	case "InternalIP":
+		return "Internal IP"
+	case "ExternalIP":
+		return "External IP"
+	case "InternalDNS":
+		return "Internal DNS"
+	case "ExternalDNS":
+		return "External DNS"
+	default:
+		return typeName
+	}
+}
+
+func nodePodCIDRs(object map[string]any) ([]string, int) {
+	values := make([]string, 0)
+	seen := make(map[string]struct{})
+	omitted := 0
+	appendValue := func(value string) {
+		value = boundedSummaryText(value)
+		if value == "" {
+			omitted++
+			return
+		}
+		if _, duplicate := seen[value]; duplicate {
+			return
+		}
+		if len(values) >= maximumSummaryNodeCIDRs {
+			omitted++
+			return
+		}
+		seen[value] = struct{}{}
+		values = append(values, value)
+	}
+	if raw, found, err := unstructured.NestedFieldNoCopy(object, "spec", "podCIDRs"); err == nil && found {
+		switch cidrs := raw.(type) {
+		case []any:
+			for _, rawCIDR := range cidrs {
+				cidr, _ := rawCIDR.(string)
+				appendValue(cidr)
+			}
+		case []string:
+			for _, cidr := range cidrs {
+				appendValue(cidr)
+			}
+		}
+	}
+	if cidr, found, err := unstructured.NestedString(object, "spec", "podCIDR"); err == nil && found {
+		appendValue(cidr)
+	}
+	return values, omitted
+}
+
+func nodeResourceSummary(value *unstructured.Unstructured) []SummaryField {
+	capacity := nodeResourceValues(value.Object, "status", "capacity")
+	allocatable := nodeResourceValues(value.Object, "status", "allocatable")
+	if len(capacity) == 0 && len(allocatable) == 0 {
+		return nil
+	}
+
+	namesByResource := make(map[string]struct{}, len(capacity)+len(allocatable))
+	for name := range capacity {
+		namesByResource[name] = struct{}{}
+	}
+	for name := range allocatable {
+		namesByResource[name] = struct{}{}
+	}
+	names := make([]string, 0, len(namesByResource))
+	for name := range namesByResource {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	omitted := 0
+	if len(names) > maximumSummaryNodeResources {
+		omitted = len(names) - maximumSummaryNodeResources
+		names = names[:maximumSummaryNodeResources]
+	}
+
+	result := make([]SummaryField, 0, len(names)*2+1)
+	for _, name := range names {
+		friendlyName := nodeResourceLabel(name)
+		if quantity, found := allocatable[name]; found {
+			result = append(result, SummaryField{
+				Section: "resources", ID: "allocatable:" + name,
+				Label: "Allocatable " + friendlyName, Value: quantity,
+			})
+		}
+		if quantity, found := capacity[name]; found {
+			result = append(result, SummaryField{
+				Section: "resources", ID: "capacity:" + name,
+				Label: "Capacity " + friendlyName, Value: quantity,
+			})
+		}
+	}
+	if omitted > 0 {
+		result = append(result, omittedSummaryField(
+			"resources", "resourcesOmitted", "Resources", omitted,
+		))
+	}
+	return result
+}
+
+func nodeResourceValues(object map[string]any, path ...string) map[string]string {
+	raw, found, err := unstructured.NestedFieldNoCopy(object, path...)
+	if err != nil || !found {
+		return nil
+	}
+	result := make(map[string]string)
+	switch values := raw.(type) {
+	case map[string]any:
+		for name, value := range values {
+			if !validSummaryToken(name, maximumSummaryLabelBytes) {
+				continue
+			}
+			if quantity, ok := summaryQuantityText(value); ok {
+				result[name] = quantity
+			}
+		}
+	case map[string]string:
+		for name, value := range values {
+			if !validSummaryToken(name, maximumSummaryLabelBytes) {
+				continue
+			}
+			if quantity, ok := summaryQuantityText(value); ok {
+				result[name] = quantity
+			}
+		}
+	}
+	return result
+}
+
+func summaryQuantityText(value any) (string, bool) {
+	var text string
+	switch typed := value.(type) {
+	case string:
+		text = typed
+	case json.Number:
+		text = typed.String()
+	case int:
+		text = strconv.Itoa(typed)
+	case int32:
+		text = strconv.FormatInt(int64(typed), 10)
+	case int64:
+		text = strconv.FormatInt(typed, 10)
+	case uint:
+		text = strconv.FormatUint(uint64(typed), 10)
+	case uint32:
+		text = strconv.FormatUint(uint64(typed), 10)
+	case uint64:
+		text = strconv.FormatUint(typed, 10)
+	case float32:
+		text = strconv.FormatFloat(float64(typed), 'g', -1, 32)
+	case float64:
+		text = strconv.FormatFloat(typed, 'g', -1, 64)
+	case resource.Quantity:
+		text = typed.String()
+	case *resource.Quantity:
+		if typed == nil {
+			return "", false
+		}
+		text = typed.String()
+	default:
+		return "", false
+	}
+	text = strings.TrimSpace(text)
+	if text == "" || len(text) > maximumSummaryValueBytes {
+		return "", false
+	}
+	if _, err := resource.ParseQuantity(text); err != nil {
+		return "", false
+	}
+	return boundedSummaryText(text), true
+}
+
+func nodeResourceLabel(name string) string {
+	switch name {
+	case "cpu":
+		return "CPU"
+	case "memory":
+		return "Memory"
+	case "ephemeral-storage":
+		return "Ephemeral Storage"
+	case "pods":
+		return "Pods"
+	default:
+		return name
+	}
+}
+
+func nodeSystemSummary(value *unstructured.Unstructured) []SummaryField {
+	result := make([]SummaryField, 0, 12)
+	for _, field := range []struct {
+		path  []string
+		id    string
+		label string
+	}{
+		{path: []string{"spec", "providerID"}, id: "providerID", label: "Provider ID"},
+		{path: []string{"spec", "externalID"}, id: "externalID", label: "External ID"},
+		{path: []string{"status", "nodeInfo", "machineID"}, id: "machineID", label: "Machine ID"},
+		{path: []string{"status", "nodeInfo", "systemUUID"}, id: "systemUUID", label: "System UUID"},
+		{path: []string{"status", "nodeInfo", "bootID"}, id: "bootID", label: "Boot ID"},
+		{path: []string{"status", "nodeInfo", "kernelVersion"}, id: "kernelVersion", label: "Kernel Version"},
+		{path: []string{"status", "nodeInfo", "osImage"}, id: "osImage", label: "OS Image"},
+		{path: []string{"status", "nodeInfo", "containerRuntimeVersion"}, id: "containerRuntimeVersion", label: "Container Runtime Version"},
+		{path: []string{"status", "nodeInfo", "kubeletVersion"}, id: "kubeletVersion", label: "Kubelet Version"},
+		{path: []string{"status", "nodeInfo", "kubeProxyVersion"}, id: "kubeProxyVersion", label: "Kube-Proxy Version"},
+		{path: []string{"status", "nodeInfo", "operatingSystem"}, id: "operatingSystem", label: "Operating System"},
+		{path: []string{"status", "nodeInfo", "architecture"}, id: "architecture", label: "Architecture"},
+	} {
+		text, found, err := unstructured.NestedString(value.Object, field.path...)
+		if err != nil || !found || text == "" {
+			continue
+		}
+		result = append(result, SummaryField{
+			Section: "system", ID: field.id, Label: field.label,
+			Value: boundedSummaryText(text),
+		})
+	}
+	return result
+}
+
+func summaryMapString(value map[string]any, key string) string {
+	text, _ := value[key].(string)
+	return text
 }
 
 func podRestartSummary(object map[string]any) []SummaryField {

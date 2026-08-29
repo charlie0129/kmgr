@@ -337,9 +337,12 @@ enum ObjectDetailSummaryPresentation {
         case "annotations": 20
         case "status": 30
         case "replicas": 31
-        case "network": 32
-        case "service": 33
-        case "secret": 34
+        case "scheduling": 32
+        case "network": 33
+        case "service": 34
+        case "secret": 35
+        case "resources": 36
+        case "system": 37
         case "owners": 40
         case "selectors": 41
         case "containers": 50

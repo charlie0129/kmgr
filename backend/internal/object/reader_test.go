@@ -200,6 +200,187 @@ func TestPodSummaryIncludesMostRecentContainerRestartReason(t *testing.T) {
 	t.Fatalf("restart reason missing from summary: %#v", detail.Summary)
 }
 
+func TestNodeSummaryIncludesSchedulingNetworkResourcesAndSystemInfo(t *testing.T) {
+	t.Parallel()
+	value := kubernetesObject("v1", "Node", "nodes", "", "worker-a", "uid")
+	value.SetLabels(map[string]string{
+		"node-role.kubernetes.io/worker":        "",
+		"node-role.kubernetes.io/control-plane": "true",
+	})
+	value.Object["spec"] = map[string]any{
+		"providerID":    "aws:///us-east-1a/i-0123456789",
+		"unschedulable": true,
+		"taints": []any{
+			map[string]any{"key": "dedicated", "value": "gpu", "effect": "NoSchedule"},
+			map[string]any{"key": "maintenance", "effect": "NoExecute"},
+		},
+		"podCIDR":  "10.244.0.0/24",
+		"podCIDRs": []any{"10.244.0.0/24", "fd00:10::/64"},
+	}
+	value.Object["status"] = map[string]any{
+		"addresses": []any{
+			map[string]any{"type": "InternalIP", "address": "10.0.0.10"},
+			map[string]any{"type": "Hostname", "address": "worker-a"},
+			map[string]any{"type": "ExternalIP", "address": "203.0.113.10"},
+			map[string]any{"type": "InternalIP", "address": "10.0.0.10"},
+		},
+		"capacity": map[string]any{
+			"cpu": "8", "memory": "32Gi", "pods": "110",
+		},
+		"allocatable": map[string]any{
+			"cpu": "7800m", "memory": "30Gi", "pods": "100",
+		},
+		"nodeInfo": map[string]any{
+			"architecture":            "amd64",
+			"containerRuntimeVersion": "containerd://1.7.20",
+			"kernelVersion":           "6.8.0",
+			"kubeletVersion":          "v1.33.2",
+			"kubeProxyVersion":        "v1.33.2",
+			"operatingSystem":         "linux",
+			"osImage":                 "Ubuntu 24.04.2 LTS",
+		},
+	}
+
+	detail, err := testReader(t, value).Detail(context.Background(), Identity{
+		SessionID: "session", Version: "v1", Resource: "nodes", Name: "worker-a", UID: "uid",
+	}, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := make(map[string]SummaryField, len(detail.Summary))
+	for _, field := range detail.Summary {
+		byID[field.ID] = field
+	}
+	for id, expected := range map[string]string{
+		"roles":                   "control-plane, worker",
+		"unschedulable":           "true",
+		"taint:0":                 "dedicated=gpu:NoSchedule",
+		"taint:1":                 "maintenance:NoExecute",
+		"address:0":               "worker-a",
+		"address:1":               "10.0.0.10",
+		"address:2":               "203.0.113.10",
+		"podCIDR:0":               "10.244.0.0/24",
+		"podCIDR:1":               "fd00:10::/64",
+		"allocatable:cpu":         "7800m",
+		"capacity:cpu":            "8",
+		"allocatable:memory":      "30Gi",
+		"capacity:memory":         "32Gi",
+		"allocatable:pods":        "100",
+		"capacity:pods":           "110",
+		"providerID":              "aws:///us-east-1a/i-0123456789",
+		"architecture":            "amd64",
+		"containerRuntimeVersion": "containerd://1.7.20",
+		"kubeletVersion":          "v1.33.2",
+	} {
+		field, found := byID[id]
+		if !found || field.Value != expected {
+			t.Errorf("summary[%q] = %#v, want value %q", id, field, expected)
+		}
+	}
+	if byID["address:0"].Label != "Hostname" || byID["address:1"].Label != "Internal IP" {
+		t.Fatalf("address labels = %#v, %#v", byID["address:0"], byID["address:1"])
+	}
+	if _, found := byID["podCIDR:2"]; found {
+		t.Fatal("duplicate singular podCIDR was rendered")
+	}
+}
+
+func TestNodeSummaryUsesNodeIdentityWhenTypeMetaIsOmitted(t *testing.T) {
+	t.Parallel()
+	value := &unstructured.Unstructured{Object: map[string]any{
+		"metadata": map[string]any{
+			"name": "worker", "uid": "uid", "resourceVersion": "rv-1",
+		},
+		"spec": map[string]any{
+			"taints": []any{map[string]any{
+				"key": "dedicated", "effect": "NoSchedule",
+			}},
+		},
+	}}
+	detail, err := detailFromObject(value, Identity{
+		SessionID: "session", Version: "v1", Resource: "nodes", Name: "worker", UID: "uid",
+	}, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range detail.Summary {
+		if field.ID == "taint:0" && field.Value == "dedicated:NoSchedule" {
+			return
+		}
+	}
+	t.Fatalf("Node projection missing when TypeMeta is omitted: %#v", detail.Summary)
+}
+
+func TestNodeSummaryBoundsCollectionsAndSkipsInvalidQuantities(t *testing.T) {
+	t.Parallel()
+	value := kubernetesObject("v1", "Node", "nodes", "", "worker", "uid")
+	taints := make([]any, maximumSummaryNodeTaints+8)
+	addresses := make([]any, maximumSummaryAddresses+8)
+	cidrs := make([]any, maximumSummaryNodeCIDRs+8)
+	resources := make(map[string]any, maximumSummaryNodeResources+2)
+	for index := range taints {
+		taints[index] = map[string]any{
+			"key": fmt.Sprintf("taint-%d", index), "effect": "NoSchedule",
+		}
+	}
+	for index := range addresses {
+		addresses[index] = map[string]any{
+			"type": "InternalIP", "address": fmt.Sprintf("10.0.0.%d", index+1),
+		}
+	}
+	for index := range cidrs {
+		cidrs[index] = fmt.Sprintf("10.%d.0.0/16", index+1)
+	}
+	for index := range maximumSummaryNodeResources + 1 {
+		resources[fmt.Sprintf("example.test/resource-%d", index)] = "1"
+	}
+	resources["not-a-quantity"] = map[string]any{"unexpected": true}
+	value.Object["spec"] = map[string]any{
+		"taints":   taints,
+		"podCIDRs": cidrs,
+	}
+	value.Object["status"] = map[string]any{
+		"addresses":   addresses,
+		"allocatable": resources,
+	}
+
+	fields := summarize(value)
+	counts := make(map[string]int)
+	markers := make(map[string]bool)
+	for _, field := range fields {
+		switch {
+		case field.Section == "scheduling" && strings.HasPrefix(field.ID, "taint:"):
+			counts["taints"]++
+		case field.Section == "network" && strings.HasPrefix(field.ID, "address:"):
+			counts["addresses"]++
+		case field.Section == "network" && strings.HasPrefix(field.ID, "podCIDR:"):
+			counts["cidrs"]++
+		case field.Section == "resources" && strings.HasPrefix(field.ID, "allocatable:"):
+			counts["resources"]++
+		}
+		if strings.HasSuffix(field.ID, "Omitted") {
+			markers[field.ID] = true
+		}
+	}
+	if counts["taints"] != maximumSummaryNodeTaints || !markers["taintsOmitted"] {
+		t.Errorf("bounded taints = %d/%t", counts["taints"], markers["taintsOmitted"])
+	}
+	if counts["addresses"] != maximumSummaryAddresses || !markers["addressesOmitted"] {
+		t.Errorf("bounded addresses = %d/%t", counts["addresses"], markers["addressesOmitted"])
+	}
+	if counts["cidrs"] != maximumSummaryNodeCIDRs || !markers["podCIDRsOmitted"] {
+		t.Errorf("bounded pod CIDRs = %d/%t", counts["cidrs"], markers["podCIDRsOmitted"])
+	}
+	if counts["resources"] != maximumSummaryNodeResources || !markers["resourcesOmitted"] {
+		t.Errorf("bounded resources = %d/%t", counts["resources"], markers["resourcesOmitted"])
+	}
+	for _, field := range fields {
+		if strings.Contains(field.ID, "not-a-quantity") {
+			t.Fatalf("invalid resource was included: %#v", field)
+		}
+	}
+}
+
 func TestServiceSummaryIncludesDeclaredAndTargetPorts(t *testing.T) {
 	t.Parallel()
 	value := kubernetesObject("v1", "Service", "services", "ns", "web", "uid")

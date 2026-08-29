@@ -44,6 +44,34 @@ struct ObjectSummaryPresentationTests {
         ])
     }
 
+    @Test("Node inspection sections stay ordered with conditions last")
+    func nodeInspectionSectionPriority() {
+        let fields = [
+            ObjectSummaryField(sectionID: "conditions", fieldID: "ready", label: "Ready", displayText: "True"),
+            ObjectSummaryField(sectionID: "resources", fieldID: "allocatable:cpu", label: "Allocatable CPU", displayText: "4"),
+            ObjectSummaryField(sectionID: "system", fieldID: "kubeletVersion", label: "Kubelet Version", displayText: "v1.33.2"),
+            ObjectSummaryField(sectionID: "network", fieldID: "address:0", label: "Internal IP", displayText: "10.0.0.10"),
+            ObjectSummaryField(sectionID: "scheduling", fieldID: "taint:0", label: "Taint", displayText: "dedicated=gpu:NoSchedule"),
+        ]
+        let sections = ObjectDetailSummaryPresentation.sections(for: ObjectDetail(
+            identity: ResourceIdentity(
+                clusterSessionID: "session",
+                group: "",
+                version: "v1",
+                resource: "nodes",
+                namespace: "",
+                name: "worker-a",
+                uid: ResourceUID("node-uid")
+            ),
+            resourceVersion: "rv",
+            summaryFields: fields
+        ))
+
+        #expect(sections.map(\.id) == [
+            "labels", "annotations", "scheduling", "network", "resources", "system", "conditions",
+        ])
+    }
+
     @Test("Summary bounds metadata values and entry counts")
     func boundedSummaryMetadata() throws {
         let labels = Dictionary(uniqueKeysWithValues:
