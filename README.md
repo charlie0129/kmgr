@@ -117,7 +117,9 @@ live in one app-wide Port Forwards window.
   include classes, load-balancer addresses, routes, and TLS; Services include
   traffic/IP policy and per-port details. Storage, policy/RBAC, Job/CronJob,
   ConfigMap/Secret metadata, and Event objects expose similarly curated
-  operational fields. Collections are bounded and deterministic, and Summary
+  operational fields. Node Details include a dedicated Taints section with
+  each taint's key, value, and effect. Collections are bounded and
+  deterministic, and Summary
   never includes Secret values, environment values, commands, or image
   references; use the explicit Data/YAML surfaces for complete object content.
   Labels and Annotations remain visible as separate sections even when empty;

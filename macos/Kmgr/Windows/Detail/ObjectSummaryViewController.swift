@@ -339,18 +339,19 @@ enum ObjectDetailSummaryPresentation {
         case "replicas": 31
         case "rollout": 32
         case "scheduling": 33
-        case "network": 34
-        case "routing": 35
-        case "service": 36
-        case "resources": 37
-        case "storage": 38
-        case "security": 39
-        case "policy": 40
-        case "job": 41
-        case "secret": 42
-        case "data": 43
-        case "system": 44
-        case "event": 45
+        case "taints": 34
+        case "network": 35
+        case "routing": 36
+        case "service": 37
+        case "resources": 38
+        case "storage": 39
+        case "security": 40
+        case "policy": 41
+        case "job": 42
+        case "secret": 43
+        case "data": 44
+        case "system": 45
+        case "event": 46
         case "owners": 50
         case "selectors": 51
         case "containers": 60

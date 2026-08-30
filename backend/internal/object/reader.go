@@ -845,6 +845,7 @@ func nodeSummary(value *unstructured.Unstructured) []SummaryField {
 	}
 	result := make([]SummaryField, 0, 24)
 	result = append(result, nodeSchedulingSummary(value)...)
+	result = append(result, nodeTaintSummary(value)...)
 	result = append(result, nodeNetworkSummary(value)...)
 	result = append(result, nodeResourceSummary(value)...)
 	result = append(result, nodeSystemSummary(value)...)
@@ -881,11 +882,15 @@ func nodeSchedulingSummary(value *unstructured.Unstructured) []SummaryField {
 			Value: strconv.FormatBool(unschedulable),
 		})
 	}
+	return result
+}
 
+func nodeTaintSummary(value *unstructured.Unstructured) []SummaryField {
+	result := make([]SummaryField, 0, 4)
 	taints, found, err := unstructured.NestedSlice(value.Object, "spec", "taints")
 	if err != nil || !found || len(taints) == 0 {
 		result = append(result, SummaryField{
-			Section: "scheduling", ID: "taints", Label: "Taints", Value: "None",
+			Section: "taints", ID: "taints", Label: "Taints", Value: "None",
 		})
 		return result
 	}
@@ -911,21 +916,21 @@ func nodeSchedulingSummary(value *unstructured.Unstructured) []SummaryField {
 			continue
 		}
 		result = append(result, SummaryField{
-			Section: "scheduling", ID: fmt.Sprintf("taint:%d", index),
+			Section: "taints", ID: fmt.Sprintf("taint:%d", index),
 			Label: "Taint", Value: text,
 		})
 		displayedTaint = true
 	}
 	if omitted > 0 {
 		result = append(result, omittedSummaryField(
-			"scheduling", "taintsOmitted", "Taints", omitted,
+			"taints", "taintsOmitted", "Taints", omitted,
 		))
 	}
 	// A malformed list can contain no displayable entries. Keep the section
 	// explicit in that case so Details does not imply that taints were absent.
 	if !displayedTaint {
 		result = append(result, SummaryField{
-			Section: "scheduling", ID: "taints", Label: "Taints", Value: "None",
+			Section: "taints", ID: "taints", Label: "Taints", Value: "None",
 		})
 	}
 	return result

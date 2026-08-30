@@ -277,6 +277,9 @@ func TestNodeSummaryIncludesSchedulingNetworkResourcesAndSystemInfo(t *testing.T
 			t.Errorf("summary[%q] = %#v, want value %q", id, field, expected)
 		}
 	}
+	if detailField := byID["taint:0"]; detailField.Section != "taints" {
+		t.Fatalf("taint section = %q, want taints", detailField.Section)
+	}
 	if byID["address:0"].Label != "Hostname" || byID["address:1"].Label != "Internal IP" {
 		t.Fatalf("address labels = %#v, %#v", byID["address:0"], byID["address:1"])
 	}
@@ -342,6 +345,19 @@ func TestNodeSummaryUsesNodeIdentityWhenTypeMetaIsOmitted(t *testing.T) {
 	t.Fatalf("Node projection missing when TypeMeta is omitted: %#v", detail.Summary)
 }
 
+func TestNodeSummaryKeepsTaintsSectionVisibleWhenEmpty(t *testing.T) {
+	t.Parallel()
+	value := kubernetesObject("v1", "Node", "nodes", "", "worker", "uid")
+	fields := summaryFieldsByID(summarize(value))
+	field, found := fields["taints"]
+	if !found {
+		t.Fatalf("empty Node omitted Taints summary: %#v", fields)
+	}
+	if field.Section != "taints" || field.Label != "Taints" || field.Value != "None" {
+		t.Fatalf("empty Taints summary = %#v", field)
+	}
+}
+
 func TestNodeSummaryBoundsCollectionsAndSkipsInvalidQuantities(t *testing.T) {
 	t.Parallel()
 	value := kubernetesObject("v1", "Node", "nodes", "", "worker", "uid")
@@ -380,7 +396,7 @@ func TestNodeSummaryBoundsCollectionsAndSkipsInvalidQuantities(t *testing.T) {
 	markers := make(map[string]bool)
 	for _, field := range fields {
 		switch {
-		case field.Section == "scheduling" && strings.HasPrefix(field.ID, "taint:"):
+		case field.Section == "taints" && strings.HasPrefix(field.ID, "taint:"):
 			counts["taints"]++
 		case field.Section == "network" && strings.HasPrefix(field.ID, "address:"):
 			counts["addresses"]++

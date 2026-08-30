@@ -51,7 +51,8 @@ struct ObjectSummaryPresentationTests {
             ObjectSummaryField(sectionID: "resources", fieldID: "allocatable:cpu", label: "Allocatable CPU", displayText: "4"),
             ObjectSummaryField(sectionID: "system", fieldID: "kubeletVersion", label: "Kubelet Version", displayText: "v1.33.2"),
             ObjectSummaryField(sectionID: "network", fieldID: "address:0", label: "Internal IP", displayText: "10.0.0.10"),
-            ObjectSummaryField(sectionID: "scheduling", fieldID: "taint:0", label: "Taint", displayText: "dedicated=gpu:NoSchedule"),
+            ObjectSummaryField(sectionID: "scheduling", fieldID: "roles", label: "Roles", displayText: "worker"),
+            ObjectSummaryField(sectionID: "taints", fieldID: "taint:0", label: "Taint", displayText: "dedicated=gpu:NoSchedule"),
         ]
         let sections = ObjectDetailSummaryPresentation.sections(for: ObjectDetail(
             identity: ResourceIdentity(
@@ -68,8 +69,11 @@ struct ObjectSummaryPresentationTests {
         ))
 
         #expect(sections.map(\.id) == [
-            "labels", "annotations", "scheduling", "network", "resources", "system", "conditions",
+            "labels", "annotations", "scheduling", "taints", "network", "resources", "system", "conditions",
         ])
+        let taints = sections.first { $0.id == "taints" }
+        #expect(taints?.title == "Taints")
+        #expect(taints?.rows.first?.displayText == "dedicated=gpu:NoSchedule")
     }
 
     @Test("Resource inspection sections keep rollout, routing, storage, and policy context ordered")
