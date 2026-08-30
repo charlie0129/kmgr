@@ -26,6 +26,7 @@
 
 - Prefer keyboard-first workflows. Primary actions should be reachable without a mouse, with predictable focus behavior and native keyboard shortcuts where appropriate.
 - Treat dark mode, light mode, accessibility labels, and standard platform behavior as part of the feature rather than optional polish.
+- If you are adding a new utility window (such as current Details, YAML viewer, PortForwards), ask the user if he want the window size and location to be persisted.
 
 ## Security trade-offs
 
