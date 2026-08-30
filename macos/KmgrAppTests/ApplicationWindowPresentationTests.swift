@@ -14,7 +14,12 @@ struct ApplicationWindowPresentationTests {
         let defaults = try #require(TestUserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
         let store = AppPreferencesStore(defaults: defaults)
-        let settings = SettingsWindowController(preferencesStore: store)
+        let settings = SettingsWindowController(
+            preferencesStore: store,
+            utilityWindowFrameCoordinator: UtilityWindowFrameCoordinator(
+                store: UtilityWindowFrameStore(defaults: defaults)
+            )
+        )
         let root = try #require(settings.window?.contentView)
         let restore = try #require(button(
             withAccessibilityIdentifier: "settings.restoreOpenClusterWindows",
@@ -32,43 +37,6 @@ struct ApplicationWindowPresentationTests {
         #expect(!AppPreferencesStore(defaults: defaults).current.restoreOpenClusterWindows)
     }
 
-    @Test("terminal size defaults to 120 by 35 and persists from Settings")
-    func terminalSizeSettings() throws {
-        let suite = "kmgr-app-terminal-settings-\(UUID().uuidString)"
-        let defaults = try #require(TestUserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
-        let store = AppPreferencesStore(defaults: defaults)
-        let settings = SettingsWindowController(
-            preferencesStore: store,
-            frameAutosaveName: "Settings-terminal-\(UUID().uuidString)"
-        )
-        let root = try #require(settings.window?.contentView)
-        let fields = descendants(of: root).compactMap { $0 as? NSTextField }
-        let columns = try #require(fields.first {
-            $0.accessibilityIdentifier() == "settings.terminal.initialColumns"
-        })
-        let rows = try #require(fields.first {
-            $0.accessibilityIdentifier() == "settings.terminal.initialRows"
-        })
-
-        #expect(columns.integerValue == 120)
-        #expect(rows.integerValue == 35)
-        #expect(fields.contains {
-            $0.stringValue.contains("new Pod terminals and Node shells")
-        })
-
-        columns.stringValue = "132"
-        rows.stringValue = "40"
-        try #require(button(titled: "Apply", beneath: root)).performClick(nil)
-
-        #expect(store.current.terminal == TerminalPreferences(
-            initialColumns: 132,
-            initialRows: 40
-        ))
-        #expect(AppPreferencesStore(defaults: defaults).current.terminal ==
-            store.current.terminal)
-    }
-
     @Test("Advanced Performance exposes cache and Kubernetes engine tunables")
     func advancedPerformanceSettings() throws {
         let suite = "kmgr-app-performance-settings-\(UUID().uuidString)"
@@ -77,7 +45,9 @@ struct ApplicationWindowPresentationTests {
         let store = AppPreferencesStore(defaults: defaults)
         let settings = SettingsWindowController(
             preferencesStore: store,
-            frameAutosaveName: "Settings-performance-\(UUID().uuidString)"
+            utilityWindowFrameCoordinator: UtilityWindowFrameCoordinator(
+                store: UtilityWindowFrameStore(defaults: defaults)
+            )
         )
         let root = try #require(settings.window?.contentView)
         let fields = descendants(of: root).compactMap { $0 as? NSTextField }
@@ -188,7 +158,9 @@ struct ApplicationWindowPresentationTests {
         let store = AppPreferencesStore(defaults: defaults)
         let settings = SettingsWindowController(
             preferencesStore: store,
-            frameAutosaveName: "Settings-display-\(UUID().uuidString)"
+            utilityWindowFrameCoordinator: UtilityWindowFrameCoordinator(
+                store: UtilityWindowFrameStore(defaults: defaults)
+            )
         )
         let root = try #require(settings.window?.contentView)
         let fields = descendants(of: root).compactMap { $0 as? NSTextField }
@@ -229,45 +201,56 @@ struct ApplicationWindowPresentationTests {
         #expect(store.current.resourceOperations.defaultDeleteConcurrency == 12)
     }
 
-    @Test("Settings preserves its frame when reopened and when restored")
-    func settingsFrameAutosaveIsNotOverriddenByCentering() throws {
-        let preferencesSuite = "kmgr-app-settings-frame-\(UUID().uuidString)"
-        let defaults = try #require(TestUserDefaults(suiteName: preferencesSuite))
-        defer { defaults.removePersistentDomain(forName: preferencesSuite) }
-        let frameName = "Settings-test-\(UUID().uuidString)"
-        NSWindow.removeFrame(usingName: frameName)
-        defer { NSWindow.removeFrame(usingName: frameName) }
-
+    @Test("Settings persists its geometry when reopened and recreated")
+    func settingsFramePersistence() async throws {
+        let suite = "kmgr-app-settings-utility-frame-\(UUID().uuidString)"
+        let defaults = try #require(TestUserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let utilityStore = UtilityWindowFrameStore(
+            defaults: defaults,
+            persistenceDelay: .seconds(60)
+        )
+        let visibleFrames = [NSRect(x: 0, y: 0, width: 1_600, height: 1_000)]
+        let frameCoordinator = UtilityWindowFrameCoordinator(
+            store: utilityStore,
+            visibleFramesProvider: { visibleFrames },
+            initialProtectionDelay: .milliseconds(1),
+            initialProtectionSettleDelay: .milliseconds(1)
+        )
         let first = SettingsWindowController(
             preferencesStore: AppPreferencesStore(defaults: defaults),
-            frameAutosaveName: frameName
+            utilityWindowFrameCoordinator: frameCoordinator
         )
         let firstWindow = try #require(first.window)
         first.showWindow(nil)
-        let movedFrame = firstWindow.frame.offsetBy(dx: 37, dy: -29)
-        firstWindow.setFrame(movedFrame, display: false)
-        firstWindow.orderOut(nil)
+        try await Task.sleep(for: .milliseconds(100))
 
-        first.showWindow(nil)
-        #expect(firstWindow.frame == movedFrame)
-
-        firstWindow.saveFrame(usingName: frameName)
-        firstWindow.setFrameAutosaveName("")
-        first.close()
-
-        let restored = SettingsWindowController(
-            preferencesStore: AppPreferencesStore(defaults: defaults),
-            frameAutosaveName: frameName
+        let requested = NSRect(x: 140, y: 190, width: 1_000, height: 700)
+        firstWindow.setFrame(requested, display: false)
+        NotificationCenter.default.post(
+            name: NSWindow.didMoveNotification,
+            object: firstWindow
         )
-        let restoredWindow = try #require(restored.window)
-        let frameBeforeFirstPresentation = restoredWindow.frame
-        restored.showWindow(nil)
-        defer {
-            restoredWindow.setFrameAutosaveName("")
-            restored.close()
-        }
+        let saved = try #require(WorkspaceWindowFrame(appKitFrame: firstWindow.frame))
+        #expect(utilityStore.frame(for: .settings) == saved)
 
-        #expect(restoredWindow.frame == frameBeforeFirstPresentation)
+        firstWindow.orderOut(nil)
+        first.showWindow(nil)
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(firstWindow.frame == saved.appKitFrame)
+
+        first.close()
+        let second = SettingsWindowController(
+            preferencesStore: AppPreferencesStore(defaults: defaults),
+            utilityWindowFrameCoordinator: frameCoordinator
+        )
+        second.showWindow(nil)
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(second.window?.frame == saved.appKitFrame)
+
+        second.close()
+        frameCoordinator.prepareForTermination()
+        #expect(frameCoordinator.flushPendingSave())
     }
 
     @Test("last workspace always returns to Cluster Manager")

@@ -36,6 +36,7 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private let restorationStore: WorkspaceRestorationStore
     private let workspaceFrameBookmarkStore: WorkspaceFrameBookmarkStore
     private let workspaceWindowSizeStore: ClusterWorkspaceWindowSizeStore
+    private let utilityWindowFrameCoordinator: UtilityWindowFrameCoordinator
     private var pendingRestorationNotice: ClusterManagerInitialNotice?
     private var pendingConfigurationNotices: [ClusterManagerInitialNotice] = []
     private var configurationPreflightTask: Task<Void, Never>?
@@ -86,13 +87,18 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         self.restorationStore = restorationStore
         self.workspaceFrameBookmarkStore = WorkspaceFrameBookmarkStore()
         self.workspaceWindowSizeStore = ClusterWorkspaceWindowSizeStore()
+        let utilityWindowFrames = UtilityWindowFrameCoordinator.shared
+        self.utilityWindowFrameCoordinator = utilityWindowFrames
         self.pendingRestorationNotice = restorationStore.loadIssue.map {
             ClusterManagerInitialNotice(
                 title: "Workspace restoration skipped",
                 message: $0.message
             )
         }
-        let settings = SettingsWindowController(preferencesStore: preferences)
+        let settings = SettingsWindowController(
+            preferencesStore: preferences,
+            utilityWindowFrameCoordinator: utilityWindowFrames
+        )
         self.settingsWindowController = settings
         let clusterConnectionTimeout = Duration.seconds(Int64(
             preferences.current.advancedPerformance.clusterConnectionTimeoutSeconds
@@ -149,7 +155,8 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         self.portForwardCoordinator = portForwards
         self.portForwardsWindowController = PortForwardsWindowController(
             coordinator: portForwards,
-            tableLayoutStore: tableLayoutStore
+            tableLayoutStore: tableLayoutStore,
+            utilityWindowFrameCoordinator: utilityWindowFrames
         )
         self.contextualShortcutsCoordinator = ContextualShortcutsCoordinator(
             application: .shared
@@ -477,6 +484,12 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         for controller in terminalWindowControllers.values {
             controller.prepareForTermination()
         }
+        // Stop/close callbacks above can still capture a utility frame (for
+        // example, operation history is closed by its workspace controller).
+        // Capture after those callbacks have had their final synchronous turn,
+        // then flush the coalesced document before asynchronous shutdown.
+        utilityWindowFrameCoordinator.prepareForTermination()
+        _ = utilityWindowFrameCoordinator.flushPendingSave()
         terminationTask = Task {
             [engineSupervisor, portForwardCoordinator, columnConfigurationCoordinator] in
             await columnConfigurationCoordinator.flushPendingLayoutSaves()
@@ -493,6 +506,8 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             checkpointWorkspaceStateForTermination()
         }
         _ = tableLayoutStore.flushPendingSave()
+        utilityWindowFrameCoordinator.prepareForTermination()
+        _ = utilityWindowFrameCoordinator.flushPendingSave()
     }
 
     func applicationShouldHandleReopen(
@@ -641,6 +656,7 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             execProvider: execProvider,
             portForwards: portForwardCoordinator,
             tableLayoutStore: tableLayoutStore,
+            utilityWindowFrameCoordinator: utilityWindowFrameCoordinator,
             columnsConfigurationPath: engineColumnsConfigurationPath,
             columnConfigurationCoordinator: columnConfigurationCoordinator,
             resourceViewportTiming: .production(
@@ -662,9 +678,6 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             },
             nodeShellPreferences: { [weak self] in
                 self?.preferencesStore.current.nodeShell ?? NodeShellPreferences()
-            },
-            terminalPreferences: { [weak self] in
-                self?.preferencesStore.current.terminal ?? TerminalPreferences()
             },
             saveNodeShellPreferences: { [weak self] nodeShell in
                 guard let self else { return }
@@ -1042,7 +1055,9 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                 store: engineSupervisor.diagnosticsStore,
                 displayConfiguration: LogDisplayConfiguration(
                     preferences: preferencesStore.current.logs
-                )
+                ),
+                utilityWindowFrameCoordinator: utilityWindowFrameCoordinator,
+                preferredWindowFrame: activeWorkspaceController?.window?.frame
             )
             engineDiagnosticsWindowController = controller
             controller.onClose = { [weak self, weak controller] in

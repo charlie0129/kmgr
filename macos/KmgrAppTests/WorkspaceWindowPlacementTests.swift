@@ -26,6 +26,20 @@ struct WorkspaceWindowPlacementTests {
         #expect(WorkspaceWindowPlacement.isReachable(saved, in: screens))
     }
 
+    @Test("an unknown display list preserves a usable saved frame")
+    func unknownDisplaysPreserveSavedFrame() {
+        let saved = NSRect(x: -840, y: 120, width: 840, height: 620)
+        let resolved = WorkspaceWindowPlacement.resolve(
+            defaultFrame: .zero,
+            savedFrame: saved,
+            minimumSize: minimumSize,
+            fallbackSize: NSSize(width: 900, height: 700),
+            visibleFrames: []
+        )
+
+        #expect(resolved == saved)
+    }
+
     @Test("an off-screen saved frame uses a visible bounded fallback")
     func offscreenSavedFrameFallsBack() {
         let offscreen = NSRect(x: 20_000, y: 20_000, width: 840, height: 620)

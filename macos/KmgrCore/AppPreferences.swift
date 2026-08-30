@@ -158,48 +158,6 @@ public struct NodeShellPreferences: Codable, Hashable, Sendable {
     }
 }
 
-public struct TerminalPreferences: Codable, Hashable, Sendable {
-    public static let initialColumnsRange = 80...300
-    public static let initialRowsRange = 20...100
-
-    public var initialColumns: Int
-    public var initialRows: Int
-
-    public init(
-        initialColumns: Int = Int(TerminalSize.defaultShellWindow.columns),
-        initialRows: Int = Int(TerminalSize.defaultShellWindow.rows)
-    ) {
-        self.initialColumns = initialColumns
-        self.initialRows = initialRows
-    }
-
-    public var initialSize: TerminalSize {
-        precondition(Self.initialColumnsRange.contains(initialColumns))
-        precondition(Self.initialRowsRange.contains(initialRows))
-        return TerminalSize(
-            columns: UInt32(initialColumns),
-            rows: UInt32(initialRows)
-        )
-    }
-
-    fileprivate func validationIssues() -> [AppPreferenceIssue] {
-        var issues: [AppPreferenceIssue] = []
-        if !Self.initialColumnsRange.contains(initialColumns) {
-            issues.append(AppPreferenceIssue(
-                field: "terminal.initialColumns",
-                message: "Initial terminal columns must be between \(Self.initialColumnsRange.lowerBound) and \(Self.initialColumnsRange.upperBound)."
-            ))
-        }
-        if !Self.initialRowsRange.contains(initialRows) {
-            issues.append(AppPreferenceIssue(
-                field: "terminal.initialRows",
-                message: "Initial terminal rows must be between \(Self.initialRowsRange.lowerBound) and \(Self.initialRowsRange.upperBound)."
-            ))
-        }
-        return issues
-    }
-}
-
 public struct ConfirmationPreferences: Codable, Hashable, Sendable {
     public var confirmWorkloadRestart: Bool
     public var confirmScaling: Bool
@@ -507,7 +465,8 @@ public struct AdvancedPerformancePreferences: Codable, Hashable, Sendable {
 }
 
 public struct AppPreferences: Codable, Hashable, Sendable {
-    public static let apiVersion = "kmgr.preferences/v14"
+    public static let apiVersion = "kmgr.preferences/v15"
+    static let previousAPIVersion = "kmgr.preferences/v14"
 
     public var appearance: AppearancePreference
     public var logs: LogDisplayPreferences
@@ -519,7 +478,6 @@ public struct AppPreferences: Codable, Hashable, Sendable {
     public var columnsConfigurationPath: String
     public var diagnostics: DiagnosticsPreferences
     public var nodeShell: NodeShellPreferences
-    public var terminal: TerminalPreferences
     public var advancedPerformance: AdvancedPerformancePreferences
 
     public init(
@@ -533,7 +491,6 @@ public struct AppPreferences: Codable, Hashable, Sendable {
         columnsConfigurationPath: String = AppPreferences.defaultColumnsConfigurationPath,
         diagnostics: DiagnosticsPreferences = DiagnosticsPreferences(),
         nodeShell: NodeShellPreferences = NodeShellPreferences(),
-        terminal: TerminalPreferences = TerminalPreferences(),
         advancedPerformance: AdvancedPerformancePreferences = AdvancedPerformancePreferences()
     ) {
         self.appearance = appearance
@@ -546,7 +503,6 @@ public struct AppPreferences: Codable, Hashable, Sendable {
         self.columnsConfigurationPath = columnsConfigurationPath
         self.diagnostics = diagnostics
         self.nodeShell = nodeShell
-        self.terminal = terminal
         self.advancedPerformance = advancedPerformance
     }
 
@@ -607,7 +563,6 @@ public struct AppPreferences: Codable, Hashable, Sendable {
             ))
         }
         issues.append(contentsOf: nodeShell.validationIssues())
-        issues.append(contentsOf: terminal.validationIssues())
         issues.append(contentsOf: resourceOperations.validationIssues())
         if !(5...300).contains(metricsRefreshSeconds) {
             issues.append(AppPreferenceIssue(
@@ -648,7 +603,6 @@ public enum AppPreferenceChange: CaseIterable, Hashable, Sendable {
     case columnsConfigurationPath
     case operationHistory
     case nodeShell
-    case terminal
     case nodeShellStartupTimeout
     case advancedPerformance
     case viewportOverscan
@@ -662,7 +616,7 @@ public enum AppPreferenceChange: CaseIterable, Hashable, Sendable {
     public var activation: Activation {
         switch self {
         case .appearance, .logDisplay, .confirmations, .resourceOperations,
-            .operationHistory, .nodeShell, .terminal:
+            .operationHistory, .nodeShell:
             .immediate
         case .defaultNamespace, .viewportOverscan:
             .newWorkspace
@@ -684,7 +638,6 @@ public enum AppPreferenceChange: CaseIterable, Hashable, Sendable {
         case .columnsConfigurationPath: "Programmable columns path"
         case .operationHistory: "Completed operation history"
         case .nodeShell: "Node shell defaults"
-        case .terminal: "Initial terminal size"
         case .nodeShellStartupTimeout: "Node shell startup timeout"
         case .advancedPerformance: "Advanced performance configuration"
         case .viewportOverscan: "List viewport overscan"
@@ -726,9 +679,6 @@ public struct AppPreferencesDelta: Hashable, Sendable {
                 updated.nodeShell.clusterImagesByContextReference
         {
             changes.insert(.nodeShell)
-        }
-        if previous.terminal != updated.terminal {
-            changes.insert(.terminal)
         }
         if previous.nodeShell.startupTimeoutSeconds !=
             updated.nodeShell.startupTimeoutSeconds
@@ -876,7 +826,6 @@ public final class AppPreferencesStore {
             ))
             return
         }
-
         guard let root = raw as? [String: Any] else {
             rejectSavedPreferences(AppPreferencesLoadIssue(
                 reason: .invalidData,
@@ -911,12 +860,23 @@ public final class AppPreferencesStore {
             ))
             return
         }
-        guard rawPreferences is [String: Any] else {
+        guard var preferencesObject = rawPreferences as? [String: Any] else {
             rejectSavedPreferences(AppPreferencesLoadIssue(
                 reason: .invalidData,
                 message: "Saved settings preferences must be an object; conservative defaults are in use."
             ))
             return
+        }
+
+        // v14 stored terminal columns and rows in the preferences document.
+        // Terminal geometry is now owned by the utility-window frame store;
+        // remove only that retired field before the strict current-schema
+        // compatibility walk. Other unknown or removed fields still reset the
+        // document conservatively.
+        var compatibilityRoot = root
+        if version == AppPreferences.previousAPIVersion {
+            preferencesObject.removeValue(forKey: "terminal")
+            compatibilityRoot["preferences"] = preferencesObject
         }
 
         let template: Any
@@ -944,7 +904,7 @@ public final class AppPreferencesStore {
         do {
             var path = ""
             normalized = try Self.normalize(
-                root,
+                compatibilityRoot,
                 against: template,
                 path: &path,
                 didFillMissingFields: &didFillMissingFields

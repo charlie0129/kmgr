@@ -18,7 +18,8 @@ final class ExecConfigurationWindowController: NSWindowController,
     private let preferredContainer: String?
     private let objectDetailProvider: any ObjectDetailProviding
     private let execProvider: any ExecSessionProviding
-    private let initialSize: TerminalSize
+    private let utilityWindowFrameCoordinator: UtilityWindowFrameCoordinator
+    private let preferredWindowFrame: NSRect?
 
     private let containerButton = NSPopUpButton(frame: .zero, pullsDown: false)
     private let modeControl = NSSegmentedControl(
@@ -49,14 +50,17 @@ final class ExecConfigurationWindowController: NSWindowController,
         preferredContainer: String? = nil,
         objectDetailProvider: any ObjectDetailProviding,
         execProvider: any ExecSessionProviding,
-        initialSize: TerminalSize = .defaultShellWindow
+        utilityWindowFrameCoordinator: UtilityWindowFrameCoordinator? = nil,
+        preferredWindowFrame: NSRect? = nil
     ) {
         self.session = session
         self.podIdentity = podIdentity
         self.preferredContainer = preferredContainer
         self.objectDetailProvider = objectDetailProvider
         self.execProvider = execProvider
-        self.initialSize = initialSize
+        self.utilityWindowFrameCoordinator = utilityWindowFrameCoordinator
+            ?? UtilityWindowFrameCoordinator.shared
+        self.preferredWindowFrame = preferredWindowFrame
 
         let panel = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: 640, height: 520),
@@ -384,13 +388,14 @@ final class ExecConfigurationWindowController: NSWindowController,
             )),
             contextName: session.contextName,
             clusterName: session.clusterName,
-            command: command,
-            initialSize: initialSize
+            command: command
         )
         let controller = TerminalWindowController(
             request: request,
             provider: execProvider,
-            fallbackShellCommand: probeFallback ? ["/bin/sh"] : nil
+            fallbackShellCommand: probeFallback ? ["/bin/sh"] : nil,
+            utilityWindowFrameCoordinator: utilityWindowFrameCoordinator,
+            preferredWindowFrame: preferredWindowFrame
         )
         onOpenWindow?(controller)
         dismiss(returnCode: .OK)

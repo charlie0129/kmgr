@@ -1,6 +1,33 @@
 import AppKit
 import KmgrCore
 
+extension WorkspaceWindowFrame {
+    init?(appKitFrame: NSRect) {
+        self.init(
+            x: Double(appKitFrame.minX),
+            y: Double(appKitFrame.minY),
+            width: Double(appKitFrame.width),
+            height: Double(appKitFrame.height)
+        )
+        guard isValid else { return nil }
+    }
+
+    var appKitFrame: NSRect? {
+        guard isValid else { return nil }
+        let frame = NSRect(
+            x: CGFloat(x),
+            y: CGFloat(y),
+            width: CGFloat(width),
+            height: CGFloat(height)
+        )
+        guard frame.minX.isFinite, frame.minY.isFinite,
+            frame.width.isFinite, frame.height.isFinite,
+            frame.width > 0, frame.height > 0
+        else { return nil }
+        return frame
+    }
+}
+
 /// The frame source is kept explicit at the application boundary. A restored
 /// record reads its own raw frame; a fresh context may read the shared
 /// exact-context bookmark; an unseen context starts from the global size.
@@ -53,10 +80,16 @@ enum WorkspaceWindowPlacement {
             isUsableFrame(savedFrame),
             savedFrame.width >= minimumSize.width,
             savedFrame.height >= minimumSize.height,
-            isReachable(savedFrame, in: screens)
+            (screens.isEmpty || isReachable(savedFrame, in: screens))
         {
             if !avoidOccupiedSavedFrame || !overlapsAny(savedFrame, occupied) {
                 return savedFrame
+            }
+            if screens.isEmpty {
+                return firstUnoccupiedUnboundedFrame(
+                    from: savedFrame,
+                    occupiedFrames: occupied
+                ) ?? savedFrame
             }
             if let adjacent = firstUnoccupiedAdjacentFrame(
                 from: savedFrame,
@@ -74,7 +107,7 @@ enum WorkspaceWindowPlacement {
             }
         }
 
-        return fallbackFrame(
+        let fallback = fallbackFrame(
             defaultFrame: defaultFrame,
             minimumSize: minimumSize,
             requestedSize: fallbackSize,
@@ -82,6 +115,13 @@ enum WorkspaceWindowPlacement {
             occupiedFrames: occupied,
             preferredScreen: preferredScreen
         )
+        guard screens.isEmpty, overlapsAny(fallback, occupied) else {
+            return fallback
+        }
+        return firstUnoccupiedUnboundedFrame(
+            from: fallback,
+            occupiedFrames: occupied
+        ) ?? fallback
     }
 
     static func isReachable(
@@ -186,6 +226,43 @@ enum WorkspaceWindowPlacement {
             return candidate
         }
         return nil
+    }
+
+    /// Display topology can be temporarily unavailable while the app is
+    /// starting. Preserve the saved size and use an unbounded displacement if
+    /// a same-kind sibling already occupies that frame; screen clamping can
+    /// be applied once topology is known.
+    private static func firstUnoccupiedUnboundedFrame(
+        from frame: NSRect,
+        occupiedFrames: [NSRect]
+    ) -> NSRect? {
+        let candidates = [
+            frame.offsetBy(dx: frame.width + adjacentGap, dy: 0),
+            frame.offsetBy(dx: -frame.width - adjacentGap, dy: 0),
+            frame.offsetBy(dx: 0, dy: frame.height + adjacentGap),
+            frame.offsetBy(dx: 0, dy: -frame.height - adjacentGap),
+        ]
+        var firstNonStacked: NSRect?
+        for candidate in candidates {
+            guard isUsableFrame(candidate) else { continue }
+            if !isExactStack(candidate, with: occupiedFrames) {
+                firstNonStacked = firstNonStacked ?? candidate
+            }
+            if !overlapsAny(candidate, occupiedFrames) {
+                return candidate
+            }
+        }
+        for offset in cascadeOffsets().dropFirst() {
+            let candidate = frame.offsetBy(dx: offset.x, dy: offset.y)
+            guard isUsableFrame(candidate) else { continue }
+            if !isExactStack(candidate, with: occupiedFrames) {
+                firstNonStacked = firstNonStacked ?? candidate
+            }
+            if !overlapsAny(candidate, occupiedFrames) {
+                return candidate
+            }
+        }
+        return firstNonStacked
     }
 
     private static func firstCascadedFrame(

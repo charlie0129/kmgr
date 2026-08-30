@@ -7,6 +7,8 @@ final class PortForwardsWindowController: NSWindowController, NSWindowDelegate,
 {
     private let coordinator: PortForwardCoordinator
     private let tableLayoutStore: TableLayoutStore
+    private let utilityWindowFrameCoordinator: UtilityWindowFrameCoordinator
+    private var utilityWindowFrameBinding: UtilityWindowFrameBinding?
     private let tableView = NSTableView()
     private let statusLabel = NSTextField(labelWithString: "No port-forwards")
     private let stopButton = NSButton(title: "Stop", target: nil, action: nil)
@@ -20,10 +22,13 @@ final class PortForwardsWindowController: NSWindowController, NSWindowDelegate,
 
     init(
         coordinator: PortForwardCoordinator,
-        tableLayoutStore: TableLayoutStore? = nil
+        tableLayoutStore: TableLayoutStore? = nil,
+        utilityWindowFrameCoordinator: UtilityWindowFrameCoordinator? = nil
     ) {
         self.coordinator = coordinator
         self.tableLayoutStore = tableLayoutStore ?? TableLayoutStore()
+        self.utilityWindowFrameCoordinator = utilityWindowFrameCoordinator
+            ?? UtilityWindowFrameCoordinator.shared
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1_180, height: 520),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -34,11 +39,16 @@ final class PortForwardsWindowController: NSWindowController, NSWindowDelegate,
         window.minSize = NSSize(width: 780, height: 300)
         window.tabbingMode = .disallowed
         window.isReleasedWhenClosed = false
-        window.center()
-        window.setFrameAutosaveName("PortForwards")
+        window.isRestorable = false
         super.init(window: window)
         window.delegate = self
         configureContent(in: window)
+        utilityWindowFrameBinding = self.utilityWindowFrameCoordinator.makeBinding(
+            for: window,
+            kind: .portForwards,
+            defaultFrame: window.frame,
+            minimumSize: window.minSize
+        )
         observerToken = coordinator.observe { [weak self] snapshot in
             self?.apply(snapshot)
         }
@@ -57,8 +67,14 @@ final class PortForwardsWindowController: NSWindowController, NSWindowDelegate,
     }
 
     override func showWindow(_ sender: Any?) {
+        utilityWindowFrameBinding?.prepareForPresentation()
         super.showWindow(sender)
+        utilityWindowFrameBinding?.finishPresentation()
         window?.makeKeyAndOrderFront(sender)
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        utilityWindowFrameBinding?.endPresentation()
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int { records.count }

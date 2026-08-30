@@ -5,6 +5,8 @@ import KmgrCore
 final class ClusterOperationHistoryWindowController: NSWindowController,
     NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate
 {
+    private let utilityWindowFrameCoordinator: UtilityWindowFrameCoordinator
+    private var utilityWindowFrameBinding: UtilityWindowFrameBinding?
     private let tableView = NSTableView()
     private let activeOnlyButton = NSButton(
         checkboxWithTitle: "Active Only",
@@ -28,8 +30,11 @@ final class ClusterOperationHistoryWindowController: NSWindowController,
     init(
         session: OpenedClusterSession,
         tableLayoutStore: TableLayoutStore,
-        frameAutosaveName: String = "OperationHistory"
+        utilityWindowFrameCoordinator: UtilityWindowFrameCoordinator? = nil,
+        preferredWindowFrame: NSRect? = nil
     ) {
+        self.utilityWindowFrameCoordinator = utilityWindowFrameCoordinator
+            ?? UtilityWindowFrameCoordinator.shared
         let panel = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: 1_180, height: 480),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .utilityWindow],
@@ -44,12 +49,19 @@ final class ClusterOperationHistoryWindowController: NSWindowController,
         panel.tabbingMode = .disallowed
         panel.collectionBehavior = [.fullScreenAuxiliary, .moveToActiveSpace]
         panel.animationBehavior = .utilityWindow
-        panel.setFrameAutosaveName(frameAutosaveName)
+        panel.isRestorable = false
         panel.setAccessibilityLabel("Kubernetes API operation history")
         super.init(window: panel)
         panel.delegate = self
         updateSession(session)
         configureContent(in: panel, tableLayoutStore: tableLayoutStore)
+        utilityWindowFrameBinding = self.utilityWindowFrameCoordinator.makeBinding(
+            for: panel,
+            kind: .operationHistory,
+            defaultFrame: panel.frame,
+            minimumSize: panel.minSize,
+            preferredFrame: preferredWindowFrame
+        )
     }
 
     @available(*, unavailable)
@@ -57,11 +69,14 @@ final class ClusterOperationHistoryWindowController: NSWindowController,
 
     override func showWindow(_ sender: Any?) {
         isPresenting = true
+        utilityWindowFrameBinding?.prepareForPresentation()
         super.showWindow(sender)
+        utilityWindowFrameBinding?.finishPresentation()
         window?.makeKeyAndOrderFront(sender)
     }
 
     func windowWillClose(_ notification: Notification) {
+        utilityWindowFrameBinding?.endPresentation()
         isPresenting = false
     }
 

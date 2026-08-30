@@ -27,7 +27,6 @@ import Testing
         ],
         startupTimeoutSeconds: 90
     )
-    preferences.terminal = TerminalPreferences(initialColumns: 132, initialRows: 40)
     preferences.metricsRefreshSeconds = 30
     preferences.defaultNamespace = .allNamespaces
     preferences.restoreOpenClusterWindows = false
@@ -69,7 +68,6 @@ import Testing
     #expect(reloaded.current.logs.maximumDisplayedLineUTF8Bytes == 12 << 10)
     #expect(reloaded.current.diagnostics.completedOperationHistoryLimit == 4_000)
     #expect(reloaded.current.nodeShell == preferences.nodeShell)
-    #expect(reloaded.current.terminal == preferences.terminal)
     #expect(reloaded.current.metricsRefreshSeconds == 30)
     #expect(reloaded.current.defaultNamespace == .allNamespaces)
     #expect(!reloaded.current.restoreOpenClusterWindows)
@@ -178,6 +176,45 @@ import Testing
         AppPreferences.defaultColumnsConfigurationPath)
 }
 
+@MainActor
+@Test func v14PreferencesMigrateWithoutTheRemovedTerminalFields() throws {
+    let suite = "kmgr-tests-v14-preferences-\(UUID().uuidString)"
+    let defaults = try #require(TestUserDefaults(suiteName: suite))
+    defer { defaults.removePersistentDomain(forName: suite) }
+
+    var preferencesObject = try #require(
+        JSONSerialization.jsonObject(with: JSONEncoder().encode(AppPreferences()))
+            as? [String: Any]
+    )
+    preferencesObject["terminal"] = [
+        "initialColumns": 132,
+        "initialRows": 40,
+    ]
+    defaults.set(
+        try JSONSerialization.data(withJSONObject: [
+            "apiVersion": AppPreferences.previousAPIVersion,
+            "preferences": preferencesObject,
+        ]),
+        forKey: AppPreferencesStore.storageKey
+    )
+
+    let store = AppPreferencesStore(defaults: defaults)
+    #expect(store.loadIssue == nil)
+    #expect(store.current == AppPreferences())
+
+    let migratedData = try #require(
+        defaults.data(forKey: AppPreferencesStore.storageKey)
+    )
+    let migrated = try #require(
+        JSONSerialization.jsonObject(with: migratedData) as? [String: Any]
+    )
+    #expect(migrated["apiVersion"] as? String == AppPreferences.apiVersion)
+    let migratedPreferences = try #require(
+        migrated["preferences"] as? [String: Any]
+    )
+    #expect(migratedPreferences["terminal"] == nil)
+}
+
 @Test func appPreferenceValidationEnforcesConservativeBoundsAndSafetyInvariants() throws {
     var preferences = AppPreferences()
     preferences.logs.recordLimit = 10
@@ -190,7 +227,6 @@ import Testing
     preferences.columnsConfigurationPath = "relative/columns.yaml"
     preferences.resourceOperations.defaultDeleteConcurrency = 17
     preferences.nodeShell.startupTimeoutSeconds = 0
-    preferences.terminal = TerminalPreferences(initialColumns: 79, initialRows: 101)
     preferences.advancedPerformance = AdvancedPerformancePreferences(
         viewportOverscanScreensPerSide: 101,
         viewReleaseGraceSeconds: 301,
@@ -228,8 +264,6 @@ import Testing
         "columnsConfigurationPath",
         "resourceOperations.defaultDeleteConcurrency",
         "nodeShell.startupTimeoutSeconds",
-        "terminal.initialColumns",
-        "terminal.initialRows",
         "advancedPerformance.viewportOverscanScreensPerSide",
         "advancedPerformance.viewReleaseGraceSeconds",
         "advancedPerformance.projectionWorkerLimit",
@@ -287,25 +321,6 @@ import Testing
     #expect(preferences.validationIssues().contains {
         $0.field == "logs.maximumDisplayedLineUTF8Bytes"
     })
-}
-
-@Test func terminalPreferencesUseA120By35BoundedDefault() {
-    let preferences = TerminalPreferences()
-    #expect(preferences.initialSize == TerminalSize(columns: 120, rows: 35))
-
-    var app = AppPreferences()
-    for columns in [80, 300] {
-        app.terminal.initialColumns = columns
-        #expect(!app.validationIssues().contains {
-            $0.field == "terminal.initialColumns"
-        })
-    }
-    for rows in [20, 100] {
-        app.terminal.initialRows = rows
-        #expect(!app.validationIssues().contains {
-            $0.field == "terminal.initialRows"
-        })
-    }
 }
 
 @Test func viewerTextBudgetCannotExceedRawLogBuffer() {
@@ -437,7 +452,6 @@ import Testing
     updated.diagnostics.completedOperationHistoryLimit += 1
     updated.nodeShell.globalImage = "registry.example/node-shell:2"
     updated.nodeShell.startupTimeoutSeconds = 90
-    updated.terminal = TerminalPreferences(initialColumns: 132, initialRows: 40)
     updated.confirmations.confirmScaling.toggle()
     updated.resourceOperations.defaultDeleteConcurrency = 8
     updated.defaultNamespace = .allNamespaces
@@ -451,7 +465,7 @@ import Testing
 
     #expect(delta.changes(activated: .immediate) == [
         .appearance, .logDisplay, .confirmations, .resourceOperations,
-        .operationHistory, .nodeShell, .terminal,
+        .operationHistory, .nodeShell,
     ])
     #expect(delta.changes(activated: .newWorkspace) == [
         .defaultNamespace, .viewportOverscan,

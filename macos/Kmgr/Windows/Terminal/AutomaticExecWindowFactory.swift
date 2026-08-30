@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import KmgrCore
 
@@ -11,7 +12,8 @@ enum AutomaticExecWindowFactory {
         target: PodExecTarget,
         objectDetailProvider: any ObjectDetailProviding,
         execProvider: any ExecSessionProviding,
-        initialSize: TerminalSize = .defaultShellWindow
+        utilityWindowFrameCoordinator: UtilityWindowFrameCoordinator? = nil,
+        preferredWindowFrame: NSRect? = nil
     ) async throws -> TerminalWindowController {
         let detail = try await objectDetailProvider.getObject(identity: target.pod)
         try Task.checkCancellation()
@@ -19,14 +21,15 @@ enum AutomaticExecWindowFactory {
             session: session,
             target: target,
             detail: detail,
-            initialSize: initialSize,
             execSessionID: UUID().uuidString.lowercased()
         )
         try Task.checkCancellation()
         return TerminalWindowController(
             request: plan.request,
             provider: execProvider,
-            fallbackShellCommand: plan.fallbackShellCommand
+            fallbackShellCommand: plan.fallbackShellCommand,
+            utilityWindowFrameCoordinator: utilityWindowFrameCoordinator,
+            preferredWindowFrame: preferredWindowFrame
         )
     }
 }

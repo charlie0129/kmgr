@@ -40,28 +40,6 @@ struct ClusterWorkspaceOpenRequest: Sendable {
 typealias NamespacePickerPresenter = (NSPopUpButton, Any?) -> Void
 typealias NamespacePickerKeyWindowCheck = (NSWindow) -> Bool
 
-private extension WorkspaceWindowFrame {
-    init?(appKitFrame: NSRect) {
-        self.init(
-            x: Double(appKitFrame.minX),
-            y: Double(appKitFrame.minY),
-            width: Double(appKitFrame.width),
-            height: Double(appKitFrame.height)
-        )
-        guard isValid else { return nil }
-    }
-
-    var appKitFrame: NSRect? {
-        guard isValid else { return nil }
-        return NSRect(
-            x: CGFloat(x),
-            y: CGFloat(y),
-            width: CGFloat(width),
-            height: CGFloat(height)
-        )
-    }
-}
-
 private enum ResourceNavigationDestination {
     case currentWorkspace
     case newWorkspace
@@ -196,11 +174,11 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
     private let execProvider: any ExecSessionProviding
     private let portForwards: PortForwardCoordinator
     private let tableLayoutStore: TableLayoutStore
+    private let utilityWindowFrameCoordinator: UtilityWindowFrameCoordinator
     private let logDisplayConfiguration: LogDisplayConfiguration
     private let confirmationPreferences: @MainActor () -> ConfirmationPreferences
     private let resourceOperationPreferences: @MainActor () -> ResourceOperationPreferences
     private let nodeShellPreferences: @MainActor () -> NodeShellPreferences
-    private let terminalPreferences: @MainActor () -> TerminalPreferences
     private let saveNodeShellPreferences: @MainActor (NodeShellPreferences) throws -> Void
     private let onShowPortForwards: @MainActor () -> Void
     private let workspaceController: ClusterWorkspaceViewController
@@ -252,6 +230,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         execProvider: any ExecSessionProviding,
         portForwards: PortForwardCoordinator,
         tableLayoutStore: TableLayoutStore? = nil,
+        utilityWindowFrameCoordinator: UtilityWindowFrameCoordinator? = nil,
         columnsConfigurationPath: String,
         columnConfigurationCoordinator: ColumnConfigurationCoordinator? = nil,
         columnsConfigurationLoader: ColumnConfigurationDocumentLoader = .fileSystem,
@@ -268,9 +247,6 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         },
         nodeShellPreferences: @escaping @MainActor () -> NodeShellPreferences = {
             NodeShellPreferences()
-        },
-        terminalPreferences: @escaping @MainActor () -> TerminalPreferences = {
-            TerminalPreferences()
         },
         saveNodeShellPreferences: @escaping @MainActor (NodeShellPreferences) throws -> Void = {
             _ in
@@ -302,11 +278,12 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
         self.restoration = restoration
         self.portForwards = portForwards
         self.tableLayoutStore = tableLayoutStore ?? TableLayoutStore()
+        self.utilityWindowFrameCoordinator = utilityWindowFrameCoordinator
+            ?? UtilityWindowFrameCoordinator.shared
         self.logDisplayConfiguration = logDisplayConfiguration
         self.confirmationPreferences = confirmationPreferences
         self.resourceOperationPreferences = resourceOperationPreferences
         self.nodeShellPreferences = nodeShellPreferences
-        self.terminalPreferences = terminalPreferences
         self.saveNodeShellPreferences = saveNodeShellPreferences
         self.onShowPortForwards = onShowPortForwards
         self.holdInitialActivationDuringRestore = suppressInitialActivation
@@ -338,6 +315,7 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
             recentObjectStore: recentObjectStore,
             portForwards: portForwards,
             tableLayoutStore: self.tableLayoutStore,
+            utilityWindowFrameCoordinator: self.utilityWindowFrameCoordinator,
             operationHistoryCompletedLimit: operationHistoryCompletedLimit,
             columnsConfigurationPath: columnsConfigurationPath,
             columnConfigurationCoordinator: columnConfigurationCoordinator
@@ -987,7 +965,9 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
             identity: identity,
             provider: objectDetailProvider,
             tableLayoutStore: tableLayoutStore,
-            initiallyEditing: initiallyEditing
+            initiallyEditing: initiallyEditing,
+            utilityWindowFrameCoordinator: utilityWindowFrameCoordinator,
+            preferredWindowFrame: window?.frame
         )
         controller.onClose = { [weak self, weak controller] in
             guard self?.yamlSnapshotWindowControllers[identity.uid] === controller else { return }
@@ -1015,7 +995,9 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
             identity: identity,
             provider: objectDetailProvider,
             tableLayoutStore: tableLayoutStore,
-            eventsController: eventsController
+            eventsController: eventsController,
+            utilityWindowFrameCoordinator: utilityWindowFrameCoordinator,
+            preferredWindowFrame: window?.frame
         )
         controller.onOpenEvents = { [weak self] identity in
             self?.openEventsInNewWorkspace(for: identity)
@@ -1134,7 +1116,9 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
                     provider: logProvider,
                     options: LogOptions(previous: request.previous),
                     displayConfiguration: logDisplayConfiguration,
-                    staticWorkloadSnapshot: plan.staticWorkloadSnapshot
+                    staticWorkloadSnapshot: plan.staticWorkloadSnapshot,
+                    utilityWindowFrameCoordinator: utilityWindowFrameCoordinator,
+                    preferredWindowFrame: window?.frame
                 )
                 onOpenLogWindow?(controller)
             } catch is CancellationError {
@@ -1182,7 +1166,8 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
                     target: target,
                     objectDetailProvider: objectDetailProvider,
                     execProvider: execProvider,
-                    initialSize: terminalPreferences().initialSize
+                    utilityWindowFrameCoordinator: utilityWindowFrameCoordinator,
+                    preferredWindowFrame: window?.frame
                 )
                 guard !Task.isCancelled,
                     automaticExecOpenRevision == revision,
@@ -1226,7 +1211,8 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
             preferredContainer: target.preferredContainer,
             objectDetailProvider: objectDetailProvider,
             execProvider: execProvider,
-            initialSize: terminalPreferences().initialSize
+            utilityWindowFrameCoordinator: utilityWindowFrameCoordinator,
+            preferredWindowFrame: window.frame
         )
         controller.onOpenWindow = { [weak self] in self?.onOpenTerminalWindow?($0) }
         controller.onDismiss = { [weak self, weak controller] in
@@ -1251,13 +1237,14 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
                     contextReference: session.contextReference
                 ),
                 namespace: NodeShellLaunchPlanner.defaultNamespace(for: session),
-                initialSize: terminalPreferences().initialSize,
                 execSessionID: UUID().uuidString.lowercased()
             )
             onOpenTerminalWindow?(TerminalWindowController(
                 request: plan.request,
                 provider: execProvider,
-                fallbackShellCommand: plan.fallbackShellCommand
+                fallbackShellCommand: plan.fallbackShellCommand,
+                utilityWindowFrameCoordinator: utilityWindowFrameCoordinator,
+                preferredWindowFrame: window?.frame
             ))
         } catch {
             presentExecOpenFailure(error)
@@ -1281,7 +1268,8 @@ final class ClusterWorkspaceWindowController: NSWindowController, NSWindowDelega
                 contextReference
             ] != nil,
             execProvider: execProvider,
-            initialSize: terminalPreferences().initialSize,
+            utilityWindowFrameCoordinator: utilityWindowFrameCoordinator,
+            preferredWindowFrame: window.frame,
             saveClusterImage: { [weak self] image in
                 guard let self else { return }
                 var updated = nodeShellPreferences()
@@ -1519,6 +1507,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
     private let recentObjectStore: RecentObjectStore
     private let portForwards: PortForwardCoordinator
     private let tableLayoutStore: TableLayoutStore
+    private let utilityWindowFrameCoordinator: UtilityWindowFrameCoordinator
     private let namespacePickerPresenter: NamespacePickerPresenter
     private let namespacePickerKeyWindowCheck: NamespacePickerKeyWindowCheck
     private let onShowPortForwards: @MainActor () -> Void
@@ -1606,6 +1595,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         recentObjectStore: RecentObjectStore,
         portForwards: PortForwardCoordinator,
         tableLayoutStore: TableLayoutStore,
+        utilityWindowFrameCoordinator: UtilityWindowFrameCoordinator,
         operationHistoryCompletedLimit: Int,
         columnsConfigurationPath: String,
         columnConfigurationCoordinator: ColumnConfigurationCoordinator,
@@ -1627,6 +1617,7 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         self.recentObjectStore = recentObjectStore
         self.portForwards = portForwards
         self.tableLayoutStore = tableLayoutStore
+        self.utilityWindowFrameCoordinator = utilityWindowFrameCoordinator
         self.operationHistoryStore = ClusterOperationHistoryStore(
             completedLimit: operationHistoryCompletedLimit
         )
@@ -2248,7 +2239,9 @@ private final class ClusterWorkspaceViewController: NSSplitViewController,
         } else {
             controller = ClusterOperationHistoryWindowController(
                 session: session,
-                tableLayoutStore: tableLayoutStore
+                tableLayoutStore: tableLayoutStore,
+                utilityWindowFrameCoordinator: utilityWindowFrameCoordinator,
+                preferredWindowFrame: view.window?.frame
             )
             operationHistoryWindowController = controller
         }

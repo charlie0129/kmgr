@@ -120,6 +120,8 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
     private let staticWorkloadSnapshot: Bool
     private let provider: any LogStreamProviding
     private let fileWriter: @Sendable (String, URL) throws -> Void
+    private let utilityWindowFrameCoordinator: UtilityWindowFrameCoordinator
+    private var utilityWindowFrameBinding: UtilityWindowFrameBinding?
     private let streamID = UUID().uuidString.lowercased()
     private var generation: UInt64 = 0
     private var streamTasks: [UInt64: Task<Void, Never>] = [:]
@@ -200,7 +202,9 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         staticWorkloadSnapshot: Bool = false,
         fileWriter: @escaping @Sendable (String, URL) throws -> Void = { value, url in
             try value.write(to: url, atomically: true, encoding: .utf8)
-        }
+        },
+        utilityWindowFrameCoordinator: UtilityWindowFrameCoordinator? = nil,
+        preferredWindowFrame: NSRect? = nil
     ) {
         precondition(!sources.isEmpty)
         let allSources = availableSources ?? sources
@@ -212,6 +216,8 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
         self.staticWorkloadSnapshot = staticWorkloadSnapshot
         self.provider = provider
         self.fileWriter = fileWriter
+        self.utilityWindowFrameCoordinator = utilityWindowFrameCoordinator
+            ?? UtilityWindowFrameCoordinator.shared
         self.options = options
         self.recordStore = LogRecordStore(
             recordLimit: displayConfiguration.recordLimit,
@@ -251,6 +257,13 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
             self?.performLogShortcut(event) ?? false
         }
         configureContent(in: window)
+        utilityWindowFrameBinding = self.utilityWindowFrameCoordinator.makeBinding(
+            for: window,
+            kind: .logs,
+            defaultFrame: window.frame,
+            minimumSize: window.minSize,
+            preferredFrame: preferredWindowFrame
+        )
         establishedConfiguration = AppliedStreamConfiguration(
             sources: sources,
             options: options,
@@ -262,8 +275,9 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
     required init?(coder: NSCoder) { fatalError("programmatic") }
 
     override func showWindow(_ sender: Any?) {
+        utilityWindowFrameBinding?.prepareForPresentation()
         super.showWindow(sender)
-        window?.center()
+        utilityWindowFrameBinding?.finishPresentation()
         startStream()
     }
 
@@ -273,6 +287,7 @@ final class LogWindowController: NSWindowController, NSWindowDelegate,
     }
 
     func windowWillClose(_ notification: Notification) {
+        utilityWindowFrameBinding?.endPresentation()
         prepareForTermination()
         NotificationCenter.default.removeObserver(
             self,

@@ -7,6 +7,8 @@ final class EngineDiagnosticsWindowController: NSWindowController,
     NSWindowDelegate, NSSearchFieldDelegate
 {
     private let store: EngineDiagnosticsStore
+    private let utilityWindowFrameCoordinator: UtilityWindowFrameCoordinator
+    private var utilityWindowFrameBinding: UtilityWindowFrameBinding?
     private var snapshot: EngineDiagnosticsSnapshot?
     private var displayConfiguration: LogDisplayConfiguration
     private var maximumRenderedUTF8Bytes: Int
@@ -34,9 +36,13 @@ final class EngineDiagnosticsWindowController: NSWindowController,
 
     init(
         store: EngineDiagnosticsStore,
-        displayConfiguration: LogDisplayConfiguration = .default
+        displayConfiguration: LogDisplayConfiguration = .default,
+        utilityWindowFrameCoordinator: UtilityWindowFrameCoordinator? = nil,
+        preferredWindowFrame: NSRect? = nil
     ) {
         self.store = store
+        self.utilityWindowFrameCoordinator = utilityWindowFrameCoordinator
+            ?? UtilityWindowFrameCoordinator.shared
         self.displayConfiguration = displayConfiguration
         self.maximumRenderedUTF8Bytes = min(
             displayConfiguration.byteLimit,
@@ -61,14 +67,22 @@ final class EngineDiagnosticsWindowController: NSWindowController,
             self?.performEngineDiagnosticsShortcut(event) ?? false
         }
         configureContent(in: window)
+        utilityWindowFrameBinding = self.utilityWindowFrameCoordinator.makeBinding(
+            for: window,
+            kind: .engineDiagnostics,
+            defaultFrame: window.frame,
+            minimumSize: window.minSize,
+            preferredFrame: preferredWindowFrame
+        )
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("programmatic") }
 
     override func showWindow(_ sender: Any?) {
+        utilityWindowFrameBinding?.prepareForPresentation()
         super.showWindow(sender)
-        window?.center()
+        utilityWindowFrameBinding?.finishPresentation()
         refreshSnapshot()
     }
 
@@ -81,6 +95,7 @@ final class EngineDiagnosticsWindowController: NSWindowController,
     }
 
     func windowWillClose(_ notification: Notification) {
+        utilityWindowFrameBinding?.endPresentation()
         prepareForTermination()
         NotificationCenter.default.removeObserver(self)
         onClose?()

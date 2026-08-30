@@ -60,14 +60,20 @@ private final class AppearanceAwareTerminalView: TerminalView {
 final class TerminalWindowController: NSWindowController, NSWindowDelegate {
     private let terminalController: RemoteTerminalViewController
     private let request: ExecSessionRequest
+    private let utilityWindowFrameCoordinator: UtilityWindowFrameCoordinator
+    private var utilityWindowFrameBinding: UtilityWindowFrameBinding?
     var onClose: (() -> Void)?
 
     init(
         request: ExecSessionRequest,
         provider: any ExecSessionProviding,
-        fallbackShellCommand: [String]? = nil
+        fallbackShellCommand: [String]? = nil,
+        utilityWindowFrameCoordinator: UtilityWindowFrameCoordinator? = nil,
+        preferredWindowFrame: NSRect? = nil
     ) {
         self.request = request
+        self.utilityWindowFrameCoordinator = utilityWindowFrameCoordinator
+            ?? UtilityWindowFrameCoordinator.shared
         terminalController = RemoteTerminalViewController(
             request: request,
             provider: provider,
@@ -95,7 +101,13 @@ final class TerminalWindowController: NSWindowController, NSWindowDelegate {
         window.contentViewController = terminalController
         window.toolbar = terminalController.makeToolbar()
         window.setContentSize(initialContentSize)
-        window.center()
+        utilityWindowFrameBinding = self.utilityWindowFrameCoordinator.makeBinding(
+            for: window,
+            kind: .terminal,
+            defaultFrame: window.frame,
+            minimumSize: window.minSize,
+            preferredFrame: preferredWindowFrame
+        )
         terminalController.onConfirmedEOFExit = { [weak self] in
             self?.window?.performClose(nil)
         }
@@ -107,7 +119,10 @@ final class TerminalWindowController: NSWindowController, NSWindowDelegate {
     }
 
     override func showWindow(_ sender: Any?) {
+        utilityWindowFrameBinding?.prepareForPresentation()
         super.showWindow(sender)
+        utilityWindowFrameBinding?.finishPresentation()
+        window?.contentView?.layoutSubtreeIfNeeded()
         terminalController.start()
         window?.makeFirstResponder(terminalController.terminalView)
     }
@@ -128,6 +143,7 @@ final class TerminalWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
+        utilityWindowFrameBinding?.endPresentation()
         prepareForTermination()
         onClose?()
     }

@@ -13,7 +13,8 @@ final class ObjectDetailWindowController: NSWindowController, NSWindowDelegate,
     private(set) var identity: ResourceIdentity
     private var session: OpenedClusterSession
     private let summaryController: ObjectSummaryViewController
-    private var hasPresented = false
+    private let utilityWindowFrameCoordinator: UtilityWindowFrameCoordinator
+    private var utilityWindowFrameBinding: UtilityWindowFrameBinding?
     private var isClosing = false
 
     var onClose: (() -> Void)?
@@ -30,10 +31,14 @@ final class ObjectDetailWindowController: NSWindowController, NSWindowDelegate,
         identity: ResourceIdentity,
         provider: any ObjectDetailProviding,
         tableLayoutStore: TableLayoutStore,
-        eventsController: (any ObjectDetailEventsControlling)? = nil
+        eventsController: (any ObjectDetailEventsControlling)? = nil,
+        utilityWindowFrameCoordinator: UtilityWindowFrameCoordinator? = nil,
+        preferredWindowFrame: NSRect? = nil
     ) {
         self.session = session
         self.identity = identity
+        self.utilityWindowFrameCoordinator = utilityWindowFrameCoordinator
+            ?? UtilityWindowFrameCoordinator.shared
         self.summaryController = ObjectSummaryViewController(
             identity: identity,
             provider: provider,
@@ -58,6 +63,13 @@ final class ObjectDetailWindowController: NSWindowController, NSWindowDelegate,
         super.init(window: window)
         window.delegate = self
         window.contentViewController = summaryController
+        utilityWindowFrameBinding = self.utilityWindowFrameCoordinator.makeBinding(
+            for: window,
+            kind: .details,
+            defaultFrame: window.frame,
+            minimumSize: window.minSize,
+            preferredFrame: preferredWindowFrame
+        )
 
         summaryController.onOpenEvents = { [weak self] identity in
             self?.onOpenEvents?(identity)
@@ -74,10 +86,9 @@ final class ObjectDetailWindowController: NSWindowController, NSWindowDelegate,
     required init?(coder: NSCoder) { fatalError("programmatic") }
 
     override func showWindow(_ sender: Any?) {
-        let firstPresentation = !hasPresented
-        hasPresented = true
+        utilityWindowFrameBinding?.prepareForPresentation()
         super.showWindow(sender)
-        if firstPresentation { window?.center() }
+        utilityWindowFrameBinding?.finishPresentation()
         window?.makeKeyAndOrderFront(sender)
     }
 
@@ -86,6 +97,7 @@ final class ObjectDetailWindowController: NSWindowController, NSWindowDelegate,
     }
 
     func windowWillClose(_ notification: Notification) {
+        utilityWindowFrameBinding?.endPresentation()
         guard !isClosing else { return }
         isClosing = true
         summaryController.stop()

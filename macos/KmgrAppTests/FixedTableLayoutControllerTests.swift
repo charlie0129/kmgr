@@ -251,7 +251,10 @@ struct FixedTableLayoutControllerTests {
         )
         let forwards = PortForwardsWindowController(
             coordinator: coordinator,
-            tableLayoutStore: fixture.store
+            tableLayoutStore: fixture.store,
+            utilityWindowFrameCoordinator: UtilityWindowFrameCoordinator(
+                store: UtilityWindowFrameStore(defaults: fixture.defaults)
+            )
         )
         let forwardsRoot = try #require(forwards.window?.contentView)
         let forwardsTable = try fixedControllerTable(

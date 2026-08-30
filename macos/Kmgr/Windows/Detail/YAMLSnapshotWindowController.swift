@@ -15,6 +15,8 @@ final class YAMLSnapshotWindowController: NSWindowController, NSWindowDelegate,
     private var session: OpenedClusterSession
     private let provider: any ObjectDetailProviding
     private let tableLayoutStore: TableLayoutStore
+    private let utilityWindowFrameCoordinator: UtilityWindowFrameCoordinator
+    private var utilityWindowFrameBinding: UtilityWindowFrameBinding?
     private var refreshTask: Task<Void, Never>?
     private var operationTask: Task<Void, Never>?
     private var refreshRevision: UInt64 = 0
@@ -51,12 +53,16 @@ final class YAMLSnapshotWindowController: NSWindowController, NSWindowDelegate,
         identity: ResourceIdentity,
         provider: any ObjectDetailProviding,
         tableLayoutStore: TableLayoutStore? = nil,
-        initiallyEditing: Bool = false
+        initiallyEditing: Bool = false,
+        utilityWindowFrameCoordinator: UtilityWindowFrameCoordinator? = nil,
+        preferredWindowFrame: NSRect? = nil
     ) {
         self.session = session
         self.identity = identity
         self.provider = provider
         self.tableLayoutStore = tableLayoutStore ?? TableLayoutStore()
+        self.utilityWindowFrameCoordinator = utilityWindowFrameCoordinator
+            ?? UtilityWindowFrameCoordinator.shared
         self.editWhenReady = initiallyEditing
 
         // This factory supplies AppKit's complete plain-document TextKit stack,
@@ -82,6 +88,13 @@ final class YAMLSnapshotWindowController: NSWindowController, NSWindowDelegate,
         super.init(window: window)
         window.delegate = self
         configureWindow()
+        utilityWindowFrameBinding = self.utilityWindowFrameCoordinator.makeBinding(
+            for: window,
+            kind: .yaml,
+            defaultFrame: window.frame,
+            minimumSize: window.minSize,
+            preferredFrame: preferredWindowFrame
+        )
     }
 
     @available(*, unavailable)
@@ -94,9 +107,10 @@ final class YAMLSnapshotWindowController: NSWindowController, NSWindowDelegate,
 
     override func showWindow(_ sender: Any?) {
         let firstPresentation = !hasRequestedSnapshot
+        utilityWindowFrameBinding?.prepareForPresentation()
         super.showWindow(sender)
+        utilityWindowFrameBinding?.finishPresentation()
         if firstPresentation {
-            window?.center()
             refresh()
         }
         if firstPresentation || window?.firstResponder == nil || window?.firstResponder === window {
@@ -105,6 +119,7 @@ final class YAMLSnapshotWindowController: NSWindowController, NSWindowDelegate,
     }
 
     func windowWillClose(_ notification: Notification) {
+        utilityWindowFrameBinding?.endPresentation()
         guard !isClosing else { return }
         isClosing = true
         editWhenReady = false

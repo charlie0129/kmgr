@@ -17,7 +17,8 @@ final class NodeShellConfigurationWindowController: NSWindowController,
     private let target: NodeShellTarget
     private let execProvider: any ExecSessionProviding
     private let saveClusterImage: (String?) throws -> Void
-    private let initialSize: TerminalSize
+    private let utilityWindowFrameCoordinator: UtilityWindowFrameCoordinator
+    private let preferredWindowFrame: NSRect?
 
     private let imageField = TechnicalTextField()
     private let namespaceField = TechnicalTextField()
@@ -51,13 +52,16 @@ final class NodeShellConfigurationWindowController: NSWindowController,
         namespace: String,
         usesClusterImageOverride: Bool,
         execProvider: any ExecSessionProviding,
-        initialSize: TerminalSize = .defaultShellWindow,
+        utilityWindowFrameCoordinator: UtilityWindowFrameCoordinator? = nil,
+        preferredWindowFrame: NSRect? = nil,
         saveClusterImage: @escaping (String?) throws -> Void
     ) {
         self.session = session
         self.target = target
         self.execProvider = execProvider
-        self.initialSize = initialSize
+        self.utilityWindowFrameCoordinator = utilityWindowFrameCoordinator
+            ?? UtilityWindowFrameCoordinator.shared
+        self.preferredWindowFrame = preferredWindowFrame
         self.saveClusterImage = saveClusterImage
 
         let panel = NSPanel(
@@ -365,13 +369,14 @@ final class NodeShellConfigurationWindowController: NSWindowController,
                 command: command,
                 fallbackShellCommand: selectedMode == .shell
                     && shellButton.indexOfSelectedItem == 0 ? ["sh", "-l"] : nil,
-                initialSize: initialSize,
                 execSessionID: UUID().uuidString.lowercased()
             )
             onOpenWindow?(TerminalWindowController(
                 request: plan.request,
                 provider: execProvider,
-                fallbackShellCommand: plan.fallbackShellCommand
+                fallbackShellCommand: plan.fallbackShellCommand,
+                utilityWindowFrameCoordinator: utilityWindowFrameCoordinator,
+                preferredWindowFrame: preferredWindowFrame
             ))
             dismiss(returnCode: .OK)
         } catch {

@@ -282,9 +282,9 @@ its terminal, Shift-S configures its terminal, `F` starts a port-forward for
 the UID-pinned parent Pod, and Command-F shows Port Forwards after a successful
 start. `P` is reserved for resource-list parent navigation and is unbound here.
 
-New Pod terminals and Node shells open at 120 columns by 35 rows by default.
-Settings can choose an initial size from 80–300 columns and 20–100 rows;
-already-open terminal windows keep their current independently resizable size.
+New Pod terminals and Node shells start their PTY at the runtime default of 120
+columns by 35 rows. Terminal windows remain independently resizable, and their
+window geometry—not a configurable grid preference—is persisted.
 
 ## Programmable columns and filtering
 
@@ -418,6 +418,22 @@ the global last workspace size and a visible cascade. Frames are checkpointed
 while a window moves or resizes, not only when it closes. Closing a workspace
 removes only its open-window record; the exact-context frame history remains
 available for a later new window.
+
+The same geometry policy is used for the independent Settings, Details, YAML,
+Port Forwards, Operation History, Logs, Engine Diagnostics, and Terminal
+windows. There is one canonical saved frame per utility kind across launches;
+opening a utility applies only that position and size. Kmgr does not reopen a
+utility automatically and does not restore its content, selected resource,
+session, log or terminal buffer, or active port-forwards. Invalid or
+off-screen frames are moved to a visible display, preserving their dimensions
+whenever the display can accommodate them. Additional same-kind windows are
+cascaded and open, ordered-out, or minimized siblings reserve their frames;
+automatic cascades never replace the canonical frame, while a later user move
+or resize may make that window canonical. Frame writes are debounced and
+flushed during quit. Native AppKit named-frame restoration is disabled for
+these windows. Transient sheets and dialogs, the Command Palette, the passive
+Shortcuts HUD, and the Columns Manager/editor/picker remain intentionally
+presentation-scoped rather than persisted utility windows.
 
 Warm resource stores are governed by three independent LRU ceilings. Defaults
 are 24 views, 250,000 objects, and a conservative 512 MiB retained-size

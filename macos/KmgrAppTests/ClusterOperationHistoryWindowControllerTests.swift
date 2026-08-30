@@ -14,19 +14,15 @@ struct ClusterOperationHistoryWindowControllerTests {
         let suite = "kmgr-operation-window-\(UUID().uuidString)"
         let defaults = try #require(TestUserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
-        let frameName = "OperationHistory-test-\(UUID().uuidString)"
-        NSWindow.removeFrame(usingName: frameName)
-        defer { NSWindow.removeFrame(usingName: frameName) }
         let controller = ClusterOperationHistoryWindowController(
             session: operationHistorySession,
             tableLayoutStore: TableLayoutStore(defaults: defaults),
-            frameAutosaveName: frameName
+            utilityWindowFrameCoordinator: UtilityWindowFrameCoordinator(
+                store: UtilityWindowFrameStore(defaults: defaults)
+            )
         )
         controller.showWindow(nil)
-        defer {
-            controller.window?.setFrameAutosaveName("")
-            controller.close()
-        }
+        defer { controller.close() }
         controller.install(ClusterOperationHistorySnapshot(completed: [
             operationRecord(
                 id: 1,
@@ -100,19 +96,15 @@ struct ClusterOperationHistoryWindowControllerTests {
         let suite = "kmgr-operation-filter-\(UUID().uuidString)"
         let defaults = try #require(TestUserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
-        let frameName = "OperationHistory-filter-\(UUID().uuidString)"
-        NSWindow.removeFrame(usingName: frameName)
-        defer { NSWindow.removeFrame(usingName: frameName) }
         let controller = ClusterOperationHistoryWindowController(
             session: operationHistorySession,
             tableLayoutStore: TableLayoutStore(defaults: defaults),
-            frameAutosaveName: frameName
+            utilityWindowFrameCoordinator: UtilityWindowFrameCoordinator(
+                store: UtilityWindowFrameStore(defaults: defaults)
+            )
         )
         controller.showWindow(nil)
-        defer {
-            controller.window?.setFrameAutosaveName("")
-            controller.close()
-        }
+        defer { controller.close() }
         controller.install(ClusterOperationHistorySnapshot(
             active: [operationRecord(
                 id: 3,
