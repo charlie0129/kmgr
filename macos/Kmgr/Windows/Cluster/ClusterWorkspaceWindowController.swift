@@ -7983,8 +7983,18 @@ private final class ResourceListViewController: NSViewController,
         let loadGeneration = columnsConfigurationLoadGeneration
         columnsConfigurationLoadTask = Task { [weak self] in
             let loaded: ColumnsConfigurationDocument
+            let loadNotice: (action: ColumnConfigurationLoadAction, message: String)?
             do {
-                loaded = try await loader.load(configurationPath)
+                if let loadResult = loader.loadResult {
+                    let result = try await loadResult(configurationPath)
+                    loaded = result.document
+                    loadNotice = result.notice.map {
+                        (action: result.action, message: $0)
+                    }
+                } else {
+                    loaded = try await loader.load(configurationPath)
+                    loadNotice = nil
+                }
                 try Task.checkCancellation()
             } catch is CancellationError {
                 return
@@ -8004,6 +8014,17 @@ private final class ResourceListViewController: NSViewController,
             else { return }
             let reconciled = columnsConfigurationCache.installLoaded(loaded)
             columnsConfigurationLoadTask = nil
+            if let loadNotice {
+                // A recovery can happen after launch when a workspace is the
+                // first consumer of a newly configured path. Keep it in the
+                // resource surface as a configuration-scoped notice rather
+                // than silently falling back to built-in columns.
+                showInlineIssue(
+                    loadNotice.message,
+                    scope: .configuration,
+                    severity: loadNotice.action == .reset ? .warning : .informational
+                )
+            }
             let deferredPresentation = resource.flatMap {
                 deferredColumnPresentationByResourceID[$0.id]
             }

@@ -131,6 +131,9 @@ func NewServer(launchToken string, options ServerOptions) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load columns configuration: %w", err)
 	}
+	if notice := columnManager.InitialLoadNotice(); notice != "" && options.Logger != nil {
+		options.Logger.Warn("columns configuration recovered", "notice", notice)
+	}
 	metricSource := &view.KubernetesMetricSource{
 		Sessions:                   sessions,
 		RefreshInterval:            options.MetricsRefreshInterval,

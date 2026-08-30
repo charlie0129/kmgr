@@ -152,10 +152,10 @@ public struct ColumnsConfigurationDocument: Codable, Hashable, Sendable {
 
     public func validationIssues() -> [ColumnConfigurationIssue] {
         var issues: [ColumnConfigurationIssue] = []
-        if apiVersion != ColumnConfigurationSchema.apiVersion {
+        if apiVersion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             issues.append(.init(
                 path: "apiVersion",
-                message: "Unsupported schema \(apiVersion); expected \(ColumnConfigurationSchema.apiVersion)."
+                message: "A non-empty schema metadata value is required."
             ))
         }
         if celEnvironment != ColumnConfigurationSchema.celEnvironment {
@@ -212,12 +212,24 @@ public struct ColumnsConfigurationDocument: Codable, Hashable, Sendable {
                     if column.expression?.isEmpty == false {
                         issues.append(.init(path: "\(path).expression", message: "Built-in and metric columns cannot declare CEL."))
                     }
+                    if column.missing?.isEmpty == false {
+                        issues.append(.init(path: "\(path).missing", message: "Built-in and metric columns cannot declare a missing-value placeholder."))
+                    }
+                    if column.listJoiner?.isEmpty == false {
+                        issues.append(.init(path: "\(path).listJoiner", message: "Built-in and metric columns cannot declare a list joiner."))
+                    }
                 case .server:
                     if column.value?.isEmpty == false || column.expression?.isEmpty == false {
                         issues.append(.init(
                             path: path,
                             message: "Server Table columns cannot declare a value or CEL expression."
                         ))
+                    }
+                    if column.missing?.isEmpty == false {
+                        issues.append(.init(path: "\(path).missing", message: "Server Table columns cannot declare a missing-value placeholder."))
+                    }
+                    if column.listJoiner?.isEmpty == false {
+                        issues.append(.init(path: "\(path).listJoiner", message: "Server Table columns cannot declare a list joiner."))
                     }
                 }
             }

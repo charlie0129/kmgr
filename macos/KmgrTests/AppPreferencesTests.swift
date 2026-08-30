@@ -99,14 +99,14 @@ import Testing
     )
     defaults.set(
         try JSONSerialization.data(withJSONObject: [
-            "apiVersion": "kmgr.preferences/v99",
+            "apiVersion": "",
             "preferences": preferencesObject,
         ]),
         forKey: AppPreferencesStore.storageKey
     )
     var store = AppPreferencesStore(defaults: defaults)
     #expect(store.current == AppPreferences())
-    #expect(store.loadIssue?.reason == .unsupportedVersion)
+    #expect(store.loadIssue?.reason == .invalidData)
     #expect(defaults.data(forKey: AppPreferencesStore.storageKey) == nil)
 
     defaults.set(Data("not-json".utf8), forKey: AppPreferencesStore.storageKey)
@@ -114,6 +114,68 @@ import Testing
     #expect(store.current == AppPreferences())
     #expect(store.loadIssue?.reason == .invalidData)
     #expect(defaults.data(forKey: AppPreferencesStore.storageKey) == nil)
+
+    defaults.set(["preferences": "not-encoded"], forKey: AppPreferencesStore.storageKey)
+    store = AppPreferencesStore(defaults: defaults)
+    #expect(store.current == AppPreferences())
+    #expect(store.loadIssue?.reason == .invalidData)
+    #expect(defaults.object(forKey: AppPreferencesStore.storageKey) == nil)
+}
+
+@MainActor
+@Test func compatibleFuturePreferenceMetadataIsMigratedByFields() throws {
+    let suite = "kmgr-tests-compatible-future-preferences-\(UUID().uuidString)"
+    let defaults = try #require(TestUserDefaults(suiteName: suite))
+    defer { defaults.removePersistentDomain(forName: suite) }
+
+    let preferences = try #require(
+        JSONSerialization.jsonObject(with: JSONEncoder().encode(AppPreferences()))
+            as? [String: Any]
+    )
+    defaults.set(
+        try JSONSerialization.data(withJSONObject: [
+            "apiVersion": "some.future.preferences/v99",
+            "preferences": preferences,
+        ]),
+        forKey: AppPreferencesStore.storageKey
+    )
+
+    let store = AppPreferencesStore(defaults: defaults)
+    #expect(store.current == AppPreferences())
+    #expect(store.loadIssue == nil)
+    #expect(store.migrationNotice?.message.contains("migrated") == true)
+    let rewritten = try #require(defaults.data(forKey: AppPreferencesStore.storageKey))
+    let object = try #require(JSONSerialization.jsonObject(with: rewritten) as? [String: Any])
+    #expect(object["apiVersion"] as? String == AppPreferences.apiVersion)
+}
+
+@MainActor
+@Test func currentPreferenceMetadataCanonicalizesPersistedPaths() throws {
+    let suite = "kmgr-tests-canonical-preferences-\(UUID().uuidString)"
+    let defaults = try #require(TestUserDefaults(suiteName: suite))
+    defer { defaults.removePersistentDomain(forName: suite) }
+
+    var preferences = try #require(
+        JSONSerialization.jsonObject(with: JSONEncoder().encode(AppPreferences()))
+            as? [String: Any]
+    )
+    preferences["columnsConfigurationPath"] = "~/Library/Application Support/kmgr/columns.yaml"
+    defaults.set(
+        try JSONSerialization.data(withJSONObject: [
+            "apiVersion": AppPreferences.apiVersion,
+            "preferences": preferences,
+        ]),
+        forKey: AppPreferencesStore.storageKey
+    )
+
+    let store = AppPreferencesStore(defaults: defaults)
+    #expect(store.loadIssue == nil)
+    #expect(store.migrationNotice != nil)
+    let rewritten = try #require(defaults.data(forKey: AppPreferencesStore.storageKey))
+    let object = try #require(JSONSerialization.jsonObject(with: rewritten) as? [String: Any])
+    let rewrittenPreferences = try #require(object["preferences"] as? [String: Any])
+    #expect(rewrittenPreferences["columnsConfigurationPath"] as? String ==
+        AppPreferences.defaultColumnsConfigurationPath)
 }
 
 @Test func appPreferenceValidationEnforcesConservativeBoundsAndSafetyInvariants() throws {
@@ -283,7 +345,7 @@ import Testing
 }
 
 @MainActor
-@Test func oldPreferenceSchemaIsResetWithoutDecodingLegacyFields() throws {
+@Test func olderPreferenceSchemaFillsFieldsAddedLater() throws {
     let suite = "kmgr-tests-old-performance-schema-\(UUID().uuidString)"
     let defaults = try #require(TestUserDefaults(suiteName: suite))
     defer { defaults.removePersistentDomain(forName: suite) }
@@ -312,8 +374,11 @@ import Testing
 
     let store = AppPreferencesStore(defaults: defaults)
     #expect(store.current == AppPreferences())
-    #expect(store.loadIssue?.reason == .unsupportedVersion)
-    #expect(defaults.data(forKey: AppPreferencesStore.storageKey) == nil)
+    #expect(store.loadIssue == nil)
+    #expect(store.migrationNotice != nil)
+    let rewritten = try #require(defaults.data(forKey: AppPreferencesStore.storageKey))
+    let object = try #require(JSONSerialization.jsonObject(with: rewritten) as? [String: Any])
+    #expect(object["apiVersion"] as? String == AppPreferences.apiVersion)
 }
 
 @Test func performanceCountsRejectValuesOutsideSigned32BitRange() {
@@ -426,17 +491,125 @@ import Testing
     #expect(defaults.data(forKey: AppPreferencesStore.storageKey) == nil)
 }
 
-@Test func incompleteCurrentPreferencesAreRejectedInsteadOfMigrated() throws {
+@MainActor
+@Test func missingAddedPreferenceFieldIsFilledAndMigrated() throws {
+    let suite = "kmgr-tests-missing-preference-field-\(UUID().uuidString)"
+    let defaults = try #require(TestUserDefaults(suiteName: suite))
+    defer { defaults.removePersistentDomain(forName: suite) }
     let encoded = try JSONEncoder().encode(AppPreferences())
     var object = try #require(
         JSONSerialization.jsonObject(with: encoded) as? [String: Any]
     )
     object.removeValue(forKey: "restoreOpenClusterWindows")
 
-    let data = try JSONSerialization.data(withJSONObject: object)
-    #expect(throws: DecodingError.self) {
-        _ = try JSONDecoder().decode(AppPreferences.self, from: data)
-    }
+    defaults.set(
+        try JSONSerialization.data(withJSONObject: [
+            "apiVersion": "kmgr.preferences/v1",
+            "preferences": object,
+        ]),
+        forKey: AppPreferencesStore.storageKey
+    )
+
+    let store = AppPreferencesStore(defaults: defaults)
+    #expect(store.current.restoreOpenClusterWindows)
+    #expect(store.loadIssue == nil)
+    #expect(store.migrationNotice != nil)
+}
+
+@MainActor
+@Test func unknownPreferenceFieldResetsTheWholeDocument() throws {
+    let suite = "kmgr-tests-unknown-preference-field-\(UUID().uuidString)"
+    let defaults = try #require(TestUserDefaults(suiteName: suite))
+    defer { defaults.removePersistentDomain(forName: suite) }
+    var preferences = try #require(
+        JSONSerialization.jsonObject(with: JSONEncoder().encode(AppPreferences()))
+            as? [String: Any]
+    )
+    preferences["removedField"] = true
+    defaults.set(
+        try JSONSerialization.data(withJSONObject: [
+            "apiVersion": AppPreferences.apiVersion,
+            "preferences": preferences,
+        ]),
+        forKey: AppPreferencesStore.storageKey
+    )
+
+    let store = AppPreferencesStore(defaults: defaults)
+    #expect(store.current == AppPreferences())
+    #expect(store.loadIssue?.reason == .invalidData)
+    #expect(defaults.data(forKey: AppPreferencesStore.storageKey) == nil)
+}
+
+@MainActor
+@Test func missingExistingPreferenceFieldIsFilledAndMigrated() throws {
+    let suite = "kmgr-tests-missing-baseline-preference-\(UUID().uuidString)"
+    let defaults = try #require(TestUserDefaults(suiteName: suite))
+    defer { defaults.removePersistentDomain(forName: suite) }
+    var preferences = try #require(
+        JSONSerialization.jsonObject(with: JSONEncoder().encode(AppPreferences()))
+            as? [String: Any]
+    )
+    preferences.removeValue(forKey: "appearance")
+    defaults.set(
+        try JSONSerialization.data(withJSONObject: [
+            "apiVersion": "kmgr.preferences/v1",
+            "preferences": preferences,
+        ]),
+        forKey: AppPreferencesStore.storageKey
+    )
+
+    let store = AppPreferencesStore(defaults: defaults)
+    #expect(store.current.appearance == .system)
+    #expect(store.loadIssue == nil)
+    #expect(store.migrationNotice != nil)
+    #expect(defaults.data(forKey: AppPreferencesStore.storageKey) != nil)
+}
+
+@MainActor
+@Test func nestedPreferenceTypeOrUnknownFieldResetsTheWholeDocument() throws {
+    let suite = "kmgr-tests-incompatible-nested-preference-\(UUID().uuidString)"
+    let defaults = try #require(TestUserDefaults(suiteName: suite))
+    defer { defaults.removePersistentDomain(forName: suite) }
+
+    var preferences = try #require(
+        JSONSerialization.jsonObject(with: JSONEncoder().encode(AppPreferences()))
+            as? [String: Any]
+    )
+    var logs = try #require(preferences["logs"] as? [String: Any])
+    logs["recordLimit"] = "many"
+    preferences["logs"] = logs
+    defaults.set(
+        try JSONSerialization.data(withJSONObject: [
+            "apiVersion": "future.metadata",
+            "preferences": preferences,
+        ]),
+        forKey: AppPreferencesStore.storageKey
+    )
+
+    let store = AppPreferencesStore(defaults: defaults)
+    #expect(store.current == AppPreferences())
+    #expect(store.loadIssue?.reason == .invalidData)
+    #expect(defaults.data(forKey: AppPreferencesStore.storageKey) == nil)
+
+    var advanced = try #require(
+        JSONSerialization.jsonObject(with: JSONEncoder().encode(AppPreferences()))
+            as? [String: Any]
+    )
+    var advancedObject = try #require(advanced["advancedPerformance"] as? [String: Any])
+    advancedObject["removedField"] = true
+    advanced["advancedPerformance"] = advancedObject
+    defaults.set(
+        try JSONSerialization.data(withJSONObject: [
+            "apiVersion": AppPreferences.apiVersion,
+            "preferences": advanced,
+        ]),
+        forKey: AppPreferencesStore.storageKey
+    )
+
+    let unknownStore = AppPreferencesStore(defaults: defaults)
+    #expect(unknownStore.current == AppPreferences())
+    #expect(unknownStore.loadIssue?.reason == .invalidData)
+    #expect(defaults.data(forKey: AppPreferencesStore.storageKey) == nil)
 }
 
 @Test func keyboardShortcutReferenceMatchesRequiredBindings() {

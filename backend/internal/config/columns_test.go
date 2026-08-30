@@ -425,7 +425,7 @@ func TestParseColumnsRejectsUnknownFieldsEnvironmentAndDuplicateIDs(t *testing.T
 		t.Fatal(err)
 	}
 	cases := []string{
-		"apiVersion: wrong\ncelEnvironment: kmgr.cel/v1\n",
+		"apiVersion: \"\"\ncelEnvironment: kmgr.cel/v1\n",
 		"apiVersion: kmgr.chlc.cc/v1alpha1\ncelEnvironment: future\n",
 		"apiVersion: kmgr.chlc.cc/v1alpha1\ncelEnvironment: kmgr.cel/v1\nunknown: true\n",
 		`apiVersion: kmgr.chlc.cc/v1alpha1
@@ -441,6 +441,268 @@ views:
 		if _, err := ParseColumns([]byte(input), compiler); err == nil {
 			t.Fatalf("invalid document accepted:\n%s", input)
 		}
+	}
+}
+
+func TestParseColumnsUsesFieldCompatibilityInsteadOfAPIVersionAllowlist(t *testing.T) {
+	t.Parallel()
+	compiler, err := columns.NewCompiler(columns.DefaultCostLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := ParseColumns([]byte(`apiVersion: some.future.namespace/v99
+celEnvironment: kmgr.cel/v1
+`), compiler)
+	if err != nil {
+		t.Fatalf("compatible fields were rejected for metadata-only apiVersion: %v", err)
+	}
+	if compiled.document.APIVersion != ColumnsAPIVersion {
+		t.Fatalf("canonical apiVersion = %q, want %q", compiled.document.APIVersion, ColumnsAPIVersion)
+	}
+}
+
+func TestColumnManagerPersistsCompatibleMetadataMigration(t *testing.T) {
+	t.Parallel()
+	compiler, err := columns.NewCompiler(columns.DefaultCostLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "columns.yaml")
+	legacy := []byte(`apiVersion: another.namespace/v99
+celEnvironment: kmgr.cel/v1
+`)
+	if err := os.WriteFile(path, legacy, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := NewColumnManager(path, compiler)
+	if err != nil {
+		t.Fatalf("NewColumnManager: %v", err)
+	}
+	if manager.InitialLoadNotice() == "" {
+		t.Fatal("metadata migration did not produce a startup notice")
+	}
+	rewritten, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(rewritten), "another.namespace/v99") {
+		t.Fatalf("legacy apiVersion remained on disk:\n%s", rewritten)
+	}
+	if !strings.Contains(string(rewritten), ColumnsAPIVersion) {
+		t.Fatalf("canonical apiVersion missing from rewritten document:\n%s", rewritten)
+	}
+	if manager.Version() != digestColumnsData(rewritten) {
+		t.Fatalf("manager version = %q; want digest of persisted bytes %q", manager.Version(), digestColumnsData(rewritten))
+	}
+}
+
+func TestColumnManagerPreservesExplicitlyEmptyAcceleratorSuffixesDuringMigration(t *testing.T) {
+	t.Parallel()
+	compiler, err := columns.NewCompiler(columns.DefaultCostLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "columns.yaml")
+	legacy := []byte(`apiVersion: another.namespace/v99
+celEnvironment: kmgr.cel/v1
+accelerators:
+  autoDetectSuffixes: []
+`)
+	if err := os.WriteFile(path, legacy, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	manager, err := NewColumnManager(path, compiler)
+	if err != nil {
+		t.Fatalf("NewColumnManager: %v", err)
+	}
+	configured := manager.AcceleratorConfig().AutoDetectSuffixes
+	if configured == nil || len(configured) != 0 {
+		t.Fatalf("migrated suffixes = %#v; want an explicit empty list", configured)
+	}
+
+	rewritten, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var object struct {
+		Accelerators struct {
+			AutoDetectSuffixes []string `json:"autoDetectSuffixes"`
+		} `json:"accelerators"`
+	}
+	if err := json.Unmarshal(rewritten, &object); err != nil {
+		t.Fatalf("migrated document is not JSON-compatible YAML: %v", err)
+	}
+	if object.Accelerators.AutoDetectSuffixes == nil ||
+		len(object.Accelerators.AutoDetectSuffixes) != 0 {
+		t.Fatalf("migrated document lost the explicit empty suffix list:\n%s", rewritten)
+	}
+}
+
+func TestColumnManagerPreservesExplicitZeroColumnWidthDuringMigration(t *testing.T) {
+	t.Parallel()
+	compiler, err := columns.NewCompiler(columns.DefaultCostLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "columns.yaml")
+	legacy := []byte(`apiVersion: another.namespace/v99
+celEnvironment: kmgr.cel/v1
+views:
+- match: {version: v1, resource: pods}
+  columns:
+  - {id: name, title: Name, source: builtin, value: name, type: string, width: 0}
+`)
+	if err := os.WriteFile(path, legacy, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	manager, err := NewColumnManager(path, compiler)
+	if err != nil {
+		t.Fatalf("NewColumnManager: %v", err)
+	}
+	rewritten, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(rewritten), `"width":0`) {
+		t.Fatalf("migrated document lost explicit zero width:\n%s", rewritten)
+	}
+	_ = manager
+}
+
+func TestParseColumnsRejectsScalarTypeCoercion(t *testing.T) {
+	t.Parallel()
+	compiler, err := columns.NewCompiler(columns.DefaultCostLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string]string{
+		"numeric api version": `apiVersion: 123
+celEnvironment: kmgr.cel/v1
+`,
+		"boolean api version": `apiVersion: true
+celEnvironment: kmgr.cel/v1
+`,
+		"numeric title": `apiVersion: compatible
+celEnvironment: kmgr.cel/v1
+views:
+- match: {version: v1, resource: pods}
+  columns:
+  - {id: name, title: 123, source: builtin, value: name, type: string}
+`,
+		"numeric accelerator display name": `apiVersion: compatible
+celEnvironment: kmgr.cel/v1
+accelerators:
+  resources:
+    example.com/gpu: {displayName: 123}
+`,
+		"string width": `apiVersion: compatible
+celEnvironment: kmgr.cel/v1
+views:
+- match: {version: v1, resource: pods}
+  columns:
+  - {id: name, title: Name, source: builtin, value: name, type: string, width: wide}
+`,
+	}
+	for name, input := range cases {
+		name, input := name, input
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := ParseColumns([]byte(input), compiler); err == nil {
+				t.Fatalf("scalar type coercion was accepted:\n%s", input)
+			}
+		})
+	}
+}
+
+func TestParseColumnsRejectsNonStringKeysAndMultipleDocuments(t *testing.T) {
+	t.Parallel()
+	compiler, err := columns.NewCompiler(columns.DefaultCostLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string]string{
+		"non-string top-level key": `123: value
+apiVersion: compatible
+celEnvironment: kmgr.cel/v1
+`,
+		"non-string nested key": `apiVersion: compatible
+celEnvironment: kmgr.cel/v1
+accelerators:
+  resources:
+    example.com/gpu:
+      ? [not, a, string]
+      : GPU
+`,
+		"multiple documents": `apiVersion: compatible
+celEnvironment: kmgr.cel/v1
+---
+apiVersion: compatible
+celEnvironment: kmgr.cel/v1
+`,
+	}
+	for name, input := range cases {
+		name, input := name, input
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := ParseColumns([]byte(input), compiler); err == nil {
+				t.Fatalf("unsafe YAML shape was accepted:\n%s", input)
+			}
+		})
+	}
+}
+
+func TestParseColumnsAcceptsOmittedFieldsAsSafeDefaults(t *testing.T) {
+	t.Parallel()
+	compiler, err := columns.NewCompiler(columns.DefaultCostLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := ParseColumns([]byte(`apiVersion: compatible
+celEnvironment: kmgr.cel/v1
+`), compiler)
+	if err != nil {
+		t.Fatalf("omitted optional sections were rejected: %v", err)
+	}
+	if compiled.AcceleratorConfig().Resources != nil {
+		t.Fatalf("omitted accelerator resources = %#v; want nil", compiled.AcceleratorConfig().Resources)
+	}
+}
+
+func TestParseColumnsRejectsMissingRequiredViewFields(t *testing.T) {
+	t.Parallel()
+	compiler, err := columns.NewCompiler(columns.DefaultCostLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string]string{
+		"missing match": `apiVersion: compatible
+celEnvironment: kmgr.cel/v1
+views:
+- columns: []
+`,
+		"missing columns": `apiVersion: compatible
+celEnvironment: kmgr.cel/v1
+views:
+- match: {version: v1, resource: pods}
+`,
+		"missing column type": `apiVersion: compatible
+celEnvironment: kmgr.cel/v1
+views:
+- match: {version: v1, resource: pods}
+  columns:
+  - {id: name, title: Name, source: builtin, value: name}
+`,
+	}
+	for name, input := range cases {
+		name, input := name, input
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := ParseColumns([]byte(input), compiler); err == nil {
+				t.Fatalf("missing required field was accepted:\n%s", input)
+			}
+		})
 	}
 }
 

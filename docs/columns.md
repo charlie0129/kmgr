@@ -1,14 +1,21 @@
 # Programmable columns
 
-Column definitions are stored at `~/Library/Application Support/kmgr/columns.yaml`. The file schema starts at `kmgr.chlc.cc/v1alpha1`; the independently versioned CEL environment is `kmgr.cel/v1`. A definition must declare its result type. Changing expression semantics requires a new environment version and an explicit migration error rather than silent reinterpretation.
+Column definitions are stored at `~/Library/Application Support/kmgr/columns.yaml`. The current file metadata is `kmgr.chlc.cc/v1alpha1`; the independently versioned CEL environment is `kmgr.cel/v1`. A definition must declare its result type. Changing expression semantics requires a new environment version and an explicit migration error rather than silent reinterpretation.
 
 ## File schema and complete example
 
-The file is one strict YAML mapping. Unknown fields, duplicate exact view
-matches, duplicate column IDs within a view, unsupported version strings, and
-invalid source/type combinations reject the new configuration as a whole. An
-invalid external edit does not partially replace the last valid compiled
-configuration. The native editor accepts ordinary JSON-compatible YAML and
+The file is one strict YAML mapping. Kmgr checks field names, field types, enum
+values, and source-specific/native values before it considers the metadata.
+`apiVersion` is metadata rather than a compatibility allow-list: any non-empty
+value whose other fields are compatible can be migrated to the current value.
+Omitted fields that have safe defaults are filled during that migration.
+Unknown or removed fields, duplicate exact view matches, duplicate column IDs
+within a view, an incompatible CEL environment, and invalid source/type or
+native-extractor combinations reject the document as a whole. An invalid
+existing file is copied to a restrictive
+`columns.yaml.invalid-<UUID>.bak`, replaced atomically with the default
+document, and surfaced as a warning. A compatible migration is rewritten and
+shown as a notice. The native editor accepts ordinary JSON-compatible YAML and
 writes formatted JSON, which is itself valid YAML; it deliberately refuses to
 rewrite anchors, aliases, merge keys, custom tags, and non-string mapping keys.
 
@@ -88,7 +95,7 @@ The top-level fields are:
 
 | Field | Required | Contract |
 | --- | --- | --- |
-| `apiVersion` | yes | Must be exactly `kmgr.chlc.cc/v1alpha1`. |
+| `apiVersion` | yes | Must be a non-empty string. Compatible values are metadata and are rewritten to `kmgr.chlc.cc/v1alpha1`; the value is not an allow-list. |
 | `celEnvironment` | yes | Must be exactly `kmgr.cel/v1`. It versions CEL syntax, activation, helpers, and coercion independently from the file shape. |
 | `views` | no | Ordered exact-GVR layouts. An omitted or unmatched GVR uses Kmgr's built-in layout. |
 | `accelerators` | no | Exact-resource and suffix rules for optional accelerator discovery; omission uses the default suffixes. |

@@ -76,7 +76,10 @@ import Testing
     }
 }
 
-@Test func columnConfigurationRejectsVersionDriftAndStructuralAmbiguity() {
+@Test func columnConfigurationRejectsEmptyMetadataAndStructuralAmbiguity() {
+    let metadataOnly = ColumnsConfigurationDocument(apiVersion: "some.future.namespace/v99")
+    #expect(!metadataOnly.validationIssues().contains { $0.path == "apiVersion" })
+
     let badColumn = ColumnDefinition(
         id: "duplicate",
         title: "",
@@ -88,7 +91,7 @@ import Testing
     )
     let match = ColumnResourceMatch(version: "", resource: "")
     let document = ColumnsConfigurationDocument(
-        apiVersion: "future",
+        apiVersion: "",
         celEnvironment: "future",
         views: [
             ResourceColumnConfiguration(match: match, columns: [badColumn, badColumn]),

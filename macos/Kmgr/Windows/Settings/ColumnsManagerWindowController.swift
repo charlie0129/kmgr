@@ -632,6 +632,7 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
         fileOperationTask = Task { [weak self] in
             do {
                 let loaded = try await configurationCoordinator.load(reload: reload)
+                let loadNotice = configurationCoordinator.takeLoadNotice()
                 try Task.checkCancellation()
                 guard let self else { return }
                 let configured = loaded.views.first(where: { $0.match == match })?.columns
@@ -651,8 +652,12 @@ final class ColumnsManagerWindowController: NSWindowController, NSWindowDelegate
                 tableView.reloadData()
                 tableView.deselectAll(nil)
                 onDraftChanged?(columns)
-                let prefix = statusPrefix.map { "\($0) · " } ?? ""
-                showStatus("\(prefix)\(scopeDescription)", error: false)
+                if let loadNotice {
+                    showStatus(loadNotice.message, error: loadNotice.action == .reset)
+                } else {
+                    let prefix = statusPrefix.map { "\($0) · " } ?? ""
+                    showStatus("\(prefix)\(scopeDescription)", error: false)
+                }
             } catch is CancellationError {
                 return
             } catch {

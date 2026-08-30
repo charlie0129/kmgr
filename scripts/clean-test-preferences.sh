@@ -5,8 +5,8 @@ preferences_dir="${HOME:?}/Library/Preferences"
 [[ -d "$preferences_dir" ]] || exit 0
 
 # Test suites historically used a fresh UUID in every UserDefaults suite name.
-# Keep the match narrow: the real application domains are cc.chlc.kmgr.plist
-# and com.pktium.kmgr.plist and must never be touched by this cleanup.
+# Keep the match narrow: the real application domain is cc.chlc.kmgr.plist and
+# must never be touched by this cleanup.
 test_plist_regex='.*/(kmgr-[^/]*-[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}\.plist|KmgrAppTests\.ContextualShortcuts\.[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}\.plist)'
 
 if [[ "${1:-}" == "--dry-run" && $# -eq 1 ]]; then

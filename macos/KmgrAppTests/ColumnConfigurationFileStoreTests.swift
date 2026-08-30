@@ -71,6 +71,161 @@ import Testing
     #expect(try disabled.store.load().accelerators.autoDetectSuffixes.isEmpty)
 }
 
+@Test func columnConfigurationMigratesByFieldsRegardlessOfAPIVersionValue() throws {
+    let fixture = try ColumnFileFixture(yaml: #"""
+        apiVersion: some.other.namespace/v17
+        celEnvironment: kmgr.cel/v1
+        views:
+          - match: {version: v1, resource: pods}
+            columns:
+              - {id: name, title: Name, source: builtin, value: name, type: string}
+        """#)
+
+    let result = try fixture.store.loadResult()
+
+    #expect(result.action == .migrated)
+    #expect(result.notice?.contains("migrated") == true)
+    #expect(result.document.apiVersion == ColumnConfigurationSchema.apiVersion)
+    let rewritten = try JSONSerialization.jsonObject(
+        with: Data(contentsOf: fixture.store.url)
+    ) as? [String: Any]
+    #expect(rewritten?["apiVersion"] as? String == ColumnConfigurationSchema.apiVersion)
+}
+
+@Test func columnConfigurationMigratesUnknownMetadataWhenFieldsAreCompatible() throws {
+    let fixture = try ColumnFileFixture(yaml: #"""
+        apiVersion: some.future.namespace/v99
+        celEnvironment: kmgr.cel/v1
+        """#)
+
+    let result = try fixture.store.loadResult()
+
+    #expect(result.action == .migrated)
+    #expect(result.document == ColumnsConfigurationDocument())
+    #expect(result.document.apiVersion == ColumnConfigurationSchema.apiVersion)
+}
+
+@Test func columnConfigurationMigrationPreservesExplicitZeroWidth() throws {
+    let fixture = try ColumnFileFixture(yaml: #"""
+        apiVersion: some.legacy.namespace/v2
+        celEnvironment: kmgr.cel/v1
+        views:
+          - match: {version: v1, resource: pods}
+            columns:
+              - {id: name, title: Name, source: builtin, value: name, type: string, width: 0}
+        """#)
+
+    let result = try fixture.store.loadResult()
+
+    #expect(result.action == .migrated)
+    #expect(result.document.views.first?.columns.first?.width == 0)
+    let rewritten = try Data(contentsOf: fixture.store.url)
+    let object = try #require(JSONSerialization.jsonObject(with: rewritten) as? [String: Any])
+    let views = try #require(object["views"] as? [[String: Any]])
+    let columns = try #require(views.first?["columns"] as? [[String: Any]])
+    #expect((columns.first?["width"] as? NSNumber)?.doubleValue == 0)
+}
+
+@Test func invalidColumnConfigurationIsBackedUpAndReplacedWithDefaults() throws {
+    let fixture = try ColumnFileFixture(yaml: #"""
+        apiVersion: kmgr.chlc.cc/v1alpha1
+        celEnvironment: kmgr.cel/v1
+        views:
+          - match: {version: v1, resource: pods}
+            columns:
+              - {id: name, title: Name, source: builtin, value: removed, type: string}
+        """#)
+    let original = try Data(contentsOf: fixture.store.url)
+
+    let result = fixture.store.loadRecovering()
+
+    #expect(result.action == .reset)
+    #expect(result.backupURL != nil)
+    #expect(result.notice?.contains("backed up") == true)
+    #expect(result.document == ColumnsConfigurationDocument())
+    let backupURL = try #require(result.backupURL)
+    #expect(try Data(contentsOf: backupURL) == original)
+    let replacement = try fixture.store.load()
+    #expect(replacement == ColumnsConfigurationDocument())
+}
+
+@Test func nativeOnlyColumnOptionsAreIncompatibleWithTheEngineContract() throws {
+    let fixture = try ColumnFileFixture(yaml: #"""
+        apiVersion: kmgr.chlc.cc/v1alpha1
+        celEnvironment: kmgr.cel/v1
+        views:
+          - match: {version: v1, resource: pods}
+            columns:
+              - id: name
+                title: Name
+                source: builtin
+                value: name
+                type: string
+                missing: "—"
+        """#)
+
+    let result = fixture.store.loadRecovering()
+
+    #expect(result.action == .reset)
+    #expect(result.backupURL != nil)
+    #expect(result.document == ColumnsConfigurationDocument())
+}
+
+@Test func ordinaryColumnLoadAlsoRecoversAnIncompatibleDocument() throws {
+    let fixture = try ColumnFileFixture(yaml: #"""
+        apiVersion: kmgr.chlc.cc/v1alpha1
+        celEnvironment: kmgr.cel/v1
+        futureField: true
+        """#)
+
+    let document = try fixture.store.load()
+
+    #expect(document == ColumnsConfigurationDocument())
+    #expect(try fixture.store.loadStrict() == ColumnsConfigurationDocument())
+    let backups = try FileManager.default.contentsOfDirectory(
+        at: fixture.directory,
+        includingPropertiesForKeys: nil
+    ).filter { $0.lastPathComponent.contains(".invalid-") }
+    #expect(backups.count == 1)
+}
+
+@Test func incompatibleColumnFieldTypesAreBackedUpAndReset() throws {
+    let fixture = try ColumnFileFixture(yaml: #"""
+        apiVersion: some.metadata/v2
+        celEnvironment: kmgr.cel/v1
+        accelerators:
+          autoDetectSuffixes: definitely
+        """#)
+    let original = try Data(contentsOf: fixture.store.url)
+
+    let result = try fixture.store.loadResult()
+
+    #expect(result.action == .reset)
+    #expect(result.document == ColumnsConfigurationDocument())
+    let backupURL = try #require(result.backupURL)
+    #expect(try Data(contentsOf: backupURL) == original)
+    let permissions = (try FileManager.default.attributesOfItem(atPath: backupURL.path))[
+        .posixPermissions
+    ] as? NSNumber
+    #expect(permissions?.intValue == 0o600)
+}
+
+@Test func missingColumnFileUsesDefaultsWithoutAResetNotice() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("kmgr-columns-missing-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = ColumnConfigurationFileStore(
+        path: directory.appendingPathComponent("columns.yaml").path
+    )
+
+    let result = store.loadRecovering()
+
+    #expect(result.action == .loaded)
+    #expect(result.notice == nil)
+    #expect(result.document == ColumnsConfigurationDocument())
+}
+
 @Test func columnConfigurationFileStoreReportsDocumentedSchemaErrors() throws {
     let blankTitle = try ColumnFileFixture(yaml: #"""
         apiVersion: kmgr.chlc.cc/v1alpha1
@@ -80,7 +235,7 @@ import Testing
             columns:
               - {id: name, title: "  ", source: builtin, value: name, type: string}
         """#)
-    #expect(throwsIssue { _ = try blankTitle.store.load() }?.message.contains(".title") == true)
+    #expect(throwsIssue { _ = try blankTitle.store.loadStrict() }?.message.contains(".title") == true)
 
     let negativeWidth = try ColumnFileFixture(yaml: #"""
         apiVersion: kmgr.chlc.cc/v1alpha1
@@ -90,7 +245,7 @@ import Testing
             columns:
               - {id: name, title: Name, source: builtin, value: name, type: string, width: -1}
         """#)
-    #expect(throwsIssue { _ = try negativeWidth.store.load() }?.message.contains(".width") == true)
+    #expect(throwsIssue { _ = try negativeWidth.store.loadStrict() }?.message.contains(".width") == true)
 
     let nonFiniteWidth = try ColumnFileFixture(yaml: #"""
         apiVersion: kmgr.chlc.cc/v1alpha1
@@ -101,7 +256,7 @@ import Testing
               - {id: name, title: Name, source: builtin, value: name, type: string, width: .inf}
         """#)
     #expect(
-        throwsIssue { _ = try nonFiniteWidth.store.load() }?.message.contains("non-finite numbers") == true
+        throwsIssue { _ = try nonFiniteWidth.store.loadStrict() }?.message.contains("non-finite numbers") == true
     )
 
     let invalidAccelerator = try ColumnFileFixture(yaml: #"""
@@ -112,7 +267,7 @@ import Testing
             gpu: {displayName: GPU}
         """#)
     #expect(
-        throwsIssue { _ = try invalidAccelerator.store.load() }?.message.contains(
+        throwsIssue { _ = try invalidAccelerator.store.loadStrict() }?.message.contains(
             "accelerators.resources.gpu"
         ) == true
     )
@@ -131,7 +286,7 @@ import Testing
             columns: []
         """#)
 
-    let issue = throwsIssue { _ = try fixture.store.load() }
+    let issue = throwsIssue { _ = try fixture.store.loadStrict() }
 
     #expect(issue?.message.contains("anchors and aliases") == true)
 }
@@ -146,7 +301,7 @@ import Testing
             columns: []
         """#)
 
-    let issue = throwsIssue { _ = try fixture.store.load() }
+    let issue = throwsIssue { _ = try fixture.store.loadStrict() }
 
     #expect(issue?.message.contains("merge keys") == true)
 }
@@ -166,7 +321,7 @@ import Testing
                 futureOption: true
         """#)
 
-    let issue = throwsIssue { _ = try fixture.store.load() }
+    let issue = throwsIssue { _ = try fixture.store.loadStrict() }
 
     #expect(issue?.message.contains("views[0].columns[0].futureOption") == true)
 }
@@ -185,7 +340,7 @@ import Testing
                 type: string
                 enabled: definitely
         """#)
-    let typeIssue = throwsIssue { _ = try invalidType.store.load() }
+    let typeIssue = throwsIssue { _ = try invalidType.store.loadStrict() }
     #expect(typeIssue?.message.contains("does not match") == true)
 
     let invalidSection = try ColumnFileFixture(yaml: #"""
@@ -193,7 +348,7 @@ import Testing
         celEnvironment: kmgr.cel/v1
         accelerators: not-a-mapping
         """#)
-    let sectionIssue = throwsIssue { _ = try invalidSection.store.load() }
+    let sectionIssue = throwsIssue { _ = try invalidSection.store.loadStrict() }
     #expect(sectionIssue?.message.contains("does not match") == true)
 
     let duplicateKey = try ColumnFileFixture(yaml: #"""
@@ -201,7 +356,7 @@ import Testing
         apiVersion: duplicate
         celEnvironment: kmgr.cel/v1
         """#)
-    let duplicateIssue = throwsIssue { _ = try duplicateKey.store.load() }
+    let duplicateIssue = throwsIssue { _ = try duplicateKey.store.loadStrict() }
     #expect(duplicateIssue?.message.contains("unique") == true)
 }
 
@@ -213,7 +368,7 @@ import Testing
         apiVersion: kmgr.chlc.cc/v1alpha1
         celEnvironment: kmgr.cel/v1
         """#)
-    let documentIssue = throwsIssue { _ = try multipleDocuments.store.load() }
+    let documentIssue = throwsIssue { _ = try multipleDocuments.store.loadStrict() }
     #expect(documentIssue?.message.contains("single-document YAML") == true)
 
     let nonStringKey = try ColumnFileFixture(yaml: #"""
@@ -224,7 +379,7 @@ import Testing
             ? [nvidia.com/gpu]
             : {displayName: GPU}
         """#)
-    let keyIssue = throwsIssue { _ = try nonStringKey.store.load() }
+    let keyIssue = throwsIssue { _ = try nonStringKey.store.loadStrict() }
     #expect(keyIssue?.message.contains("non-string mapping keys") == true)
 }
 
@@ -234,7 +389,7 @@ import Testing
         count: ColumnConfigurationFileStore.maximumByteCount + 1
     ))
 
-    let issue = throwsIssue { _ = try fixture.store.load() }
+    let issue = throwsIssue { _ = try fixture.store.loadStrict() }
 
     #expect(issue?.message.contains("GUI editor limit") == true)
 }

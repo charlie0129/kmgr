@@ -37,6 +37,10 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private let workspaceFrameBookmarkStore: WorkspaceFrameBookmarkStore
     private let workspaceWindowSizeStore: ClusterWorkspaceWindowSizeStore
     private var pendingRestorationNotice: ClusterManagerInitialNotice?
+    private var pendingConfigurationNotices: [ClusterManagerInitialNotice] = []
+    private var configurationPreflightTask: Task<Void, Never>?
+    private var configurationNoticeWindowController: ConfigurationNoticeWindowController?
+    private var hasStartedApplicationServices = false
     private let settingsWindowController: SettingsWindowController
     private let portForwardCoordinator: PortForwardCoordinator
     private let portForwardsWindowController: PortForwardsWindowController
@@ -151,6 +155,21 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             application: .shared
         )
         super.init()
+        if let issue = preferences.loadIssue {
+            pendingConfigurationNotices.append(
+                ClusterManagerInitialNotice(
+                    title: "Settings reset",
+                    message: issue.message
+                )
+            )
+        } else if let migration = preferences.migrationNotice {
+            pendingConfigurationNotices.append(
+                ClusterManagerInitialNotice(
+                    title: "Settings migrated",
+                    message: migration.message
+                )
+            )
+        }
         self.contextualShortcutsCoordinator.shortcutsWindowController.onUserClose = {
             self.contextualShortcutsCoordinator.closeFromUser()
         }
@@ -192,8 +211,29 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         engineStateObserver = engineSupervisor.observeState { [weak self] state in
             self?.engineStateChanged(state)
         }
+        let configurationPath = engineColumnsConfigurationPath
+        configurationPreflightTask = Task { @MainActor [weak self] in
+            let result = await ColumnConfigurationFileStore(path: configurationPath)
+                .loadRecoveringOffMain()
+            guard let self, !Task.isCancelled, !self.isTerminating else { return }
+            self.configurationPreflightTask = nil
+            if let notice = result.notice {
+                self.enqueueConfigurationNotice(
+                    title: result.action == .migrated
+                        ? "Programmable columns migrated"
+                        : "Programmable columns reset",
+                    message: notice
+                )
+            }
+            self.startEngineAndPresentInitialWindows()
+        }
+    }
+
+    private func startEngineAndPresentInitialWindows() {
+        guard !isTerminating else { return }
         engineSupervisor.start()
         contextualShortcutsCoordinator.start()
+        hasStartedApplicationServices = true
         NSApp.activate(ignoringOtherApps: true)
         // Finder/LaunchServices can invoke didFinishLaunching before its
         // activation notification, or while isActive is already true without
@@ -240,17 +280,18 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
 
     private func completeInitialApplicationActivation() {
-        guard !isTerminating else { return }
+        guard hasStartedApplicationServices, !isTerminating else { return }
         didObserveApplicationActivation = true
         presentInitialWorkspacesIfPossible()
         repairInitialPlacements()
     }
 
     private func presentInitialWorkspacesAsFallback() {
-        guard !didPresentInitialWorkspaces, !isTerminating else { return }
+        guard hasStartedApplicationServices, !didPresentInitialWorkspaces, !isTerminating else { return }
         didPresentInitialWorkspaces = true
         restoreWorkspacesOrShowChooser()
         repairInitialPlacements()
+        presentPendingConfigurationNoticesIfNeeded()
     }
 
     private func repairInitialPlacements() {
@@ -260,11 +301,16 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
 
     private func presentInitialWorkspacesIfPossible() {
-        guard !didPresentInitialWorkspaces, !isTerminating, NSApp.isActive else {
+        guard hasStartedApplicationServices,
+            !didPresentInitialWorkspaces,
+            !isTerminating,
+            NSApp.isActive
+        else {
             return
         }
         didPresentInitialWorkspaces = true
         restoreWorkspacesOrShowChooser()
+        presentPendingConfigurationNoticesIfNeeded()
     }
 
     private func engineStateChanged(_ state: EngineConnectionState) {
@@ -400,6 +446,8 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             }
         }
         isTerminating = true
+        configurationPreflightTask?.cancel()
+        configurationPreflightTask = nil
         initialPresentationFallbackTask?.cancel()
         initialPresentationFallbackTask = nil
         // Column resize/move writes are intentionally coalesced. Flush before
@@ -475,8 +523,13 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         let sourceWorkspace = activeWorkspaceController
         let sourceWindowFrame = sourceWorkspace?.window?.frame
         _ = sourceWorkspace?.checkpointActiveWorkspace()
-        let initialNotice = pendingRestorationNotice
-        pendingRestorationNotice = nil
+        var notices = pendingConfigurationNotices
+        pendingConfigurationNotices.removeAll(keepingCapacity: true)
+        if let restorationNotice = pendingRestorationNotice {
+            notices.append(restorationNotice)
+            pendingRestorationNotice = nil
+        }
+        let initialNotice = aggregateInitialNotice(notices)
         let controller = ClusterManagerWindowController(
             provider: clusterContextProvider,
             sourceStore: kubeconfigSourceStore,
@@ -520,6 +573,46 @@ final class Application: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             self?.chooserControllers.removeValue(forKey: identifier)
         }
         controller.showWindow(nil)
+    }
+
+    private func enqueueConfigurationNotice(title: String, message: String) {
+        pendingConfigurationNotices.append(
+            ClusterManagerInitialNotice(title: title, message: message)
+        )
+        logger.notice("Configuration notice: \(message, privacy: .public)")
+    }
+
+    private func aggregateInitialNotice(
+        _ notices: [ClusterManagerInitialNotice]
+    ) -> ClusterManagerInitialNotice? {
+        guard !notices.isEmpty else { return nil }
+        let title = notices.count == 1 ? notices[0].title : "Configuration notices"
+        let message = notices.map { notice in
+            notices.count == 1 ? notice.message : "• \(notice.title): \(notice.message)"
+        }.joined(separator: notices.count == 1 ? "" : "\n")
+        return ClusterManagerInitialNotice(title: title, message: message)
+    }
+
+    /// Restored workspaces bypass the chooser's inline banner. Keep queued
+    /// configuration notices visible in that launch path with a small,
+    /// non-modal accessible panel.
+    private func presentPendingConfigurationNoticesIfNeeded() {
+        guard !pendingConfigurationNotices.isEmpty,
+            configurationNoticeWindowController == nil,
+            !isTerminating
+        else { return }
+        let notice = aggregateInitialNotice(pendingConfigurationNotices)
+        pendingConfigurationNotices.removeAll(keepingCapacity: true)
+        guard let notice else { return }
+        let controller = ConfigurationNoticeWindowController(notice: notice)
+        configurationNoticeWindowController = controller
+        controller.onClose = { [weak self, weak controller] in
+            guard let self, self.configurationNoticeWindowController === controller else {
+                return
+            }
+            self.configurationNoticeWindowController = nil
+        }
+        controller.show(relativeTo: NSApp.keyWindow)
     }
 
     private func openWorkspace(

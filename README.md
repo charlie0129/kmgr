@@ -300,9 +300,13 @@ definitions, choose GVR-compatible built-in or metric extractors from a native
 catalog, enter exact scheduler resources, add or edit CEL definitions, preview
 CEL against the selected object or a bounded sample, reset defaults, and
 persist definitions. Draft order and visibility apply live to the table.
-Programmers can edit the same YAML file outside the app. The engine loads the
-configured path when it starts, so after external edits relaunch Kmgr to reload
-the engine configuration.
+Programmers can edit the same YAML file outside the app. On launch, Kmgr first
+checks persisted fields and values: compatible older documents are minimally
+migrated to the current metadata and reported with a notice. Unknown, removed,
+or incompatible fields reset the whole document; the original is retained as
+`columns.yaml.invalid-<UUID>.bak` and a warning explains the backup. The engine
+loads the configured path when it starts, so after external edits relaunch Kmgr
+to reload the engine configuration.
 
 The complete external file schema and example, CEL activation, optional-field
 syntax, types, cost/output limits, Secret sanitization boundary, and exact
@@ -390,10 +394,14 @@ confirmation.
 
 ## State and diagnostics
 
-Versioned UI settings and column configuration are kept under
-`~/Library/Application Support/kmgr/`. Lightweight window/navigation state is
-restored, but warm object caches remain process-memory-only and are never
-presented as restored cluster truth after relaunch.
+Versioned UI settings are stored in the `cc.chlc.kmgr` preferences domain
+(`~/Library/Preferences/cc.chlc.kmgr.plist`), and column configuration is kept
+at `~/Library/Application Support/kmgr/columns.yaml`.
+At launch, compatible saved settings are migrated by field shape and the
+columns file is migrated or backed up/reset as needed; Kmgr shows a notice for
+these actions. Lightweight window/navigation state is restored, but warm object
+caches remain process-memory-only and are never presented as restored cluster
+truth after relaunch.
 
 Cluster workspace frames are remembered independently as signed global
 coordinates, so a window on a display to the left or below the primary display
@@ -597,6 +605,9 @@ credentials.
   a compatible Metrics Server. Base LIST/WATCH remains independent.
 - **A forward stays Failed after Pod replacement:** this is the UID safety
   contract. Start a new forward explicitly for the replacement Pod.
-- **Column configuration fails to load:** verify both version strings and use
-  the Settings window to confirm the active path. Invalid files produce an
-  explicit configuration error rather than changing CEL meaning silently.
+- **Column configuration was reset:** Kmgr found an invalid or incompatible
+  field and reset the whole document. The original file is retained beside it
+  as `columns.yaml.invalid-<UUID>.bak`; inspect that backup, remove the bad
+  field, and use **Reload** in the Columns window. A compatible metadata-only
+  change is migrated automatically and reported with a notice. The CEL
+  environment still must be exactly `kmgr.cel/v1`.

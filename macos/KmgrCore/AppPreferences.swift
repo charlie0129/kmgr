@@ -1,3 +1,4 @@
+import CoreFoundation
 import Foundation
 
 public enum AppearancePreference: String, Codable, CaseIterable, Hashable, Sendable {
@@ -789,7 +790,6 @@ public struct AppPreferencesValidationError: Error, LocalizedError, Hashable, Se
 
 public struct AppPreferencesLoadIssue: Error, LocalizedError, Hashable, Sendable {
     public enum Reason: String, Hashable, Sendable {
-        case unsupportedVersion
         case invalidData
         case invalidValues
     }
@@ -805,6 +805,17 @@ public struct AppPreferencesLoadIssue: Error, LocalizedError, Hashable, Sendable
     public var errorDescription: String? { message }
 }
 
+/// A successful compatibility load is intentionally separate from
+/// `AppPreferencesLoadIssue`: migration is useful information, not a load
+/// failure. The application surfaces this as an informational notice once.
+public struct AppPreferencesMigrationNotice: Hashable, Sendable {
+    public let message: String
+
+    public init(message: String = "Settings migrated to the current format.") {
+        self.message = message
+    }
+}
+
 @MainActor
 public final class AppPreferencesStore {
     public static let storageKey = "kmgr.preferences.document"
@@ -814,17 +825,16 @@ public final class AppPreferencesStore {
         var preferences: AppPreferences
     }
 
-    private struct Envelope: Decodable {
-        var apiVersion: String
-    }
-
     private let defaults: UserDefaults
     public private(set) var current: AppPreferences
     public private(set) var loadIssue: AppPreferencesLoadIssue?
+    public private(set) var migrationNotice: AppPreferencesMigrationNotice?
 
     public init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         current = AppPreferences()
+        loadIssue = nil
+        migrationNotice = nil
         loadFromDefaults()
     }
 
@@ -836,20 +846,29 @@ public final class AppPreferencesStore {
         defaults.set(try encoder.encode(document), forKey: Self.storageKey)
         current = validated
         loadIssue = nil
+        migrationNotice = nil
     }
 
     public func reset() {
         defaults.removeObject(forKey: Self.storageKey)
         current = AppPreferences()
         loadIssue = nil
+        migrationNotice = nil
     }
 
     private func loadFromDefaults() {
-        guard let data = defaults.data(forKey: Self.storageKey) else { return }
-        let decoder = JSONDecoder()
-        let envelope: Envelope
+        guard defaults.object(forKey: Self.storageKey) != nil else { return }
+        guard let data = defaults.data(forKey: Self.storageKey) else {
+            rejectSavedPreferences(AppPreferencesLoadIssue(
+                reason: .invalidData,
+                message: "Saved settings use an unsupported storage value; conservative defaults are in use."
+            ))
+            return
+        }
+
+        let raw: Any
         do {
-            envelope = try decoder.decode(Envelope.self, from: data)
+            raw = try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
         } catch {
             rejectSavedPreferences(AppPreferencesLoadIssue(
                 reason: .invalidData,
@@ -857,30 +876,154 @@ public final class AppPreferencesStore {
             ))
             return
         }
-        guard envelope.apiVersion == AppPreferences.apiVersion else {
+
+        guard let root = raw as? [String: Any] else {
             rejectSavedPreferences(AppPreferencesLoadIssue(
-                reason: .unsupportedVersion,
-                message: "Saved settings use unsupported version \(envelope.apiVersion); conservative defaults are in use."
+                reason: .invalidData,
+                message: "Saved settings are not a document; conservative defaults are in use."
             ))
             return
         }
+
+        guard let version = root["apiVersion"] as? String else {
+            rejectSavedPreferences(AppPreferencesLoadIssue(
+                reason: .invalidData,
+                message: "Saved settings do not declare a compatible version; conservative defaults are in use."
+            ))
+            return
+        }
+        guard !version.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            rejectSavedPreferences(AppPreferencesLoadIssue(
+                reason: .invalidData,
+                message: "Saved settings do not declare a compatible version; conservative defaults are in use."
+            ))
+            return
+        }
+
+        // The envelope itself is part of the persisted contract. Preference
+        // fields may be omitted (they are filled from today's defaults), but
+        // a document without a preferences object is not identifiable as an
+        // AppPreferences document and must fail closed.
+        guard let rawPreferences = root["preferences"] else {
+            rejectSavedPreferences(AppPreferencesLoadIssue(
+                reason: .invalidData,
+                message: "Saved settings do not contain a preferences object; conservative defaults are in use."
+            ))
+            return
+        }
+        guard rawPreferences is [String: Any] else {
+            rejectSavedPreferences(AppPreferencesLoadIssue(
+                reason: .invalidData,
+                message: "Saved settings preferences must be an object; conservative defaults are in use."
+            ))
+            return
+        }
+
+        let template: Any
+        do {
+            guard let encodedTemplate = Self.encodedTemplate else {
+                throw PreferenceCompatibilityIssue("the current settings schema could not be encoded")
+            }
+            template = try JSONSerialization.jsonObject(
+                with: encodedTemplate,
+                options: [.fragmentsAllowed]
+            )
+        } catch {
+            // This is a programming error rather than user data, but keeping
+            // the boundary conservative avoids ever activating an unvalidated
+            // preference object if the model/template drift apart.
+            rejectSavedPreferences(AppPreferencesLoadIssue(
+                reason: .invalidData,
+                message: "Saved settings could not be validated; conservative defaults are in use."
+            ))
+            return
+        }
+
+        let normalized: Any
+        var didFillMissingFields = false
+        do {
+            var path = ""
+            normalized = try Self.normalize(
+                root,
+                against: template,
+                path: &path,
+                didFillMissingFields: &didFillMissingFields
+            )
+        } catch let issue as PreferenceCompatibilityIssue {
+            rejectSavedPreferences(AppPreferencesLoadIssue(
+                reason: .invalidData,
+                message: "Saved settings are incompatible (\(issue.message)); conservative defaults are in use."
+            ))
+            return
+        } catch {
+            rejectSavedPreferences(AppPreferencesLoadIssue(
+                reason: .invalidData,
+                message: "Saved settings could not be decoded; conservative defaults are in use."
+            ))
+            return
+        }
+
+        guard var normalizedRoot = normalized as? [String: Any] else {
+            rejectSavedPreferences(AppPreferencesLoadIssue(
+                reason: .invalidData,
+                message: "Saved settings are not a compatible document; conservative defaults are in use."
+            ))
+            return
+        }
+        // The version is metadata, not a dispatch table. Every successful
+        // load is emitted in the one current format.
+        normalizedRoot["apiVersion"] = AppPreferences.apiVersion
+
+        let normalizedData: Data
+        do {
+            normalizedData = try JSONSerialization.data(withJSONObject: normalizedRoot)
+        } catch {
+            rejectSavedPreferences(AppPreferencesLoadIssue(
+                reason: .invalidData,
+                message: "Saved settings could not be normalized; conservative defaults are in use."
+            ))
+            return
+        }
+
         let document: Document
+        let didCanonicalizeValues: Bool
         do {
-            document = try decoder.decode(Document.self, from: data)
-        } catch {
-            rejectSavedPreferences(AppPreferencesLoadIssue(
-                reason: .invalidData,
-                message: "Saved settings could not be decoded; conservative defaults are in use."
-            ))
-            return
-        }
-        do {
-            current = try document.preferences.validated()
-        } catch {
+            document = try JSONDecoder().decode(Document.self, from: normalizedData)
+            let decodedPreferences = document.preferences
+            current = try decodedPreferences.validated()
+            didCanonicalizeValues = current != decodedPreferences
+        } catch let error as AppPreferencesValidationError {
             rejectSavedPreferences(AppPreferencesLoadIssue(
                 reason: .invalidValues,
-                message: "Saved settings contain invalid limits; conservative defaults are in use."
+                message: "Saved settings contain invalid limits (\(error.localizedDescription)); conservative defaults are in use."
             ))
+            return
+        } catch {
+            rejectSavedPreferences(AppPreferencesLoadIssue(
+                reason: .invalidData,
+                message: "Saved settings contain fields with incompatible types; conservative defaults are in use."
+            ))
+            return
+        }
+
+        let needsMigration = version != AppPreferences.apiVersion ||
+            didFillMissingFields || didCanonicalizeValues
+        if needsMigration {
+            do {
+                let encoder = JSONEncoder()
+                encoder.outputFormatting = [.sortedKeys]
+                defaults.set(try encoder.encode(
+                    Document(apiVersion: AppPreferences.apiVersion, preferences: current)
+                ), forKey: Self.storageKey)
+                migrationNotice = AppPreferencesMigrationNotice()
+            } catch {
+                // `current` is already validated and remains safe in memory;
+                // retain the source bytes so a transient defaults failure does
+                // not discard a user's settings.
+                migrationNotice = AppPreferencesMigrationNotice(
+                    message: "Settings were read using the current format, but could not be rewritten."
+                )
+            }
         }
     }
 
@@ -888,6 +1031,126 @@ public final class AppPreferencesStore {
         defaults.removeObject(forKey: Self.storageKey)
         current = AppPreferences()
         loadIssue = issue
+        migrationNotice = nil
+    }
+
+    private static let encodedTemplate: Data? = {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        // If a future field makes the template unencodable, the loader fails
+        // closed rather than accepting an unvalidated preference object.
+        return try? encoder.encode(
+            Document(apiVersion: AppPreferences.apiVersion, preferences: AppPreferences())
+        )
+    }()
+
+    private static func normalize(
+        _ raw: Any,
+        against template: Any,
+        path: inout String,
+        didFillMissingFields: inout Bool
+    ) throws -> Any {
+        if let templateObject = template as? [String: Any] {
+            guard let rawObject = raw as? [String: Any] else {
+                throw PreferenceCompatibilityIssue(
+                    "\(path.isEmpty ? "document" : path) must be an object"
+                )
+            }
+            // Empty dictionaries in this model are maps whose keys are user
+            // supplied context references, not schema fields. Their value
+            // types are checked by the final Codable decode.
+            if templateObject.isEmpty {
+                return rawObject
+            }
+            let knownKeys = Set(templateObject.keys)
+            if let unknown = rawObject.keys.first(where: { !knownKeys.contains($0) }) {
+                throw PreferenceCompatibilityIssue(
+                    "unknown field \(path.isEmpty ? unknown : "\(path).\(unknown)")"
+                )
+            }
+            var result = rawObject
+            for key in templateObject.keys.sorted() {
+                let previousPath = path
+                path = previousPath.isEmpty ? key : "\(previousPath).\(key)"
+                if let value = rawObject[key] {
+                    result[key] = try normalize(
+                        value,
+                        against: templateObject[key]!,
+                        path: &path,
+                        didFillMissingFields: &didFillMissingFields
+                    )
+                } else {
+                    result[key] = templateObject[key]
+                    didFillMissingFields = true
+                }
+                path = previousPath
+            }
+            return result
+        }
+
+        if let templateArray = template as? [Any] {
+            guard let rawArray = raw as? [Any] else {
+                throw PreferenceCompatibilityIssue(
+                    "\(path.isEmpty ? "value" : path) must be an array"
+                )
+            }
+            // There are currently no array-valued preferences. Keep the
+            // compatibility walker future-proof: a non-empty default array
+            // supplies an element schema, while an empty array is checked by
+            // the final Codable decode (which knows the concrete element
+            // type). Missing arrays are still filled by the object branch.
+            guard let elementTemplate = templateArray.first else {
+                return rawArray
+            }
+            var result: [Any] = []
+            result.reserveCapacity(rawArray.count)
+            for (index, value) in rawArray.enumerated() {
+                let previousPath = path
+                path = "\(previousPath)[\(index)]"
+                result.append(try normalize(
+                    value,
+                    against: elementTemplate,
+                    path: &path,
+                    didFillMissingFields: &didFillMissingFields
+                ))
+                path = previousPath
+            }
+            return result
+        }
+
+        guard Self.isJSONValue(raw, compatibleWith: template) else {
+            throw PreferenceCompatibilityIssue(
+                "\(path.isEmpty ? "value" : path) has an incompatible type"
+            )
+        }
+        return raw
+    }
+
+    private static func isJSONValue(_ value: Any, compatibleWith template: Any) -> Bool {
+        if template is String { return value is String }
+        if template is Bool {
+            guard let number = value as? NSNumber else { return false }
+            return CFGetTypeID(number) == CFBooleanGetTypeID()
+        }
+        if let expected = template as? NSNumber {
+            guard let actual = value as? NSNumber,
+                CFGetTypeID(actual) != CFBooleanGetTypeID()
+            else { return false }
+            // JSON has one numeric value type. Foundation may represent an
+            // integral Double as an integer NSNumber (and vice versa) after a
+            // round trip. The final Codable decode enforces whether the
+            // destination property is an Int or a Double, so this preflight
+            // only rejects non-numbers, Booleans, and non-finite values.
+            _ = expected
+            return actual.doubleValue.isFinite
+        }
+        return value is NSNull && template is NSNull
+    }
+
+    private struct PreferenceCompatibilityIssue: Error {
+        let message: String
+
+        init(_ message: String) { self.message = message }
     }
 }
 

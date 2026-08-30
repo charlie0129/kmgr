@@ -23,11 +23,13 @@ private actor ColumnConfigurationRepository {
         store = ColumnConfigurationFileStore(path: path)
     }
 
-    func load(reload: Bool) throws -> ColumnsConfigurationDocument {
-        if !reload, let document { return document }
-        let loaded = try store.load()
-        document = loaded
-        return loaded
+    func load(reload: Bool) throws -> ColumnConfigurationLoadResult {
+        if !reload, let document {
+            return ColumnConfigurationLoadResult(document: document)
+        }
+        let result = store.loadRecovering()
+        document = result.document
+        return result
     }
 
     func replace(
@@ -78,7 +80,7 @@ private actor ColumnConfigurationRepository {
     ) throws -> MutationResult? {
         guard let latest = latestMutationSequenceByMatch[match], sequence <= latest
         else { return nil }
-        let current = try document ?? store.load()
+        let current = try document ?? store.loadStrict()
         return MutationResult(
             sequence: sequence,
             document: current,
@@ -88,8 +90,8 @@ private actor ColumnConfigurationRepository {
     }
 
     private func mutationBaseline() throws -> ColumnsConfigurationDocument {
-        let baseline = try document ?? store.load()
-        let currentOnDisk = try store.load()
+        let baseline = try document ?? store.loadStrict()
+        let currentOnDisk = try store.loadStrict()
         guard currentOnDisk == baseline else {
             // Keep the old baseline so every later implicit layout save also
             // fails closed. Only load(reload: true) adopts an external edit.
@@ -159,7 +161,7 @@ private actor ColumnConfigurationRepository {
 
     func ensureFileExists() throws -> URL {
         let url = try store.ensureFileExists()
-        if document == nil { document = try store.load() }
+        if document == nil { document = store.loadRecovering().document }
         return url
     }
 }
@@ -187,6 +189,7 @@ final class ColumnConfigurationCoordinator {
     private let repository: ColumnConfigurationRepository
     private let layoutPersistenceDelay: Duration
     private var observers: [UUID: Observer] = [:]
+    private var pendingLoadNotice: (action: ColumnConfigurationLoadAction, message: String)?
     private var pendingLayoutSaves: [ColumnResourceMatch: PendingLayoutSave] = [:]
     private var nextMutationSequence: UInt64 = 0
     private var latestPublishedMutationSequenceByMatch: [ColumnResourceMatch: UInt64] = [:]
@@ -209,7 +212,21 @@ final class ColumnConfigurationCoordinator {
             for pending in pendingLayoutSaves.values { pending.task.cancel() }
             pendingLayoutSaves.removeAll(keepingCapacity: true)
         }
-        return try await repository.load(reload: reload)
+        let result = try await repository.load(reload: reload)
+        if let notice = result.notice {
+            pendingLoadNotice = (result.action, notice)
+        } else {
+            pendingLoadNotice = nil
+        }
+        return result.document
+    }
+
+    /// Returns and consumes the notice produced by the most recent load. The
+    /// Columns window uses this to surface recovery/migration work that occurs
+    /// after launch (the launch preflight presents its own notice).
+    func takeLoadNotice() -> (action: ColumnConfigurationLoadAction, message: String)? {
+        defer { pendingLoadNotice = nil }
+        return pendingLoadNotice
     }
 
     @discardableResult
