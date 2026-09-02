@@ -63,10 +63,55 @@ struct ResourceMutationWindowControllerTests {
         let cancelFrame = root.convert(cancel.bounds, from: cancel)
         let formToFooterGap = replicaFrame.minY - cancelFrame.maxY
 
-        #expect(root.bounds.height <= 245)
+        #expect(root.bounds.height <= 200)
         #expect(formToFooterGap >= 0)
-        #expect(formToFooterGap <= 70)
+        #expect(formToFooterGap <= 24)
         #expect(!replicaFrame.intersects(cancelFrame))
+    }
+
+    @Test("scale sheet defaults the field to the current replica count")
+    func scaleSheetPrefillsCurrentReplicas() async throws {
+        let controller = mutationController(
+            mutation: .scale,
+            operationProvider: CapturingMutationOperationProvider(),
+            summaryFields: [
+                ObjectSummaryField(
+                    sectionID: "replicas",
+                    fieldID: "desiredReplicas",
+                    label: "Desired Replicas",
+                    displayText: "4"
+                )
+            ]
+        )
+        let parent = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        parent.makeKeyAndOrderFront(nil)
+        controller.beginSheet(for: parent)
+        defer {
+            controller.window?.orderOut(nil)
+            parent.orderOut(nil)
+        }
+
+        let root = try #require(controller.window?.contentView)
+        let views = mutationDescendants(of: root)
+        let replicas = try #require(views.compactMap { $0 as? NSTextField }
+            .first { $0.accessibilityLabel() == "Replica count" })
+        let apply = try #require(views.compactMap { $0 as? NSButton }
+            .first { $0.title == "Apply" })
+        #expect(replicas.stringValue.isEmpty)
+        #expect(!apply.isEnabled)
+
+        let deadline = ContinuousClock.now + .seconds(2)
+        while replicas.stringValue.isEmpty, ContinuousClock.now < deadline {
+            await Task.yield()
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(replicas.stringValue == "4")
+        #expect(apply.isEnabled)
     }
 }
 }
@@ -74,7 +119,8 @@ struct ResourceMutationWindowControllerTests {
 @MainActor
 private func mutationController(
     mutation: ResourceMutationWindowController.Mutation,
-    operationProvider: any ResourceOperationProviding
+    operationProvider: any ResourceOperationProviding,
+    summaryFields: [ObjectSummaryField] = []
 ) -> ResourceMutationWindowController {
     let identity = ResourceIdentity(
         clusterSessionID: "session",
@@ -98,7 +144,8 @@ private func mutationController(
         confirmationPreferences: ConfirmationPreferences(),
         detailProvider: LoadedMutationDetailProvider(detail: ObjectDetail(
             identity: identity,
-            resourceVersion: "rv-1"
+            resourceVersion: "rv-1",
+            summaryFields: summaryFields
         )),
         operationProvider: operationProvider
     )

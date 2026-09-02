@@ -3,7 +3,8 @@ import KmgrCore
 
 /// Compact native configuration/progress sheet for one optimistic-concurrency
 /// resource mutation. A fresh UID-authoritative GET supplies the resource
-/// version immediately before the operation is submitted.
+/// version immediately before the operation is submitted, and the scale sheet
+/// prefills its field from the workload's current `spec.replicas`.
 @MainActor
 final class ResourceMutationWindowController: NSWindowController, NSWindowDelegate {
     enum Mutation {
@@ -29,8 +30,11 @@ final class ResourceMutationWindowController: NSWindowController, NSWindowDelega
     private let progress = NSProgressIndicator()
     private let primaryButton = NSButton(title: "Apply", target: nil, action: nil)
     private var task: Task<Void, Never>?
+    private var loadTask: Task<Void, Never>?
     private var parentWindow: NSWindow?
     private var terminal = false
+
+    private static let sheetWidth: CGFloat = 640
 
     var onDismiss: (() -> Void)?
 
@@ -48,12 +52,10 @@ final class ResourceMutationWindowController: NSWindowController, NSWindowDelega
         self.confirmationPreferences = confirmationPreferences
         self.detailProvider = detailProvider
         self.operationProvider = operationProvider
-        let contentHeight: CGFloat = switch mutation {
-        case .scale: 240
-        case .rolloutRestart: 340
-        }
+        // The provisional height is replaced by content-driven sizing in
+        // configure(in:) before the panel is ever shown.
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 640, height: contentHeight),
+            contentRect: NSRect(x: 0, y: 0, width: Self.sheetWidth, height: 240),
             styleMask: [.titled, .closable], backing: .buffered, defer: false
         )
         let clusterPresentation = ClusterIdentityPresentation(session: session)
@@ -68,12 +70,13 @@ final class ResourceMutationWindowController: NSWindowController, NSWindowDelega
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("programmatic") }
 
-    deinit { task?.cancel() }
+    deinit { task?.cancel(); loadTask?.cancel() }
 
     func beginSheet(for parent: NSWindow) {
         parentWindow = parent
         guard case .rolloutRestart = mutation else {
             parent.beginSheet(window!)
+            loadCurrentReplicas()
             return
         }
 
@@ -96,7 +99,11 @@ final class ResourceMutationWindowController: NSWindowController, NSWindowDelega
         return true
     }
 
-    func windowWillClose(_ notification: Notification) { onDismiss?() }
+    func windowWillClose(_ notification: Notification) {
+        loadTask?.cancel()
+        loadTask = nil
+        onDismiss?()
+    }
 
     private func configure(in panel: NSPanel) {
         let heading = NSTextField(wrappingLabelWithString:
@@ -110,7 +117,6 @@ final class ResourceMutationWindowController: NSWindowController, NSWindowDelega
         switch mutation {
         case .scale:
             replicasField.placeholderString = "Non-negative integer"
-            replicasField.stringValue = "1"
             replicasField.setAccessibilityLabel("Replica count")
             form.addArrangedSubview(row("Replicas", replicasField))
         case .rolloutRestart:
@@ -137,7 +143,7 @@ final class ResourceMutationWindowController: NSWindowController, NSWindowDelega
         footer.orientation = .horizontal
         footer.alignment = .centerY
         footer.spacing = 8
-        let stack = NSStackView(views: [heading, form, NSView(), footer])
+        let stack = NSStackView(views: [heading, form, footer])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 12
@@ -153,8 +159,12 @@ final class ResourceMutationWindowController: NSWindowController, NSWindowDelega
             heading.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -36),
             form.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -36),
             footer.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -36),
+            // The sheet keeps a fixed width, so the wrapping heading and
+            // status label measure their line counts at the real width.
+            root.widthAnchor.constraint(equalToConstant: Self.sheetWidth),
         ])
         panel.contentView = root
+        resizeToFitContent()
     }
 
     private func row(_ label: String, _ field: NSView) -> NSStackView {
@@ -167,6 +177,57 @@ final class ResourceMutationWindowController: NSWindowController, NSWindowDelega
         row.alignment = field is NSScrollView ? .top : .centerY
         row.spacing = 8
         return row
+    }
+
+    /// Prefills the field with the workload's current replica count so the
+    /// default equals what a no-op apply would submit. The apply path performs
+    /// its own UID-authoritative refresh, so a failed prefill only leaves the
+    /// field empty for manual entry.
+    private func loadCurrentReplicas() {
+        guard loadTask == nil else { return }
+        primaryButton.isEnabled = false
+        progress.startAnimation(nil)
+        setStatus("Loading current replicas…")
+        loadTask = Task { [weak self, detailProvider, identity] in
+            guard let self else { return }
+            defer {
+                loadTask = nil
+                progress.stopAnimation(nil)
+                primaryButton.isEnabled = !terminal
+            }
+            do {
+                let detail = try await detailProvider.getObject(identity: identity)
+                guard !Task.isCancelled else { return }
+                if replicasField.stringValue.isEmpty,
+                    let desired = detail.summaryFields.first(where: {
+                        $0.sectionID == "replicas" && $0.fieldID == "desiredReplicas"
+                    }),
+                    let replicas = Int32(desired.displayText)
+                {
+                    replicasField.stringValue = String(replicas)
+                    window?.makeFirstResponder(replicasField)
+                    replicasField.selectText(nil)
+                }
+                setStatus("")
+            } catch {
+                guard !Task.isCancelled else { return }
+                show(error)
+            }
+        }
+    }
+
+    private func setStatus(_ text: String) {
+        statusLabel.stringValue = text
+        resizeToFitContent()
+    }
+
+    private func resizeToFitContent() {
+        guard let panel = window, let contentView = panel.contentView else { return }
+        contentView.layoutSubtreeIfNeeded()
+        let targetHeight = ceil(contentView.fittingSize.height)
+        guard abs(contentView.bounds.height - targetHeight) > 0.5 else { return }
+        panel.setContentSize(NSSize(width: contentView.bounds.width, height: targetHeight))
+        contentView.layoutSubtreeIfNeeded()
     }
 
     @objc private func apply() {
@@ -253,7 +314,7 @@ final class ResourceMutationWindowController: NSWindowController, NSWindowDelega
         primaryButton.isEnabled = false
         progress.startAnimation(nil)
         statusLabel.toolTip = nil
-        statusLabel.stringValue = "Refreshing exact object identity…"
+        setStatus("Refreshing exact object identity…")
         task = Task { [weak self, detailProvider, operationProvider, identity] in
             guard let self else { return }
             do {
@@ -276,7 +337,7 @@ final class ResourceMutationWindowController: NSWindowController, NSWindowDelega
                     )
                 }
                 for try await value in stream {
-                    statusLabel.stringValue = "Applying… \(value.completedItems)/\(value.totalItems)"
+                    setStatus("Applying… \(value.completedItems)/\(value.totalItems)")
                     if value.state.isTerminal {
                         guard value.state == .succeeded else {
                             throw value.issue ?? ClusterManagerIssue(
@@ -288,7 +349,7 @@ final class ResourceMutationWindowController: NSWindowController, NSWindowDelega
                             )
                         }
                         terminal = true
-                        statusLabel.stringValue = "Succeeded"
+                        setStatus("Succeeded")
                         statusLabel.textColor = .systemGreen
                         primaryButton.isHidden = true
                     }
@@ -321,7 +382,7 @@ final class ResourceMutationWindowController: NSWindowController, NSWindowDelega
 
     private func show(_ error: Error) {
         let presentation = UserFacingErrorPresentation(error)
-        statusLabel.stringValue = presentation.inlineText
+        setStatus(presentation.inlineText)
         statusLabel.toolTip = presentation.detailedText
         statusLabel.textColor = .systemRed
         if case .rolloutRestart = mutation {
@@ -333,6 +394,8 @@ final class ResourceMutationWindowController: NSWindowController, NSWindowDelega
 
     @objc private func cancel() {
         guard task == nil, let window else { NSSound.beep(); return }
+        loadTask?.cancel()
+        loadTask = nil
         if let parentWindow { parentWindow.endSheet(window) }
         window.orderOut(nil)
         onDismiss?()
