@@ -110,9 +110,9 @@ sole live owner and warns for missing, stale, or ambiguous references. Its
 exact `metadata.name` selector is sent to the API server, while the referenced
 UID is kept separately only to auto-select the intended row. A same-name
 replacement can therefore remain visible without being selected. Command-P
-uses the same query and UID rule in a new workspace. Command-O uses the Pod's
-exact Node-name selector in a new workspace and selects its sole filtered
-result when one is returned.
+uses the same query and UID rule in a new workspace. O and Command-O use the
+Pod's exact Node-name selector and select its sole filtered result when one is
+returned, including after the destination stream is refreshed.
 
 Editing or replacing that text edits the one query and therefore immediately
 removes or changes the relationship constraint. History and window restoration

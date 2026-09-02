@@ -146,7 +146,8 @@ live in one app-wide Port Forwards window.
   `fieldSelector:"metadata.name=…"` server-side query and auto-selects only
   the referenced UID, never a same-name replacement.
 - Press `O` on a selected Pod to show its assigned Node in the current
-  workspace, or Command-O to open that Node list in a new workspace.
+  workspace, or Command-O to open that Node list in a new workspace. The
+  exact Node-name query selects its sole result when one is returned.
 - `Y` opens an independent, UID-pinned read-only YAML utility; `E` opens or
   focuses that same utility and immediately enters editing. The YAML utility
   has an exact received-byte count, explicit refresh, and the validated

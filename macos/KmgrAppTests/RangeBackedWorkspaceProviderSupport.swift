@@ -77,6 +77,24 @@ func fetchTestResourceViewRange(
     try TestResourceViewRangeStore.shared.fetch(request)
 }
 
+func applyTestSelectionGesture(
+    sessionID: String,
+    viewID: String,
+    generation: UInt64,
+    indexRevision: UInt64,
+    previousToken: String,
+    gesture: ResourceSelectionGesture
+) throws -> ResourceSelectionState {
+    try TestResourceViewRangeStore.shared.applySelectionGesture(
+        sessionID: sessionID,
+        viewID: viewID,
+        generation: generation,
+        indexRevision: indexRevision,
+        previousToken: previousToken,
+        gesture: gesture
+    )
+}
+
 func testSnapshotInvalidation(
     request: ResourceViewRequest,
     sequence: UInt64,

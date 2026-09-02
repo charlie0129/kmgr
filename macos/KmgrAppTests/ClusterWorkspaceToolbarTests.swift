@@ -2485,6 +2485,134 @@ struct ClusterWorkspaceToolbarTests {
         }
     }
 
+    @Test("Command-O selects the Node result through a fresh sibling shell")
+    func commandShowAssignedNodeShortcutSelectsThroughSiblingRecovery() async throws {
+        let pod = toolbarPodIdentity()
+        let provider = PodNodeDrillDownWorkspaceResourceProvider(pod: pod)
+        let controller = makeWorkspace(
+            session: OpenedClusterSession(
+                sessionID: "shell-session",
+                contextName: "test-context",
+                clusterName: "test-cluster",
+                serverHostname: "example.invalid",
+                defaultNamespace: "default"
+            ),
+            provider: provider,
+            restoration: ClusterWindowRestorationRecord(
+                id: "pod-node-sibling-shell",
+                state: ClusterWindowRestorationState(
+                    contextName: "test-context",
+                    namespaceScope: .all
+                )
+            ),
+            startsAuthenticated: false
+        )
+        controller.showWindow(nil)
+        defer { controller.close() }
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
+        let table = try #require(descendants(of: root).compactMap { $0 as? NSTableView }
+            .first { $0.accessibilityLabel() == "Kubernetes resources" })
+
+        let request = ClusterWorkspaceOpenRequest(
+            contextReference: controller.session.contextReference,
+            namespaceScope: NamespaceSelection(),
+            resource: GVR(group: "", version: "v1", resource: "nodes"),
+            filter: "fieldSelector:\"metadata.name=worker-a\"",
+            selectOnlyResult: true
+        )
+        controller.open(request)
+        controller.recover(with: OpenedClusterSession(
+            sessionID: "recovered-session",
+            contextName: "test-context",
+            clusterName: "test-cluster",
+            serverHostname: "example.invalid",
+            defaultNamespace: "default"
+        ))
+
+        try await waitUntil {
+            provider.streamRequests.contains { $0.resource.resource == "nodes" }
+                && table.numberOfRows == 1
+                && resourceRowIsMaterialized(0, in: table)
+                && table.selectedRowIndexes == IndexSet(integer: 0)
+        }
+    }
+
+    @Test("Command-O keeps selection when the destination stream reopens")
+    func commandShowAssignedNodeShortcutKeepsSelectionAcrossColumnReload() async throws {
+        let pod = toolbarPodIdentity()
+        let provider = PodNodeDrillDownWorkspaceResourceProvider(pod: pod)
+        let loader = ToolbarStagedColumnConfigurationLoader()
+        let nodes = ColumnResourceMatch(group: "", version: "v1", resource: "nodes")
+        let name = ColumnDefinition(
+            id: "name", title: "Name", source: .builtin, value: "name", type: .string
+        )
+        let extra = ColumnDefinition(
+            id: "extra", title: "Extra", source: .cel,
+            expression: "object.metadata.name", type: .string
+        )
+        let controller = makeColumnPropagationWorkspace(
+            session: OpenedClusterSession(
+                sessionID: "selection-reopen-session",
+                contextName: "test-context",
+                clusterName: "test-cluster",
+                serverHostname: "example.invalid",
+                defaultNamespace: "default"
+            ),
+            provider: provider,
+            optionalResourceCatalogProvider: NoopOptionalResourceCatalogProvider(),
+            columnsConfigurationPath: "/tmp/kmgr-toolbar-selection-reopen-\(UUID().uuidString).yaml",
+            columnsConfigurationLoader: loader.loader,
+            tableColumnMutationAllowed: { true }
+        )
+        controller.showWindow(nil)
+        defer {
+            provider.releaseDelayedSelectionApplication()
+            loader.cancelPendingLoads()
+            controller.close()
+        }
+        let window = try #require(controller.window)
+        let root = try #require(window.contentView)
+        let table = try #require(descendants(of: root).compactMap { $0 as? NSTableView }
+            .first { $0.accessibilityLabel() == "Kubernetes resources" })
+        try await waitUntil { provider.streamRequests.contains { $0.resource.resource == "pods" } }
+        provider.delayNextSelectionApplication()
+        controller.open(ClusterWorkspaceOpenRequest(
+            contextReference: controller.session.contextReference,
+            namespaceScope: NamespaceSelection(),
+            resource: GVR(group: "", version: "v1", resource: "nodes"),
+            filter: "fieldSelector:\"metadata.name=worker-a\"",
+            selectOnlyResult: true
+        ))
+        try await waitUntil {
+            provider.streamRequests.contains { $0.resource.resource == "nodes" }
+                && table.numberOfRows == 1
+                && resourceRowIsMaterialized(0, in: table)
+                && provider.hasDelayedSelection
+        }
+        #expect(table.selectedRowIndexes == IndexSet(integer: 0))
+        loader.complete(with: ColumnsConfigurationDocument(views: [
+            ResourceColumnConfiguration(match: nodes, columns: [name, extra])
+        ]))
+        try await waitUntil {
+            provider.streamRequests.filter { $0.resource.resource == "nodes" }.count >= 2
+                && table.numberOfRows == 1
+                && resourceRowIsMaterialized(0, in: table)
+        }
+        // The first RPC is now pinned to the obsolete generation. Release it
+        // only after the replacement stream exists so the retry must use the
+        // new generation rather than silently succeeding on the old one.
+        provider.releaseDelayedSelectionApplication()
+        try await waitUntil {
+            table.numberOfRows == 1
+                && resourceRowIsMaterialized(0, in: table)
+                && table.selectedRowIndexes == IndexSet(integer: 0)
+        }
+        try await waitUntil { provider.selectionApplications.count >= 2 }
+        let generations = Set(provider.selectionApplications.map(\.generation))
+        #expect(generations.count >= 2)
+    }
+
     @Test("R opens the single detailed rollout restart confirmation")
     func rolloutRestartShortcut() async throws {
         let deployment = ResourceIdentity(
@@ -4857,6 +4985,10 @@ private final class PodNodeDrillDownWorkspaceResourceProvider:
     private let lock = NSLock()
     private let pod: ResourceIdentity
     private var storedStreamRequests: [ResourceViewRequest] = []
+    private var storedSelectionApplications: [ResourceSelectionRevision] = []
+    private var delaySelection = false
+    private var delayedSelectionContinuation: CheckedContinuation<Void, Never>?
+    private var latestGeneration: UInt64 = 0
 
     init(pod: ResourceIdentity) {
         self.pod = pod
@@ -4864,6 +4996,26 @@ private final class PodNodeDrillDownWorkspaceResourceProvider:
 
     var streamRequests: [ResourceViewRequest] {
         lock.withLock { storedStreamRequests }
+    }
+
+    var selectionApplications: [ResourceSelectionRevision] {
+        lock.withLock { storedSelectionApplications }
+    }
+
+    func delayNextSelectionApplication() {
+        lock.withLock { delaySelection = true }
+    }
+
+    func releaseDelayedSelectionApplication() {
+        let continuation = lock.withLock { () -> CheckedContinuation<Void, Never>? in
+            defer { delayedSelectionContinuation = nil }
+            return delayedSelectionContinuation
+        }
+        continuation?.resume()
+    }
+
+    var hasDelayedSelection: Bool {
+        lock.withLock { delayedSelectionContinuation != nil }
     }
 
     func discoverResources(sessionID: String, refresh: Bool) async throws
@@ -4883,10 +5035,55 @@ private final class PodNodeDrillDownWorkspaceResourceProvider:
 
     func listNamespaces(sessionID: String) async throws -> [String] { ["default"] }
 
+    func applySelectionGesture(
+        sessionID: String,
+        viewID: String,
+        generation: UInt64,
+        indexRevision: UInt64,
+        previousToken: String,
+        gesture: ResourceSelectionGesture
+    ) async throws -> ResourceSelectionState {
+        lock.withLock {
+            storedSelectionApplications.append(ResourceSelectionRevision(
+                generation: generation,
+                indexRevision: indexRevision
+            ))
+        }
+        let shouldDelay = lock.withLock { () -> Bool in
+            defer { delaySelection = false }
+            return delaySelection
+        }
+        if shouldDelay {
+            await withCheckedContinuation { continuation in
+                lock.withLock { delayedSelectionContinuation = continuation }
+            }
+        }
+        let isStale = lock.withLock { generation != latestGeneration }
+        if isStale {
+            throw ClusterManagerIssue(
+                category: .validation,
+                reason: ClusterManagerIssue.staleResourceViewRevisionReason,
+                message: "The test resource ordering changed before the selection gesture was applied.",
+                operation: "apply test resource selection gesture"
+            )
+        }
+        return try applyTestSelectionGesture(
+            sessionID: sessionID,
+            viewID: viewID,
+            generation: generation,
+            indexRevision: indexRevision,
+            previousToken: previousToken,
+            gesture: gesture
+        )
+    }
+
     func streamView(request: ResourceViewRequest)
         -> AsyncThrowingStream<ResourceViewMessage, Error>
     {
-        lock.withLock { storedStreamRequests.append(request) }
+        lock.withLock {
+            storedStreamRequests.append(request)
+            latestGeneration = request.generation
+        }
         let rows: [ResourceRow]
         switch request.resource.resource {
         case "pods":
@@ -4934,6 +5131,37 @@ private final class PodNodeDrillDownWorkspaceResourceProvider:
             displayText: identity.name,
             typedValue: .string(identity.name)
         )])
+    }
+}
+
+private final class ToolbarStagedColumnConfigurationLoader: @unchecked Sendable {
+    private typealias PendingLoad = CheckedContinuation<ColumnsConfigurationDocument, any Error>
+    private let lock = NSLock()
+    private var pending: PendingLoad?
+
+    var loader: ColumnConfigurationDocumentLoader {
+        ColumnConfigurationDocumentLoader { [weak self] _ in
+            guard let self else { throw CancellationError() }
+            return try await withCheckedThrowingContinuation { continuation in
+                self.lock.withLock { self.pending = continuation }
+            }
+        }
+    }
+
+    func complete(with document: ColumnsConfigurationDocument) {
+        let continuation = lock.withLock { () -> PendingLoad? in
+            defer { pending = nil }
+            return pending
+        }
+        continuation?.resume(returning: document)
+    }
+
+    func cancelPendingLoads() {
+        let continuation = lock.withLock { () -> PendingLoad? in
+            defer { pending = nil }
+            return pending
+        }
+        continuation?.resume(throwing: CancellationError())
     }
 }
 

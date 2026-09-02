@@ -4357,6 +4357,23 @@ private struct PendingResourceSelectionGesture: Sendable {
     /// True when this gesture was captured by UID from warm rows and should
     /// keep its local placeholder until the fresh token projection arrives.
     var preservesUIDPlaceholder: Bool
+    /// True for a controller-owned gesture that is retryable while a
+    /// relationship drill-down's destination stream is being rebuilt.
+    var isAutomaticSelection: Bool = false
+}
+
+private struct AutomaticSelectionAttempt: Equatable {
+    var revision: ResourceSelectionRevision
+    var targetUID: ResourceUID
+}
+
+/// Selection intent for a relationship query whose result is expected to be
+/// unique. The intent survives internal stream generations (for example,
+/// when a fresh sibling finishes loading its column configuration) until the
+/// exact result has been captured by the backend selection token.
+private struct PendingAutomaticSelection: Equatable {
+    var expectedUID: ResourceUID?
+    var attempt: AutomaticSelectionAttempt?
 }
 
 private struct DeferredUIDSelectionGesture: Sendable {
@@ -4621,10 +4638,10 @@ private final class ResourceListViewController: NSViewController,
     /// Exact relationship drill-downs may request selection once their
     /// revision-pinned result is materialized. When a UID is supplied, a
     /// same-name replacement remains visible but is never auto-selected.
-    private var pendingSelectOnlyResult = false
-    private var pendingSelectResultUID: ResourceUID?
-    private var selectOnlyResultGeneration: UInt64?
-    private var selectResultUID: ResourceUID?
+    /// Internal stream generations do not consume this intent; only a
+    /// successful current-generation selection (or an explicit superseding
+    /// action) does.
+    private var pendingAutomaticSelection: PendingAutomaticSelection?
     private var restorationCheckpointTask: Task<Void, Never>?
     private var freshnessAgeTask: Task<Void, Never>?
     private var resourceViewStatus: ResourceViewStatus?
@@ -5000,10 +5017,9 @@ private final class ResourceListViewController: NSViewController,
         selectResultUID: ResourceUID? = nil,
         reason: ResourceStreamOpenReason
     ) {
-        pendingSelectOnlyResult = selectOnlyResult || selectResultUID != nil
-        pendingSelectResultUID = selectResultUID
-        selectOnlyResultGeneration = nil
-        self.selectResultUID = nil
+        pendingAutomaticSelection = (selectOnlyResult || selectResultUID != nil)
+            ? PendingAutomaticSelection(expectedUID: selectResultUID)
+            : nil
         traceResourceCache(
             "event=open_resource reason=\(reason.rawValue) target_gvr="
                 + resourceCacheGVRDescription(resourceGVR(for: resource))
@@ -5064,10 +5080,7 @@ private final class ResourceListViewController: NSViewController,
 
     func changeNamespaceScope(_ scope: NamespaceSelection) {
         guard self.scope != scope else { return }
-        pendingSelectOnlyResult = false
-        pendingSelectResultUID = nil
-        selectOnlyResultGeneration = nil
-        selectResultUID = nil
+        clearPendingAutomaticSelection()
         traceResourceCache(
             "event=namespace_change from=\(resourceCacheScopeDescription(self.scope))"
                 + " to=\(resourceCacheScopeDescription(scope))"
@@ -5103,6 +5116,7 @@ private final class ResourceListViewController: NSViewController,
         // window is opened. `stop()` is terminal and owns cancellation
         // of every token, gesture, projection, command, expiry, and Columns task.
         resetSelectionAuthority()
+        clearPendingAutomaticSelection()
         clearOptionalResourceOverlay()
     }
 
@@ -5477,10 +5491,7 @@ private final class ResourceListViewController: NSViewController,
     }
 
     func setFilter(_ value: String) {
-        pendingSelectOnlyResult = false
-        pendingSelectResultUID = nil
-        selectOnlyResultGeneration = nil
-        selectResultUID = nil
+        clearPendingAutomaticSelection()
         resetFilterCompletion()
         filterRevision &+= 1
         filterTask?.cancel()
@@ -5725,10 +5736,7 @@ private final class ResourceListViewController: NSViewController,
 
     func controlTextDidChange(_ obj: Notification) {
         guard obj.object as? NSControl === filterField else { return }
-        pendingSelectOnlyResult = false
-        pendingSelectResultUID = nil
-        selectOnlyResultGeneration = nil
-        selectResultUID = nil
+        clearPendingAutomaticSelection()
         clearTransientCellPresentation()
         filterRevision &+= 1
         filterTask?.cancel()
@@ -6066,10 +6074,6 @@ private final class ResourceListViewController: NSViewController,
         let historySelectionUIDs = reason == .historyRestore
             ? pendingSelectionUIDs : nil
         generation &+= 1
-        selectOnlyResultGeneration = pendingSelectOnlyResult ? generation : nil
-        selectResultUID = pendingSelectOnlyResult ? pendingSelectResultUID : nil
-        pendingSelectOnlyResult = false
-        pendingSelectResultUID = nil
         if previousStreamContext == nextStreamContext {
             // A new generation has a new numeric ordering even when warm rows
             // are retained. Keep the immutable displayed token for UID
@@ -6979,6 +6983,10 @@ private final class ResourceListViewController: NSViewController,
             range.startIndex + UInt64(range.rows.count)
         ), presentedRangeRevision == range.revision {
             clearInlineIssue(scope: .range)
+            // A stale automatic-selection RPC can finish after the range has
+            // already been installed. Revisit the bounded sole row here so a
+            // retry does not depend on another transport invalidation.
+            selectOnlyResultIfPossible(in: range)
             return
         }
         let promoteProvisionalMetricRange = ResourceWarmRowPolicy
@@ -7159,29 +7167,82 @@ private final class ResourceListViewController: NSViewController,
         runPendingSelectionCommandIfReady()
     }
 
+    private func clearPendingAutomaticSelection() {
+        pendingAutomaticSelection = nil
+    }
+
+    private func resetAutomaticSelectionAttempt(
+        for revision: ResourceSelectionRevision
+    ) {
+        guard var pending = pendingAutomaticSelection,
+            pending.attempt?.revision == revision
+        else { return }
+        pending.attempt = nil
+        pendingAutomaticSelection = pending
+    }
+
+    private func discardAutomaticSelectionPlaceholder(
+        for pending: PendingResourceSelectionGesture
+    ) {
+        // A retry for a newer generation may already have installed the same
+        // numeric placeholder. Never let a late response from the old attempt
+        // erase that newer optimistic presentation.
+        guard pendingAutomaticSelection?.attempt?.revision == pending.revision else {
+            return
+        }
+        discardSelectionPlaceholder(for: pending)
+    }
+
     private func selectOnlyResultIfPossible(in range: ResourceViewRange) {
-        guard selectOnlyResultGeneration == range.revision.generation else { return }
+        guard var pending = pendingAutomaticSelection,
+            range.revision.generation == generation
+        else { return }
         guard range.rowsVisible <= 1 else {
-            selectOnlyResultGeneration = nil
-            selectResultUID = nil
+            clearPendingAutomaticSelection()
             return
         }
         guard range.rowsVisible == 1,
             range.startIndex == 0,
             range.rows.count == 1
         else { return }
+        // The automatic gesture is numeric and must be pinned to the exact
+        // range just installed. If AppKit is still showing a warm
+        // presentation, wait for its fresh projection instead of deferring a
+        // number that could be rebound to another row.
+        guard interactiveSelectionRevision != nil else { return }
 
-        selectOnlyResultGeneration = nil
-        let expectedUID = selectResultUID
-        selectResultUID = nil
-        guard expectedUID == nil || range.rows[0].identity.uid == expectedUID else {
+        let row = range.rows[0]
+        guard pending.expectedUID == nil || row.identity.uid == pending.expectedUID else {
+            // The exact parent UID disappeared and a same-name replacement
+            // is visible. Keep the replacement in the list, but never infer
+            // that it is the relationship target.
+            clearPendingAutomaticSelection()
             return
         }
-        _ = performSelectionGesture(ResourceTableSelectionGesture(
-            row: 0,
-            modifiers: [],
-            keyboardDirection: nil
-        ))
+
+        let revision = ResourceSelectionRevision(
+            generation: range.revision.generation,
+            indexRevision: range.revision.index
+        )
+        guard revision.isValid else { return }
+        let attempt = AutomaticSelectionAttempt(
+            revision: revision,
+            targetUID: row.identity.uid
+        )
+        guard pending.attempt != attempt else { return }
+        pending.attempt = attempt
+        pendingAutomaticSelection = pending
+        let accepted = performSelectionGesture(
+            ResourceTableSelectionGesture(
+                row: 0,
+                modifiers: [],
+                keyboardDirection: nil
+            ),
+            isAutomaticSelection: true
+        )
+        if !accepted {
+            clearPendingAutomaticSelection()
+        }
     }
 
     private func replayDeferredUIDSelectionGestures(
@@ -8564,10 +8625,7 @@ private final class ResourceListViewController: NSViewController,
         _ restoration: ClusterWindowRestorationState,
         discoveredResources: [DiscoveredResource]
     ) -> Bool {
-        pendingSelectOnlyResult = false
-        pendingSelectResultUID = nil
-        selectOnlyResultGeneration = nil
-        selectResultUID = nil
+        clearPendingAutomaticSelection()
         guard let gvr = restoration.gvr,
             let restored = discoveredResources.first(where: {
                 $0.group == gvr.group && $0.version == gvr.version && $0.resource == gvr.resource
@@ -8686,10 +8744,7 @@ private final class ResourceListViewController: NSViewController,
     }
 
     func restoreResource(_ state: ResourceNavigationState) {
-        pendingSelectOnlyResult = false
-        pendingSelectResultUID = nil
-        selectOnlyResultGeneration = nil
-        selectResultUID = nil
+        clearPendingAutomaticSelection()
         traceResourceCache(
             "event=restore_resource target_gvr="
                 + resourceCacheGVRDescription(GVR(
@@ -9055,7 +9110,15 @@ private final class ResourceListViewController: NSViewController,
         ))
     }
 
-    private func performSelectionGesture(_ gesture: ResourceTableSelectionGesture) -> Bool {
+    private func performSelectionGesture(
+        _ gesture: ResourceTableSelectionGesture,
+        isAutomaticSelection: Bool = false
+    ) -> Bool {
+        if !isAutomaticSelection {
+            // A real user gesture supersedes relationship-navigation intent;
+            // otherwise a late stream refresh could select an unrelated row.
+            clearPendingAutomaticSelection()
+        }
         // An endpoint fetch belongs to the drag that started it. Any later
         // click or keyboard gesture supersedes that drag; cancel it before
         // translating the newer gesture so a late response cannot retarget
@@ -9142,12 +9205,13 @@ private final class ResourceListViewController: NSViewController,
         } else {
             backendGesture = ResourceSelectionGesture(kind: .clear)
         }
-        _ = enqueueSelectionGesture(
+        let accepted = enqueueSelectionGesture(
             backendGesture,
             revision: revision,
-            activeEndpoint: targetIndex
+            activeEndpoint: targetIndex,
+            isAutomaticSelection: isAutomaticSelection
         )
-        return true
+        return isAutomaticSelection ? accepted : true
     }
 
     /// Converts AppKit's compact contiguous drag result into one stable
@@ -9643,7 +9707,8 @@ private final class ResourceListViewController: NSViewController,
         activeEndpoint: UInt64?,
         preservesUIDPlaceholder: Bool = false,
         selectionFences: [ResourceSelectionGestureFence] = [],
-        preservesPendingCommand: Bool = false
+        preservesPendingCommand: Bool = false,
+        isAutomaticSelection: Bool = false
     ) -> Bool {
         guard pendingSelectionGestureCount < Self.maxPendingSelectionGestures else {
             // Consume overflow without allowing AppKit's delegate-first
@@ -9673,7 +9738,8 @@ private final class ResourceListViewController: NSViewController,
             revision: revision,
             gesture: gesture,
             activeEndpoint: activeEndpoint,
-            preservesUIDPlaceholder: preservesUIDPlaceholder
+            preservesUIDPlaceholder: preservesUIDPlaceholder,
+            isAutomaticSelection: isAutomaticSelection
         ))
         if preservesUIDPlaceholder {
             pendingUIDSelectionGestureSequences.insert(sequence)
@@ -9757,7 +9823,12 @@ private final class ResourceListViewController: NSViewController,
                 let pending = popPendingSelectionGesture()
             {
                 guard currentSelectionRevision == pending.revision else {
-                    discardSelectionPlaceholder(for: pending)
+                    if pending.isAutomaticSelection {
+                        discardAutomaticSelectionPlaceholder(for: pending)
+                        resetAutomaticSelectionAttempt(for: pending.revision)
+                    } else {
+                        discardSelectionPlaceholder(for: pending)
+                    }
                     pendingUIDSelectionGestureSequences.remove(pending.sequence)
                     resolveSelectionGestureFences(
                         sequence: pending.sequence,
@@ -9796,11 +9867,16 @@ private final class ResourceListViewController: NSViewController,
                     )
                 } catch {
                     guard !Task.isCancelled else { return }
-                    receiveSelectionGestureFailure(error, pending: pending)
-                    failSelectionGestureFences(
-                        fromSequence: pending.sequence,
-                        error: error
+                    let preservedQueuedGestures = receiveSelectionGestureFailure(
+                        error,
+                        pending: pending
                     )
+                    if !preservedQueuedGestures {
+                        failSelectionGestureFences(
+                            fromSequence: pending.sequence,
+                            error: error
+                        )
+                    }
                 }
             }
             guard !Task.isCancelled else { return }
@@ -9813,9 +9889,34 @@ private final class ResourceListViewController: NSViewController,
         _ state: ResourceSelectionState,
         pending: PendingResourceSelectionGesture
     ) {
+        let selectionRevisionIsCurrent = currentSelectionRevision == pending.revision
         guard !state.token.isEmpty, state.revision == pending.revision else {
-            discardSelectionPlaceholder(for: pending)
+            if pending.isAutomaticSelection {
+                discardAutomaticSelectionPlaceholder(for: pending)
+            } else {
+                discardSelectionPlaceholder(for: pending)
+            }
             pendingUIDSelectionGestureSequences.remove(pending.sequence)
+            if pending.isAutomaticSelection {
+                if selectionRevisionIsCurrent {
+                    clearPendingAutomaticSelection()
+                } else {
+                    resetAutomaticSelectionAttempt(for: pending.revision)
+                }
+            }
+            if pending.isAutomaticSelection {
+                restoreAppKitSelectionFromLoadedModel()
+            }
+            return
+        }
+        if pending.isAutomaticSelection, !selectionRevisionIsCurrent {
+            // A late success from an obsolete stream must not install its
+            // token as the current selection. Keep the relationship intent so
+            // the first range of the replacement generation can retry it.
+            discardAutomaticSelectionPlaceholder(for: pending)
+            pendingUIDSelectionGestureSequences.remove(pending.sequence)
+            resetAutomaticSelectionAttempt(for: pending.revision)
+            restoreAppKitSelectionFromLoadedModel()
             return
         }
         pendingUIDSelectionGestureSequences.remove(pending.sequence)
@@ -9835,12 +9936,40 @@ private final class ResourceListViewController: NSViewController,
         scheduleSelectionProjection()
         updateStatusLine()
         publishContextualShortcutsIfChanged()
+        if pending.isAutomaticSelection {
+            // Only a success against the current generation resolves the
+            // one-shot intent. A stale success was handled above and remains
+            // retryable.
+            clearPendingAutomaticSelection()
+        }
     }
 
+    /// Returns true when the failure belongs to a retryable automatic
+    /// selection and newer queued gestures must remain intact.
+    @discardableResult
     private func receiveSelectionGestureFailure(
         _ error: Error,
         pending: PendingResourceSelectionGesture
-    ) {
+    ) -> Bool {
+        let selectionRevisionIsCurrent = currentSelectionRevision == pending.revision
+        let isStale = !selectionRevisionIsCurrent
+            || (error as? ClusterManagerIssue)?.isStaleResourceViewRequest == true
+        if pending.isAutomaticSelection, isStale {
+            // Stream generations and index revisions can advance while the
+            // serialized selection RPC is in flight. Do not clear a newer
+            // queued retry; simply make the intent eligible for the next
+            // exact range.
+            discardAutomaticSelectionPlaceholder(for: pending)
+            resetAutomaticSelectionAttempt(for: pending.revision)
+            pendingUIDSelectionGestureSequences.remove(pending.sequence)
+            restoreAppKitSelectionFromLoadedModel()
+            scheduleSelectionProjection()
+            return true
+        }
+        if pending.isAutomaticSelection {
+            // A non-race failure is terminal for this navigation gesture.
+            clearPendingAutomaticSelection()
+        }
         discardSelectionPlaceholder(for: pending)
         clearPendingSelectionGestures()
         pendingSelectionTableIndexes = nil
@@ -9855,7 +9984,7 @@ private final class ResourceListViewController: NSViewController,
         }
         restoreAppKitSelectionFromLoadedModel()
         scheduleSelectionProjection()
-        guard currentSelectionRevision == pending.revision else { return }
+        guard currentSelectionRevision == pending.revision else { return false }
         if pending.preservesUIDPlaceholder,
             let issue = error as? ClusterManagerIssue,
             issue.category == .notFound
@@ -9863,7 +9992,7 @@ private final class ResourceListViewController: NSViewController,
             // The UID (or Shift anchor) disappeared in the fresh ordering.
             // Clearing the optimistic selection is the requested outcome, not
             // an actionable backend error.
-            return
+            return false
         }
         if let issue = error as? ClusterManagerIssue,
             issue.isStaleResourceViewRequest
@@ -9872,9 +10001,10 @@ private final class ResourceListViewController: NSViewController,
                 "event=selection_gesture_ignored cause=revision-race"
                     + " index=\(pending.revision.indexRevision)"
             )
-            return
+            return false
         }
         show(error: error, scope: .selection)
+        return false
     }
 
     private func discardSelectionPlaceholder(
