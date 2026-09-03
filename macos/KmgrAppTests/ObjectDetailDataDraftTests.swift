@@ -236,12 +236,12 @@ struct ObjectDetailDataDraftTests {
         #expect(try valueText(in: table, row: 0) == "draft alpha")
     }
 
-    @Test("Data text editor applies YAML and nested JSON highlighting without binary colors")
+    @Test("Data text editor applies structured highlighting and per-value indentation")
     func dataValueSyntaxHighlighting() async throws {
         let fixture = detailFixture(resource: "configmaps", secret: false)
-        let yaml = "kind: Deployment\nreplicas: 3\n"
+        let yaml = "kind: Deployment\nspec:\n    replicas: 3\n"
         let json = "[{\"name\":\"api\",\"nested\":{\"enabled\":true}}]"
-        let plain = "ordinary text"
+        let plain = "ordinary\n\ttext"
         let entries = [
             ObjectDataEntry(
                 key: "config.yaml",
@@ -298,6 +298,8 @@ struct ObjectDetailDataDraftTests {
         controller.view.layoutSubtreeIfNeeded()
 
         select(row: try row(forKey: "config.yaml", in: table), in: table, controller: controller)
+        let indentingEditor = try #require(editor as? IndentingTextView)
+        #expect(indentingEditor.indentationStyle == .spaces(width: 4))
         let yamlKeyLocation = (editor.string as NSString).range(of: "kind").location
         try await waitForCondition {
             temporaryColor(in: editor, at: yamlKeyLocation) == .systemPurple
@@ -305,6 +307,7 @@ struct ObjectDetailDataDraftTests {
         expectWhitespaceVisualization(editor, enabled: true)
 
         select(row: try row(forKey: "payload", in: table), in: table, controller: controller)
+        #expect(indentingEditor.indentationStyle == .spaces(width: 2))
         let jsonKeyLocation = (editor.string as NSString).range(of: "\"name\"").location
         let jsonBooleanLocation = (editor.string as NSString).range(of: "true").location
         try await waitForCondition {
@@ -313,6 +316,7 @@ struct ObjectDetailDataDraftTests {
         }
 
         select(row: try row(forKey: "plain", in: table), in: table, controller: controller)
+        #expect(indentingEditor.indentationStyle == .tabs(tabWidth: 4))
         let plainLocation = (editor.string as NSString).range(of: "ordinary").location
         try await waitForCondition {
             temporaryColor(in: editor, at: plainLocation) == nil

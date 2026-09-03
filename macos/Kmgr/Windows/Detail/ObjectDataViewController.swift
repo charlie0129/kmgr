@@ -769,7 +769,7 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
             valueTextView.string = "Secret value concealed · \(count.formatted()) bytes"
             selectedCanEditText = false
             valueTextView.undoManager?.removeAllActions()
-            updateValueSyntaxHighlighting()
+            updateValueSyntaxHighlighting(detectingIndentation: true)
             updateControls()
             return
         }
@@ -789,15 +789,18 @@ final class ObjectDataViewController: NSViewController, NSTableViewDataSource,
             selectedCanEditText = false
         }
         valueTextView.undoManager?.removeAllActions()
-        updateValueSyntaxHighlighting()
+        updateValueSyntaxHighlighting(detectingIndentation: true)
         updateControls()
         if selectedEntry == nil { showMissingDraftStatus() }
     }
 
-    private func updateValueSyntaxHighlighting() {
+    private func updateValueSyntaxHighlighting(
+        detectingIndentation: Bool = false
+    ) {
         editorView.updateSyntaxHighlighting(
             key: selectedKey,
-            isTextValue: selectedCanEditText
+            isTextValue: selectedCanEditText,
+            detectingIndentation: detectingIndentation
         )
     }
 

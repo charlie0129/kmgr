@@ -183,6 +183,12 @@ The shared `DiffTextDocument` uses the same visible-range overlay for bounded
 text portions of YAML and key-value review diffs. Its ranges exclude diff
 prefixes, synthetic line separators, headers, notices, and binary/hex rows.
 
+Document-style editors detect indentation only when a document or selected
+value is installed. The detector reads TextKit's existing UTF-16 backing store
+and stops after 64 KiB or 1,024 lines, whichever comes first; it is not rerun
+for each keystroke. Block indent and outdent work is proportional only to the
+selected lines.
+
 Run the Release diagnostic and opt-in one-frame lexer/apply budget with:
 
 ```sh

@@ -34,7 +34,7 @@ final class KeyValueEditorView: NSView {
     let searchField = NSSearchField()
     let resultLabel = NSTextField(labelWithString: "")
     let tableView = KeyValueEditorTableView()
-    let valueTextView = NSTextView()
+    let valueTextView = IndentingTextView()
     let valueScrollView = NSScrollView()
     let selectedKeyLabel = NSTextField(labelWithString: "No key selected")
     let selectedKeyDetailsLabel = NSTextField(labelWithString: "")
@@ -89,7 +89,8 @@ final class KeyValueEditorView: NSView {
 
     func updateSyntaxHighlighting(
         key: String?,
-        isTextValue: Bool
+        isTextValue: Bool,
+        detectingIndentation: Bool = false
     ) {
         guard let syntaxHighlighter else { return }
         let source: NSString = valueTextView.textStorage?.mutableString
@@ -101,6 +102,14 @@ final class KeyValueEditorView: NSView {
             source: source,
             retaining: retainedMode
         )
+        if detectingIndentation {
+            let contentKind: DocumentIndentationContentKind = switch mode {
+            case .none: .plain
+            case .json: .json
+            case .yaml: .yaml
+            }
+            valueTextView.detectIndentation(for: contentKind, in: source)
+        }
         syntaxHighlighter.setMode(mode)
         syntaxHighlighter.setWhitespaceVisualization(isTextValue)
         syntaxKey = isTextValue ? key : nil
@@ -109,6 +118,7 @@ final class KeyValueEditorView: NSView {
     func clearSyntaxHighlighting() {
         syntaxHighlighter?.setMode(.none)
         syntaxHighlighter?.setWhitespaceVisualization(false)
+        valueTextView.detectIndentation(for: .plain, in: "" as NSString)
         syntaxKey = nil
     }
 

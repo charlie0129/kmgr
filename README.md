@@ -166,8 +166,13 @@ live in one app-wide Port Forwards window.
   diff prefixes, headers, synthetic line separators, and binary previews keep
   their ordinary presentation. These markers are presentation only, so the
   stored bytes, accessibility value, copy/paste, and undo history remain
-  unchanged. Highlighting reads TextKit's existing backing store and caps each
-  refresh independently of total document size.
+  unchanged. Document-style editors detect tabs or recurring space widths when
+  a value is loaded. Tab follows that per-document style, while YAML always
+  inserts spaces (two when the document has no indentation evidence).
+  Shift-Tab outdents complete lines. Pasted whitespace is preserved for review
+  and validation. Highlighting and indentation detection read TextKit's
+  existing backing store and cap each pass independently of total document
+  size.
 - ConfigMap and Secret keys support text and raw binary values. Add, edit,
   rename, and delete operations stay local until **Save Changes**. Data search
   matches complete keys, text values, and staged drafts rather than only the
@@ -269,6 +274,7 @@ globally across launches rather than per cluster.
 | Command-F in a resource or Pod-container table | Configure a port-forward, then show Port Forwards after it starts |
 | Command-Backspace | Confirm deletion of selected resources |
 | Command-S | Save the active YAML or key/value edit |
+| Tab / Shift-Tab in a document editor | Indent / outdent using the detected style; YAML always uses spaces |
 
 Standard AppKit text editing, copy, undo/redo, find, and window behavior remain
 with the focused native control.

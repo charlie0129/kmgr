@@ -321,6 +321,7 @@ final class YAMLSnapshotWindowController: NSWindowController, NSWindowDelegate,
         textView.isRichText = false
         textView.usesFindBar = true
         textView.configureAsTechnicalTextInput()
+        textView.detectIndentation(for: .yaml, in: "" as NSString)
         textView.allowsUndo = true
         textView.textContainerInset = NSSize(width: 10, height: 10)
         textView.setAccessibilityLabel("Kubernetes YAML snapshot")
@@ -601,6 +602,7 @@ final class YAMLSnapshotWindowController: NSWindowController, NSWindowDelegate,
     }
 
     private func replaceYAMLText(with text: String) {
+        textView.detectIndentation(for: .yaml, in: text as NSString)
         guard textView.string != text else { return }
         let selectedRanges = textView.selectedRanges
         let visibleOrigin = scrollView.contentView.bounds.origin

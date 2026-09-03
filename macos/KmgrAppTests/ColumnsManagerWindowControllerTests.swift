@@ -216,6 +216,9 @@ struct ColumnsManagerWindowControllerTests {
             replacementRange: NSRange(location: 0, length: 0)
         )
         #expect(expression.string == "object.metadata.name")
+        let indentingExpression = try #require(expression as? IndentingTextView)
+        indentingExpression.insertTab(nil)
+        #expect(expression.string == "object.metadata.name    ")
     }
 
     @Test("custom columns can be removed while default columns remain available")

@@ -1181,7 +1181,7 @@ final class CELColumnEditorWindowController: NSWindowController,
     private let previewContext: ColumnPreviewContext
     private let idField = TechnicalTextField()
     private let titleField = TechnicalTextField()
-    private let expressionView = NSTextView()
+    private let expressionView = IndentingTextView()
     private let typeButton = NSPopUpButton()
     private let alignmentButton = NSPopUpButton()
     private let missingField = TechnicalTextField()
@@ -1279,6 +1279,7 @@ final class CELColumnEditorWindowController: NSWindowController,
         expressionView.isHorizontallyResizable = false
         expressionView.autoresizingMask = [.width]
         expressionView.configureAsTechnicalTextInput()
+        expressionView.detectIndentation(for: .plain, in: "" as NSString)
         expressionView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
         expressionView.textContainerInset = NSSize(width: 6, height: 6)
         expressionView.textContainer?.widthTracksTextView = true
@@ -1608,6 +1609,7 @@ final class CELColumnEditorWindowController: NSWindowController,
         idField.stringValue = definition.id
         titleField.stringValue = definition.title
         expressionView.string = definition.expression ?? ""
+        expressionView.detectIndentation(for: .plain)
         typeButton.selectItem(at: ColumnResultType.allCases.firstIndex(of: definition.type) ?? 0)
         alignmentButton.selectItem(at: ColumnAlignment.allCases.firstIndex(of: definition.alignment ?? .leading) ?? 0)
         missingField.stringValue = definition.missing ?? ""

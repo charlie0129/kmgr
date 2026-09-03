@@ -1,10 +1,11 @@
 import AppKit
 
-/// Shared keyboard behavior for YAML documents. Read-only YAML uses `/` as a
-/// fast path to AppKit's native find bar; editable YAML keeps `/` as ordinary
-/// document input while Command-F continues through the responder chain.
+/// Shared keyboard and indentation behavior for YAML documents. Read-only YAML
+/// uses `/` as a fast path to AppKit's native find bar; editable YAML keeps `/`
+/// as ordinary document input while Command-F continues through the responder
+/// chain.
 @MainActor
-final class YAMLTextView: NSTextView {
+final class YAMLTextView: IndentingTextView {
     var onPlainEditShortcut: (() -> Bool)?
 
     override func keyDown(with event: NSEvent) {

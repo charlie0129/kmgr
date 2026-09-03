@@ -714,7 +714,11 @@ final class ResourceMetadataEditorWindowController: NSWindowController,
         valueTextView.string = draft.value(for: selectedKey)
             ?? draft.baselineValue(for: selectedKey) ?? ""
         valueTextView.undoManager?.removeAllActions()
-        editorView.updateSyntaxHighlighting(key: selectedKey, isTextValue: true)
+        editorView.updateSyntaxHighlighting(
+            key: selectedKey,
+            isTextValue: true,
+            detectingIndentation: true
+        )
     }
 
     private func updateSelectedStatePresentation(

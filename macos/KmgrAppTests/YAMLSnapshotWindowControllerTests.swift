@@ -214,7 +214,7 @@ struct YAMLSnapshotWindowControllerTests {
         #expect(status.toolTip?.contains("UID-pinned") == true)
     }
 
-    @Test("read-only E starts editing and slash remains contextual")
+    @Test("read-only E starts editing while slash and YAML indentation remain contextual")
     func readOnlyEditAndSlashShortcuts() async throws {
         let identity = yamlSnapshotIdentity()
         let source = "apiVersion: v1\nkind: ConfigMap\n"
@@ -252,9 +252,11 @@ struct YAMLSnapshotWindowControllerTests {
         #expect(textView.isEditable)
         #expect(edit.isHidden)
         textView.setSelectedRange(NSRange(location: (source as NSString).length, length: 0))
+        textView.keyDown(with: try yamlSnapshotKeyEvent("\t", keyCode: 48))
+        #expect(textView.string == source + "  ")
         textView.keyDown(with: try yamlSnapshotKeyEvent("/"))
         #expect(!scroll.isFindBarVisible)
-        #expect(textView.string == source + "/")
+        #expect(textView.string == source + "  /")
     }
 
     @Test("dedicated YAML edits preserve drafts across failure and refresh after success")
@@ -605,7 +607,10 @@ private func yamlSnapshotDescendants(of root: NSView) -> [NSView] {
 }
 
 @MainActor
-private func yamlSnapshotKeyEvent(_ characters: String) throws -> NSEvent {
+private func yamlSnapshotKeyEvent(
+    _ characters: String,
+    keyCode: UInt16 = 44
+) throws -> NSEvent {
     try #require(NSEvent.keyEvent(
         with: .keyDown,
         location: .zero,
@@ -616,7 +621,7 @@ private func yamlSnapshotKeyEvent(_ characters: String) throws -> NSEvent {
         characters: characters,
         charactersIgnoringModifiers: characters,
         isARepeat: false,
-        keyCode: 44
+        keyCode: keyCode
     ))
 }
 
