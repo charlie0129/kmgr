@@ -541,6 +541,14 @@ struct ResourceColumnPropagationTests {
         }
         let firstTable = try #require(resourceTable(in: first))
         let secondTable = try #require(resourceTable(in: second))
+        try setResourceFilter("name:name", in: first)
+        try await waitUntil {
+            firstProvider.streamRequests.last?.filterExpression == "name:name"
+                && self.resourceColumnCellContainsBoldText(
+                    in: firstTable,
+                    columnID: "name"
+                )
+        }
         let initialFirstRequests = firstProvider.streamRequests.count
         let initialSecondRequests = secondProvider.streamRequests.count
         let status = try #require(firstTable.tableColumns.first {
@@ -560,6 +568,12 @@ struct ResourceColumnPropagationTests {
             object: firstTable,
             userInfo: ["NSTableColumn": status, "NSOldWidth": oldWidth]
         ))
+        // The live table must keep the active query emphasis while the
+        // debounced shared-layout save is still pending.
+        #expect(resourceColumnCellContainsBoldText(
+            in: firstTable,
+            columnID: "name"
+        ))
 
         try await waitUntil {
             guard let saved = try? ColumnConfigurationFileStore(path: fixture.path)
@@ -578,6 +592,10 @@ struct ResourceColumnPropagationTests {
         #expect(firstTable.columnAutoresizingStyle == .noColumnAutoresizing)
         #expect(secondTable.columnAutoresizingStyle == .noColumnAutoresizing)
         #expect(abs(firstTable.visibleRect.minX - expectedHorizontalOffset) < 0.5)
+        #expect(resourceColumnCellContainsBoldText(
+            in: firstTable,
+            columnID: "name"
+        ))
     }
 
     @Test("exact-GVR file layout wins over stale per-window restoration")
@@ -1284,6 +1302,33 @@ struct ResourceColumnPropagationTests {
         let root = try #require(controller.window?.contentView)
         return try #require(descendants(of: root).compactMap { $0 as? NSSearchField }
             .first { $0.accessibilityLabel() == "Filter Kubernetes resources" })
+    }
+
+    private func resourceColumnCellContainsBoldText(
+        in table: NSTableView,
+        columnID: String
+    ) -> Bool {
+        let column = table.column(withIdentifier: .init(columnID))
+        guard column >= 0,
+            table.numberOfRows > 0,
+            let text = (table.view(
+                atColumn: column,
+                row: 0,
+                makeIfNecessary: true
+            ) as? NSTableCellView)?.textField?.attributedStringValue
+        else { return false }
+        var containsBoldText = false
+        text.enumerateAttribute(
+            .font,
+            in: NSRange(location: 0, length: text.length)
+        ) { value, _, stop in
+            guard let font = value as? NSFont,
+                NSFontManager.shared.traits(of: font).contains(.boldFontMask)
+            else { return }
+            containsBoldText = true
+            stop.pointee = true
+        }
+        return containsBoldText
     }
 
     private func setResourceFilter(

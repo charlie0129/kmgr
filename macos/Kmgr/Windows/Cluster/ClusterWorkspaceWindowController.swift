@@ -8161,19 +8161,25 @@ private final class ResourceListViewController: NSViewController,
         columnDefinitionsByResourceID[resourceID] = definitions
         let previousEffective = installedColumnDefinitions
         let previousProjection = projectionIdentity(for: previousEffective)
-        let nextProjection = projectionIdentity(
-            for: enabledColumnDefinitions(in: nextEffective)
-        )
+        let nextEnabled = enabledColumnDefinitions(in: nextEffective)
+        let nextProjection = projectionIdentity(for: nextEnabled)
         let previousSort = currentSortPresentation
         let deferredPresentation = deferredColumnPresentationByResourceID
             .removeValue(forKey: resourceID)
         // Opening Columns publishes its freshly loaded draft even when it is
-        // byte-for-byte equivalent to the active layout. Rebuilding AppKit
-        // columns in that case destroys the user's per-window widths and drag
-        // order. Only rebuild when an enabled definition actually changed;
-        // explicit manager reorders and width edits still differ here.
-        if enabledColumnDefinitions(in: nextEffective) != previousEffective {
-            installColumns(nextEffective, preservingCurrentPresentation: true)
+        // byte-for-byte equivalent to the active layout. Presentation-only
+        // edits update existing columns in place so per-window cells (and
+        // their active query emphasis) survive; rebuild only when the backend
+        // projection actually changes.
+        if nextEnabled != previousEffective {
+            if nextProjection == previousProjection,
+                updateInstalledColumnPresentation(nextEffective)
+            {
+                // Presentation-only changes keep the existing AppKit cells,
+                // including query emphasis and UID-keyed transient effects.
+            } else {
+                installColumns(nextEffective, preservingCurrentPresentation: true)
+            }
         }
         if let deferredPresentation {
             applyDeferredColumnPresentation(deferredPresentation)
@@ -8367,12 +8373,7 @@ private final class ResourceListViewController: NSViewController,
         for definition in enabled {
             let column = NSTableColumn(identifier: .init(definition.id))
             column.title = definition.title
-            let configuredWidth = definition.width.map { CGFloat($0) }
-                ?? NativeColumnCatalog.descriptor(
-                    source: definition.source,
-                    value: definition.value ?? definition.id
-                ).map { CGFloat($0.width) }
-                ?? 120
+            let configuredWidth = configuredColumnWidth(for: definition)
             if preservingCurrentPresentation,
                 previousDefinitionsByID[definition.id]?.width == definition.width,
                 let retained = retainedPresentationByID[definition.id]
@@ -8410,6 +8411,64 @@ private final class ResourceListViewController: NSViewController,
                 scrollView.reflectScrolledClipView(scrollView.contentView)
             }
         }
+    }
+
+    /// Applies title, alignment, preferred width, and order changes without
+    /// replacing native columns. Backend projection identity has already been
+    /// proven equal, so existing cell renderer types and row values remain
+    /// valid. Keeping the views alive also preserves active query emphasis.
+    @discardableResult
+    private func updateInstalledColumnPresentation(
+        _ definitions: [ColumnDefinition]
+    ) -> Bool {
+        let enabled = definitions.filter(\.isEnabled)
+        let nextIDs = enabled.map(\.id)
+        let installedIDs = tableView.tableColumns.map { $0.identifier.rawValue }
+        guard nextIDs.count == installedIDs.count,
+            Set(nextIDs) == Set(installedIDs)
+        else { return false }
+
+        // Keep a locally resized width when the persisted definition did not
+        // change its preferred width. This mirrors the structural install's
+        // per-window presentation retention for title/alignment/order edits.
+        let previousDefinitionsByID = columnDefinitionsByID
+        rowChangeDetector = ResourceRowChangeDetector(
+            columnDefinitions: definitions
+        )
+        columnDefinitionsByID.removeAll(keepingCapacity: true)
+        for definition in definitions {
+            columnDefinitionsByID[definition.id] = definition
+        }
+        columnIDs = nextIDs
+
+        let wasSuppressingPresentationCheckpoint = suppressPresentationCheckpoint
+        suppressPresentationCheckpoint = true
+        defer {
+            suppressPresentationCheckpoint = wasSuppressingPresentationCheckpoint
+        }
+        for definition in enabled {
+            guard let column = tableView.tableColumns.first(where: {
+                $0.identifier.rawValue == definition.id
+            }) else { continue }
+            column.title = definition.title
+            if previousDefinitionsByID[definition.id]?.width != definition.width {
+                column.width = configuredColumnWidth(for: definition)
+            }
+        }
+        applyColumnOrder(nextIDs)
+        reloadVisibleCellPresentation(at: [], reloadAllVisibleCells: true)
+        return true
+    }
+
+    private func configuredColumnWidth(
+        for definition: ColumnDefinition
+    ) -> CGFloat {
+        definition.width.map { CGFloat($0) }
+            ?? NativeColumnCatalog.descriptor(
+                source: definition.source,
+                value: definition.value ?? definition.id
+            ).map { CGFloat($0.width) }
+            ?? 120
     }
 
     private var installedColumnDefinitions: [ColumnDefinition] {
