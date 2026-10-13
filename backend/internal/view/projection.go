@@ -1201,32 +1201,42 @@ func podStatusText(object *unstructured.Unstructured) string {
 	}
 
 	// Init containers take precedence over the ordinary phase, matching the
-	// useful diagnostic state shown by k9s without converting the whole object.
-	initStatuses := nestedSliceNoCopy(object.Object, "status", "initContainerStatuses")
-	initCount := len(nestedSliceNoCopy(object.Object, "spec", "initContainers"))
-	for index, raw := range initStatuses {
-		status, ok := raw.(map[string]any)
-		if !ok {
-			continue
-		}
-		state, _ := nestedAnyMap(status, "state")
-		if waiting, ok := nestedAnyMap(state, "waiting"); ok {
-			if reason, _ := waiting["reason"].(string); reason != "" && reason != "PodInitializing" {
-				return "Init:" + reason
+	// useful diagnostic state shown by kubectl. Restartable init containers
+	// (native sidecars, spec restartPolicy Always) never terminate: once one
+	// has started it no longer blocks initialization, and once the pod reports
+	// Initialized the main containers own the status even if a sidecar
+	// restarts afterwards.
+	if !podInitializedConditionTrue(object.Object) {
+		initContainers := nestedSliceNoCopy(object.Object, "spec", "initContainers")
+		initCount := len(initContainers)
+		for index, raw := range nestedSliceNoCopy(object.Object, "status", "initContainerStatuses") {
+			status, ok := raw.(map[string]any)
+			if !ok {
+				continue
 			}
-		}
-		if terminated, ok := nestedAnyMap(state, "terminated"); ok {
-			exitCode := nestedInt64Value(terminated["exitCode"])
-			if exitCode != 0 {
-				if reason, _ := terminated["reason"].(string); reason != "" {
+			state, _ := nestedAnyMap(status, "state")
+			if waiting, ok := nestedAnyMap(state, "waiting"); ok {
+				if reason, _ := waiting["reason"].(string); reason != "" && reason != "PodInitializing" {
 					return "Init:" + reason
 				}
-				return fmt.Sprintf("Init:ExitCode:%d", exitCode)
 			}
-			continue
-		}
-		if initCount > 0 {
-			return fmt.Sprintf("Init:%d/%d", index, initCount)
+			if terminated, ok := nestedAnyMap(state, "terminated"); ok {
+				exitCode := nestedInt64Value(terminated["exitCode"])
+				if exitCode != 0 {
+					if reason, _ := terminated["reason"].(string); reason != "" {
+						return "Init:" + reason
+					}
+					return fmt.Sprintf("Init:ExitCode:%d", exitCode)
+				}
+				continue
+			}
+			name, _ := status["name"].(string)
+			if started, _ := status["started"].(bool); started && initContainerIsSidecar(initContainers, name) {
+				continue
+			}
+			if initCount > 0 {
+				return fmt.Sprintf("Init:%d/%d", index, initCount)
+			}
 		}
 	}
 
@@ -1349,6 +1359,43 @@ func podStatusIsPending(status string) bool {
 		strings.Contains(status, "imagepull")
 }
 
+// podInitializedConditionTrue reports whether status.conditions marks the pod
+// as Initialized. It is the gate kubectl uses to hand status ownership back to
+// the main containers, so a sidecar restarting after initialization does not
+// regress the status to Init:.
+func podInitializedConditionTrue(object map[string]any) bool {
+	for _, raw := range nestedSliceNoCopy(object, "status", "conditions") {
+		condition, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if conditionType, _ := condition["type"].(string); conditionType != "Initialized" {
+			continue
+		}
+		value, _ := condition["status"].(string)
+		return value == "True"
+	}
+	return false
+}
+
+// initContainerIsSidecar reports whether the init container with the given
+// name is restartable (a native sidecar, spec restartPolicy Always), which
+// keeps running for the pod's whole lifetime instead of terminating.
+func initContainerIsSidecar(initContainers []any, name string) bool {
+	for _, raw := range initContainers {
+		container, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if containerName, _ := container["name"].(string); containerName != name {
+			continue
+		}
+		restartPolicy, _ := container["restartPolicy"].(string)
+		return restartPolicy == "Always"
+	}
+	return false
+}
+
 func nodeRoles(object *unstructured.Unstructured) []string {
 	const prefix = "node-role.kubernetes.io/"
 	roles := make([]string, 0)
@@ -1374,29 +1421,53 @@ func readyContainers(object *unstructured.Unstructured) (ready, total int) {
 			ready++
 		}
 	}
-	if total == 0 {
-		containers := nestedSliceNoCopy(object.Object, "spec", "containers")
-		total = len(containers)
+	// Restartable init containers (native sidecars) count toward readiness
+	// for the pod's whole lifetime, matching kubectl's READY column.
+	initContainers := nestedSliceNoCopy(object.Object, "spec", "initContainers")
+	for _, raw := range nestedSliceNoCopy(object.Object, "status", "initContainerStatuses") {
+		status, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		name, _ := status["name"].(string)
+		if !initContainerIsSidecar(initContainers, name) {
+			continue
+		}
+		total++
+		if value, ok := status["ready"].(bool); ok && value {
+			ready++
+		}
+	}
+	if len(statuses) == 0 {
+		total += len(nestedSliceNoCopy(object.Object, "spec", "containers"))
 	}
 	return ready, total
 }
 
 func restartCount(object *unstructured.Unstructured) int64 {
-	statuses := nestedSliceNoCopy(object.Object, "status", "containerStatuses")
+	// While the pod initializes, every init container's restarts count; once
+	// initialized, only restartable init containers (sidecars) stay relevant,
+	// matching kubectl's RESTARTS column.
+	initialized := podInitializedConditionTrue(object.Object)
+	initContainers := nestedSliceNoCopy(object.Object, "spec", "initContainers")
 	var result int64
-	for _, raw := range statuses {
+	for _, raw := range nestedSliceNoCopy(object.Object, "status", "initContainerStatuses") {
 		status, ok := raw.(map[string]any)
 		if !ok {
 			continue
 		}
-		switch value := status["restartCount"].(type) {
-		case int64:
-			result += value
-		case int32:
-			result += int64(value)
-		case float64:
-			result += int64(value)
+		name, _ := status["name"].(string)
+		if initialized && !initContainerIsSidecar(initContainers, name) {
+			continue
 		}
+		result += nestedInt64Value(status["restartCount"])
+	}
+	for _, raw := range nestedSliceNoCopy(object.Object, "status", "containerStatuses") {
+		status, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		result += nestedInt64Value(status["restartCount"])
 	}
 	return result
 }

@@ -537,6 +537,199 @@ func TestPodStatusPaletteSeparatesCompletedTerminatingAndFailureStates(t *testin
 	}
 }
 
+func TestPodColumnsTreatStartedSidecarsAsRunning(t *testing.T) {
+	t.Parallel()
+	projector, err := NewProjector(ProjectionSpec{
+		ClusterSessionID: "session-a",
+		Resource: ResourceType{
+			Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true,
+		},
+		NamespaceScope: NamespaceScope{All: true},
+		ColumnIDs:      []string{"status", "ready", "restarts"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sidecarPod := func(initialized bool) *unstructured.Unstructured {
+		value := pod("uid-sidecars", "ns", "sidecars", "Running", 0, nil, time.Time{})
+		value.Object["spec"].(map[string]any)["initContainers"] = []any{
+			map[string]any{"name": "jfs-mount", "restartPolicy": "Always"},
+			map[string]any{"name": "jfs-mount-jit", "restartPolicy": "Always"},
+		}
+		status := value.Object["status"].(map[string]any)
+		status["initContainerStatuses"] = []any{
+			map[string]any{
+				"name": "jfs-mount", "ready": true, "started": true,
+				"restartCount": 2,
+				"state":        map[string]any{"running": map[string]any{}},
+			},
+			map[string]any{
+				"name": "jfs-mount-jit", "ready": true, "started": true,
+				"restartCount": 1,
+				"state":        map[string]any{"running": map[string]any{}},
+			},
+		}
+		if initialized {
+			status["conditions"] = []any{map[string]any{
+				"type": "Initialized", "status": "True",
+			}}
+		}
+		return value
+	}
+	tests := []struct {
+		name         string
+		value        *unstructured.Unstructured
+		wantStatus   string
+		wantSeverity kmgrv1.CellSeverity
+		wantReady    string
+		wantRestarts int64
+	}{
+		{
+			name: "started sidecars report the phase", value: sidecarPod(false),
+			wantStatus: "Running", wantSeverity: kmgrv1.CellSeverity_CELL_SEVERITY_NORMAL,
+			wantReady: "3 / 3", wantRestarts: 3,
+		},
+		{
+			name: "initialized pod ignores sidecar state", value: sidecarPod(true),
+			wantStatus: "Running", wantSeverity: kmgrv1.CellSeverity_CELL_SEVERITY_NORMAL,
+			wantReady: "3 / 3", wantRestarts: 3,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			row, visible := projector.ProjectOne(test.value)
+			if !visible {
+				t.Fatal("Pod row was unexpectedly hidden")
+			}
+			if status := cellByID(row, "status"); status.GetDisplayText() != test.wantStatus ||
+				status.GetSeverity() != test.wantSeverity {
+				t.Fatalf("status cell = %#v, want %q/%v", status, test.wantStatus, test.wantSeverity)
+			}
+			if ready := cellByID(row, "ready"); ready.GetDisplayText() != test.wantReady {
+				t.Fatalf("ready cell = %#v, want %q", ready, test.wantReady)
+			}
+			if restarts := cellByID(row, "restarts"); restarts.GetIntegerValue() != test.wantRestarts {
+				t.Fatalf("restarts cell = %#v, want %d", restarts, test.wantRestarts)
+			}
+		})
+	}
+}
+
+func TestPodStatusKeepsInitProgressForNonSidecarInitContainers(t *testing.T) {
+	t.Parallel()
+	projector, err := NewProjector(ProjectionSpec{
+		ClusterSessionID: "session-a",
+		Resource: ResourceType{
+			Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true,
+		},
+		NamespaceScope: NamespaceScope{All: true},
+		ColumnIDs:      []string{"status", "ready", "restarts"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	initPod := func(secondState map[string]any) *unstructured.Unstructured {
+		value := pod("uid-init", "ns", "init", "Pending", 0, nil, time.Time{})
+		value.Object["spec"].(map[string]any)["initContainers"] = []any{
+			map[string]any{"name": "setup"},
+			map[string]any{"name": "migrate"},
+		}
+		value.Object["status"].(map[string]any)["initContainerStatuses"] = []any{
+			map[string]any{
+				"name": "setup", "ready": true, "restartCount": 1,
+				"state": map[string]any{"terminated": map[string]any{"exitCode": 0}},
+			},
+			map[string]any{
+				"name": "migrate", "ready": false, "restartCount": 0,
+				"state": secondState,
+			},
+		}
+		return value
+	}
+	tests := []struct {
+		name         string
+		value        *unstructured.Unstructured
+		wantStatus   string
+		wantSeverity kmgrv1.CellSeverity
+		wantRestarts int64
+	}{
+		{
+			name: "second init container still running", value: initPod(map[string]any{
+				"running": map[string]any{},
+			}),
+			wantStatus: "Init:1/2", wantSeverity: kmgrv1.CellSeverity_CELL_SEVERITY_INFO,
+			wantRestarts: 1,
+		},
+		{
+			name: "second init container failed", value: initPod(map[string]any{
+				"terminated": map[string]any{"exitCode": 1, "reason": "Error"},
+			}),
+			wantStatus: "Init:Error", wantSeverity: kmgrv1.CellSeverity_CELL_SEVERITY_ERROR,
+			wantRestarts: 1,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			row, visible := projector.ProjectOne(test.value)
+			if !visible {
+				t.Fatal("Pod row was unexpectedly hidden")
+			}
+			if status := cellByID(row, "status"); status.GetDisplayText() != test.wantStatus ||
+				status.GetSeverity() != test.wantSeverity {
+				t.Fatalf("status cell = %#v, want %q/%v", status, test.wantStatus, test.wantSeverity)
+			}
+			if restarts := cellByID(row, "restarts"); restarts.GetIntegerValue() != test.wantRestarts {
+				t.Fatalf("restarts cell = %#v, want %d", restarts, test.wantRestarts)
+			}
+		})
+	}
+}
+
+func TestPodInitializedHandsRestartsToSidecarsAndMainContainers(t *testing.T) {
+	t.Parallel()
+	projector, err := NewProjector(ProjectionSpec{
+		ClusterSessionID: "session-a",
+		Resource: ResourceType{
+			Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true,
+		},
+		NamespaceScope: NamespaceScope{All: true},
+		ColumnIDs:      []string{"restarts"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	initializedPod := func() *unstructured.Unstructured {
+		value := pod("uid-initialized", "ns", "initialized", "Running", 4, nil, time.Time{})
+		value.Object["spec"].(map[string]any)["initContainers"] = []any{
+			map[string]any{"name": "setup"},
+			map[string]any{"name": "jfs-mount", "restartPolicy": "Always"},
+		}
+		value.Object["status"].(map[string]any)["initContainerStatuses"] = []any{
+			map[string]any{
+				"name": "setup", "restartCount": 2,
+				"state": map[string]any{"terminated": map[string]any{"exitCode": 0}},
+			},
+			map[string]any{
+				"name": "jfs-mount", "restartCount": 3, "ready": true, "started": true,
+				"state": map[string]any{"running": map[string]any{}},
+			},
+		}
+		value.Object["status"].(map[string]any)["conditions"] = []any{map[string]any{
+			"type": "Initialized", "status": "True",
+		}}
+		return value
+	}
+	row, visible := projector.ProjectOne(initializedPod())
+	if !visible {
+		t.Fatal("Pod row was unexpectedly hidden")
+	}
+	// Historical regular-init restarts stop counting once initialized; sidecar
+	// and main restarts keep counting, matching kubectl.
+	if restarts := cellByID(row, "restarts"); restarts.GetIntegerValue() != 7 {
+		t.Fatalf("restarts cell = %#v, want 7", restarts)
+	}
+}
+
 func TestProjectorProjectsCuratedWorkloadCounts(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
